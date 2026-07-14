@@ -22,12 +22,52 @@ constexpr uint8_t kMaxDecoded = 64u;
 constexpr uint8_t kMaxWire = 66u;
 constexpr uint8_t kTxSlots = 8u;
 constexpr uint8_t kRxRingSize = 128u;
+constexpr uint8_t kSync0 = 0xA5u;
+constexpr uint8_t kSync1 = 0x5Au;
+constexpr uint8_t kHeaderSize = 5u;
+constexpr uint8_t kCrcSize = 2u;
+static_assert((kTxSlots & (kTxSlots - 1u)) == 0u, "TX ring must be power of two");
+static_assert((kRxRingSize & (kRxRingSize - 1u)) == 0u, "RX ring must be power of two");
 
 struct TxSlot
 {
     uint8_t length;
     uint8_t data[kMaxWire];
 };
+
+struct FullStatusRecord
+{
+    uint8_t type;
+    uint8_t data[16];
+};
+
+struct StatusCache
+{
+    uint8_t slot;
+    uint8_t inserted_mask;
+    uint8_t online_mask;
+    uint8_t motion[4];
+    uint8_t pull_pct[4];
+    uint16_t pressure;
+    uint8_t led_mode;
+    uint8_t control_error;
+};
+
+struct PrinterBusCache
+{
+    uint32_t last_valid_tick;
+    uint16_t valid_rx_count;
+    uint16_t invalid_rx_count;
+    uint16_t tx_count;
+    uint16_t tx_drop_count;
+    uint8_t online;
+    uint8_t last_rx_class;
+    uint8_t last_command;
+    uint8_t last_outcome;
+};
+
+constexpr uint8_t kMaxFullStatusRecords = 7u;
+constexpr uint8_t kEventSlots = 8u;
 
 TxSlot g_tx[kTxSlots];
 uint8_t g_tx_read = 0u;
@@ -42,16 +82,33 @@ volatile uint8_t g_rx_write = 0u;
 volatile uint32_t g_rx_drop = 0u;
 uint32_t g_rx_crc_error = 0u;
 uint32_t g_rx_frame_error = 0u;
-uint8_t g_rx_frame[kMaxWire];
+uint8_t g_rx_frame[kMaxDecoded];
 uint8_t g_rx_frame_length = 0u;
-uint8_t g_rx_discard = 0u;
+uint8_t g_rx_expected_length = 0u;
+uint8_t g_rx_sync_state = 0u;
 
 uint32_t g_last_led_tick = 0u;
-volatile uint32_t g_status_dirty = 0u;
+uint32_t g_status_dirty = 0u;
 uint8_t g_led_mode = 0u;
 uint16_t g_led_remaining_s = 0u;
 uint8_t g_led_restore_pending = 0u;
 int g_control_error = 0;
+
+FullStatusRecord g_full_records[kMaxFullStatusRecords];
+uint16_t g_full_snapshot_id = 0u;
+uint16_t g_full_sequence = 0u;
+uint32_t g_full_tick = 0u;
+uint8_t g_full_record_count = 0u;
+uint8_t g_full_record_next = 0u;
+uint8_t g_full_active = 0u;
+
+StatusCache g_status_cache = {};
+PrinterBusCache g_printer_bus = {};
+uint8_t g_status_cache_valid = 0u;
+LogRecord g_events[kEventSlots];
+uint8_t g_event_read = 0u;
+uint8_t g_event_write = 0u;
+uint32_t g_event_drop = 0u;
 
 enum LinkDiag : uint8_t
 {
@@ -81,58 +138,6 @@ uint16_t crc16(const uint8_t* data, uint8_t length)
     return crc;
 }
 
-uint8_t cobs_encode(const uint8_t* input, uint8_t length, uint8_t* output)
-{
-    uint8_t code_index = 0u;
-    uint8_t write_index = 1u;
-    uint8_t code = 1u;
-    output[0] = 0u;
-
-    while (length--)
-    {
-        const uint8_t value = *input++;
-        if (value == 0u)
-        {
-            output[code_index] = code;
-            code_index = write_index++;
-            code = 1u;
-        }
-        else
-        {
-            output[write_index++] = value;
-            if (++code == 0xFFu)
-            {
-                output[code_index] = code;
-                code_index = write_index++;
-                code = 1u;
-            }
-        }
-    }
-    output[code_index] = code;
-    return write_index;
-}
-
-uint8_t cobs_decode(const uint8_t* input, uint8_t length, uint8_t* output)
-{
-    uint8_t read_index = 0u;
-    uint8_t write_index = 0u;
-    while (read_index < length)
-    {
-        const uint8_t code = input[read_index++];
-        if (code == 0u) return 0u;
-        const uint8_t copy = static_cast<uint8_t>(code - 1u);
-        if (static_cast<uint16_t>(read_index) + copy > length) return 0u;
-        if (static_cast<uint16_t>(write_index) + copy > kMaxDecoded) return 0u;
-        for (uint8_t i = 0u; i < copy; ++i) output[write_index++] = input[read_index++];
-        if (code != 0xFFu && read_index < length)
-        {
-            if (write_index >= kMaxDecoded) return 0u;
-            output[write_index++] = 0u;
-        }
-    }
-    return write_index;
-}
-
 void tx_start_if_idle()
 {
     if (g_tx_active || g_tx_read == g_tx_write) return;
@@ -156,7 +161,7 @@ void tx_finish_if_complete()
     DMA_Cmd(DMA1_Channel2, DISABLE);
     DMA_ClearFlag(DMA1_FLAG_TC2 | DMA1_FLAG_GL2);
     g_tx_active = 0u;
-    g_tx_read = static_cast<uint8_t>((g_tx_read + 1u) % kTxSlots);
+    g_tx_read = static_cast<uint8_t>((g_tx_read + 1u) & (kTxSlots - 1u));
     g_link_diag = kDiagTxOk;
     g_diag_until_tick = time_ticks32() + time_hw_tpms * 5000u;
     tx_start_if_idle();
@@ -180,38 +185,57 @@ void tx_fail_if_needed(uint32_t now)
     g_link_diag = kDiagTxTimeout;
 }
 
-bool enqueue(uint8_t kind, uint16_t sequence, const uint8_t* payload, uint8_t payload_length)
+bool tx_has_capacity(uint8_t reserved_slots)
+{
+    const uint8_t used = static_cast<uint8_t>((g_tx_write - g_tx_read) & (kTxSlots - 1u));
+    return used < static_cast<uint8_t>((kTxSlots - 1u) - reserved_slots);
+}
+
+uint8_t* reserve_payload(uint8_t kind, uint16_t sequence, uint8_t payload_length)
 {
     if (g_tx_fault)
     {
         ++g_tx_drop;
-        return false;
+        return nullptr;
     }
-    if (payload_length > static_cast<uint8_t>(kMaxDecoded - 7u)) return false;
-    const uint8_t next = static_cast<uint8_t>((g_tx_write + 1u) % kTxSlots);
+    if (payload_length > static_cast<uint8_t>(kMaxDecoded - kHeaderSize - kCrcSize))
+        return nullptr;
+    const uint8_t next = static_cast<uint8_t>((g_tx_write + 1u) & (kTxSlots - 1u));
     if (next == g_tx_read)
     {
         ++g_tx_drop;
-        return false;
+        return nullptr;
     }
 
-    uint8_t raw[kMaxDecoded];
-    raw[0] = VERSION;
-    raw[1] = kind;
-    raw[2] = static_cast<uint8_t>(sequence);
-    raw[3] = static_cast<uint8_t>(sequence >> 8);
-    raw[4] = payload_length;
-    for (uint8_t i = 0u; i < payload_length; ++i) raw[5u + i] = payload[i];
-    const uint8_t crc_length = static_cast<uint8_t>(5u + payload_length);
-    const uint16_t crc = crc16(raw, crc_length);
-    raw[crc_length] = static_cast<uint8_t>(crc);
-    raw[crc_length + 1u] = static_cast<uint8_t>(crc >> 8);
-
     TxSlot& slot = g_tx[g_tx_write];
-    slot.length = cobs_encode(raw, static_cast<uint8_t>(crc_length + 2u), slot.data);
-    slot.data[slot.length++] = 0u;
-    g_tx_write = next;
+    slot.data[0] = kSync0;
+    slot.data[1] = kSync1;
+    slot.data[2] = VERSION;
+    slot.data[3] = kind;
+    slot.data[4] = static_cast<uint8_t>(sequence);
+    slot.data[5] = static_cast<uint8_t>(sequence >> 8);
+    slot.data[6] = payload_length;
+    return &slot.data[7];
+}
+
+void commit_payload(uint8_t payload_length)
+{
+    TxSlot& slot = g_tx[g_tx_write];
+    const uint8_t crc_length = static_cast<uint8_t>(kHeaderSize + payload_length);
+    const uint16_t crc = crc16(&slot.data[2], crc_length);
+    slot.data[7u + payload_length] = static_cast<uint8_t>(crc);
+    slot.data[8u + payload_length] = static_cast<uint8_t>(crc >> 8);
+    slot.length = static_cast<uint8_t>(payload_length + 9u);
+    g_tx_write = static_cast<uint8_t>((g_tx_write + 1u) & (kTxSlots - 1u));
     tx_start_if_idle();
+}
+
+bool enqueue(uint8_t kind, uint16_t sequence, const uint8_t* payload, uint8_t payload_length)
+{
+    uint8_t* output = reserve_payload(kind, sequence, payload_length);
+    if (output == nullptr) return false;
+    for (uint8_t i = 0u; i < payload_length; ++i) output[i] = payload[i];
+    commit_payload(payload_length);
     return true;
 }
 
@@ -231,80 +255,304 @@ void put32(uint8_t* output, uint32_t value)
 
 void send_hello()
 {
-    uint8_t payload[9];
+    uint8_t* payload = reserve_payload(KIND_HELLO, g_sequence, 9u);
+    if (payload == nullptr) return;
     payload[0] = VERSION;
-    put16(&payload[1], CAP_STATUS_EVENTS | CAP_LED_OVERRIDE | CAP_PING_PONG | CAP_RAW_HW_TICK);
+    put16(&payload[1], CAP_STATUS_EVENTS | CAP_LED_OVERRIDE | CAP_PING_PONG |
+                          CAP_RAW_HW_TICK | CAP_FULL_STATUS);
     payload[3] = 1u;
     payload[4] = 1u;
     put32(&payload[5], time_hw_tpus * 1000000u);
-    enqueue(KIND_HELLO, g_sequence++, payload, sizeof(payload));
+    commit_payload(9u);
+    ++g_sequence;
 }
 
-void build_status_payload(uint8_t payload[27])
+void push_log_record(const LogRecord& record)
+{
+    const uint8_t next = static_cast<uint8_t>((g_event_write + 1u) & (kEventSlots - 1u));
+    if (next == g_event_read)
+        ++g_event_drop;
+    else
+    {
+        g_events[g_event_write] = record;
+        g_event_write = next;
+    }
+}
+
+void push_state_event(StateField field, uint8_t slot, uint16_t previous_value, uint16_t value,
+                      RecordSource source, RecordSeverity severity)
+{
+    if (previous_value == value) return;
+    LogRecord record = {};
+    record.header.hw_tick32 = time_ticks32();
+    record.header.type = RECORD_STATE_CHANGE;
+    record.header.severity = severity;
+    record.header.source = source;
+    record.header.payload_length = sizeof(LogStateChangePayload);
+    record.payload.state_change.field = static_cast<uint8_t>(field);
+    record.payload.state_change.slot = slot;
+    record.payload.state_change.previous_value = previous_value;
+    record.payload.state_change.value = value;
+
+    push_log_record(record);
+}
+
+uint8_t inserted_mask()
+{
+    uint8_t value = 0u;
+    for (uint8_t ch = 0u; ch < 4u; ++ch)
+        if (filament_channel_inserted[ch]) value |= static_cast<uint8_t>(1u << ch);
+    return value;
+}
+
+uint8_t online_mask(const _ams& state)
+{
+    uint8_t value = 0u;
+    for (uint8_t ch = 0u; ch < 4u; ++ch)
+        if (state.filament[ch].online) value |= static_cast<uint8_t>(1u << ch);
+    return value;
+}
+
+void set_cached_u8(uint8_t& cached, uint8_t value, StateField field, uint8_t slot,
+                   RecordSource source, RecordSeverity severity, bool emit)
+{
+    const uint8_t previous = cached;
+    cached = value;
+    if (emit) push_state_event(field, slot, previous, value, source, severity);
+}
+
+void set_cached_u16(uint16_t& cached, uint16_t value, StateField field,
+                    RecordSource source, RecordSeverity severity, bool emit)
+{
+    const uint16_t previous = cached;
+    cached = value;
+    if (emit) push_state_event(field, 0xFFu, previous, value, source, severity);
+}
+
+void apply_status_changes(uint32_t reasons, bool emit_events)
 {
     const _ams& state = ams[BAMBU_BUS_AMS_NUM];
+    const bool emit = emit_events && g_status_cache_valid;
+    const bool all = reasons == BMCU_STATUS_CHANGE_ALL;
+
+    if (all || (reasons & BMCU_STATUS_CHANGE_SLOT))
+        set_cached_u8(g_status_cache.slot, state.now_filament_num, STATE_FIELD_SLOT, 0xFFu,
+                      SOURCE_MOTION, SEVERITY_INFO, emit);
+    if (all || (reasons & BMCU_STATUS_CHANGE_INSERTED))
+        set_cached_u8(g_status_cache.inserted_mask, inserted_mask(), STATE_FIELD_INSERTED_MASK,
+                      0xFFu, SOURCE_SENSOR, SEVERITY_NOTICE, emit);
+    if (all || (reasons & BMCU_STATUS_CHANGE_ONLINE))
+        set_cached_u8(g_status_cache.online_mask, online_mask(state), STATE_FIELD_ONLINE_MASK,
+                      0xFFu, SOURCE_SENSOR, SEVERITY_NOTICE, emit);
+    if (all || (reasons & BMCU_STATUS_CHANGE_MOTION))
+    {
+        for (uint8_t ch = 0u; ch < 4u; ++ch)
+            set_cached_u8(g_status_cache.motion[ch],
+                          static_cast<uint8_t>(state.filament[ch].motion),
+                          STATE_FIELD_MOTION, ch, SOURCE_MOTION, SEVERITY_INFO, emit);
+    }
+    if (all || (reasons & BMCU_STATUS_CHANGE_PRESSURE))
+        set_cached_u16(g_status_cache.pressure, state.pressure, STATE_FIELD_PRESSURE,
+                       SOURCE_SENSOR, SEVERITY_INFO, emit);
+    if (all || (reasons & BMCU_STATUS_CHANGE_LED))
+        set_cached_u8(g_status_cache.led_mode, g_led_mode, STATE_FIELD_LED_MODE, 0xFFu,
+                      SOURCE_MANAGEMENT, SEVERITY_INFO, emit);
+    if (all || (reasons & BMCU_STATUS_CHANGE_ERROR))
+        set_cached_u8(g_status_cache.control_error, g_control_error ? 1u : 0u,
+                      STATE_FIELD_CONTROL_ERROR, 0xFFu, SOURCE_SAFETY,
+                      g_control_error ? SEVERITY_ERROR : SEVERITY_NOTICE, emit);
+
+    for (uint8_t ch = 0u; ch < 4u; ++ch) g_status_cache.pull_pct[ch] = MC_PULL_pct[ch];
+    g_status_cache_valid = 1u;
+}
+void build_status_payload(uint8_t payload[27])
+{
+    if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
     put32(&payload[0], time_ticks32());
     put16(&payload[4], static_cast<uint16_t>(g_tx_drop));
     put16(&payload[6], static_cast<uint16_t>(g_rx_drop));
     put16(&payload[8], static_cast<uint16_t>(g_rx_crc_error));
     put16(&payload[10], static_cast<uint16_t>(g_rx_frame_error));
-    payload[12] = state.now_filament_num;
-    payload[13] = 0u;
-    payload[14] = 0u;
+    payload[12] = g_status_cache.slot;
+    payload[13] = g_status_cache.inserted_mask;
+    payload[14] = g_status_cache.online_mask;
     for (uint8_t ch = 0u; ch < 4u; ++ch)
     {
-        if (filament_channel_inserted[ch]) payload[13] |= static_cast<uint8_t>(1u << ch);
-        if (state.filament[ch].online) payload[14] |= static_cast<uint8_t>(1u << ch);
-        payload[15u + ch] = static_cast<uint8_t>(state.filament[ch].motion);
-        payload[19u + ch] = MC_PULL_pct[ch];
+        payload[15u + ch] = g_status_cache.motion[ch];
+        payload[19u + ch] = g_status_cache.pull_pct[ch];
     }
-    put16(&payload[23], state.pressure);
-    payload[25] = g_led_mode;
-    payload[26] = g_control_error ? 1u : 0u;
+    put16(&payload[23], g_status_cache.pressure);
+    payload[25] = g_status_cache.led_mode;
+    payload[26] = g_status_cache.control_error;
+}
+
+FullStatusRecord& append_full_record(uint8_t type)
+{
+    FullStatusRecord& record = g_full_records[g_full_record_count++];
+    record.type = type;
+    return record;
+}
+
+void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t sequence)
+{
+    apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
+    const _ams& state = ams[BAMBU_BUS_AMS_NUM];
+    g_full_record_count = 0u;
+    g_full_record_next = 0u;
+    g_full_sequence = sequence;
+    g_full_tick = time_ticks32();
+    ++g_full_snapshot_id;
+
+    if (section_mask & FULL_SECTION_GLOBAL)
+    {
+        FullStatusRecord& record = append_full_record(FULL_RECORD_GLOBAL);
+        record.data[0] = g_status_cache.slot;
+        record.data[1] = g_status_cache.inserted_mask;
+        record.data[2] = g_status_cache.online_mask;
+        record.data[3] = g_status_cache.control_error;
+        for (uint8_t ch = 0u; ch < 4u; ++ch)
+        {
+            record.data[4u + ch] = g_status_cache.motion[ch];
+            record.data[8u + ch] = g_status_cache.pull_pct[ch];
+        }
+        put16(&record.data[12], g_status_cache.pressure);
+        record.data[14] = g_status_cache.led_mode;
+        record.data[15] = 0u;
+    }
+
+    if (section_mask & FULL_SECTION_CHANNELS)
+    {
+        for (uint8_t ch = 0u; ch < 4u; ++ch)
+        {
+            if ((channel_mask & static_cast<uint8_t>(1u << ch)) == 0u) continue;
+            FullStatusRecord& record = append_full_record(FULL_RECORD_CHANNEL);
+            record.data[0] = ch;
+            record.data[1] = static_cast<uint8_t>(state.filament[ch].motion);
+            record.data[2] = filament_channel_inserted[ch] ? 1u : 0u;
+            record.data[3] = state.filament[ch].online ? 1u : 0u;
+            record.data[4] = MC_PULL_pct[ch];
+            MotionControlChannelTelemetry telemetry = {};
+            const bool have_telemetry = Motion_control_get_channel_telemetry(ch, &telemetry);
+            if (!have_telemetry) record.data[5] = SENSOR_UNKNOWN;
+            else if (telemetry.sensor_good) record.data[5] = SENSOR_VALID;
+            else if (telemetry.sensor_online) record.data[5] = SENSOR_FAULT;
+            else record.data[5] = SENSOR_OFFLINE;
+            uint16_t flags = 0u;
+            if (filament_channel_inserted[ch]) flags |= 1u << 0;
+            if (state.filament[ch].online) flags |= 1u << 1;
+            if (telemetry.sensor_online) flags |= 1u << 2;
+            if (telemetry.sensor_good) flags |= 1u << 3;
+            if (telemetry.motion_fault != MOTION_FAULT_NONE) flags |= 1u << 4;
+            put16(&record.data[6], flags);
+            put16(&record.data[8], telemetry.raw_angle);
+            put16(&record.data[10], static_cast<uint16_t>(telemetry.position_delta));
+            put16(&record.data[12], static_cast<uint16_t>(telemetry.motor_pwm));
+            record.data[14] = telemetry.motion_fault;
+            record.data[15] = 0u;
+        }
+    }
+
+    if (section_mask & FULL_SECTION_PRINTER_BUS)
+    {
+        FullStatusRecord& record = append_full_record(FULL_RECORD_PRINTER_BUS);
+        record.data[0] = g_printer_bus.online;
+        record.data[1] = g_printer_bus.last_rx_class;
+        record.data[2] = g_printer_bus.last_command;
+        record.data[3] = g_printer_bus.last_outcome;
+        put16(&record.data[4], g_printer_bus.valid_rx_count);
+        put16(&record.data[6], g_printer_bus.invalid_rx_count);
+        put16(&record.data[8], g_printer_bus.tx_count);
+        put16(&record.data[10], g_printer_bus.tx_drop_count);
+        const uint32_t age = g_printer_bus.valid_rx_count == 0u
+            ? 0xFFFFFFFFu : static_cast<uint32_t>(g_full_tick - g_printer_bus.last_valid_tick);
+        put32(&record.data[12], age);
+    }
+
+    if (section_mask & FULL_SECTION_COUNTERS)
+    {
+        FullStatusRecord& record = append_full_record(FULL_RECORD_COUNTERS);
+        put32(&record.data[0], g_tx_drop + g_event_drop);
+        put32(&record.data[4], g_rx_drop);
+        put32(&record.data[8], g_rx_crc_error);
+        put32(&record.data[12], g_rx_frame_error);
+    }
+
+    g_full_active = g_full_record_count != 0u ? 1u : 0u;
+}
+
+bool send_next_full_status_record()
+{
+    if (!g_full_active || !tx_has_capacity(1u)) return false;
+
+    const FullStatusRecord& record = g_full_records[g_full_record_next];
+    uint8_t* payload = reserve_payload(KIND_FULL_STATUS_RECORD, g_full_sequence, 26u);
+    if (payload == nullptr) return false;
+    put16(&payload[0], g_full_snapshot_id);
+    payload[2] = g_full_record_next;
+    payload[3] = g_full_record_count;
+    payload[4] = record.type;
+    payload[5] = 0u;
+    put32(&payload[6], g_full_tick);
+    for (uint8_t i = 0u; i < 16u; ++i) payload[10u + i] = record.data[i];
+
+    commit_payload(26u);
+    if (++g_full_record_next >= g_full_record_count) g_full_active = 0u;
+    return true;
 }
 
 uint32_t take_status_changes()
 {
-    const uint32_t irq = irq_save_wch();
     const uint32_t pending = g_status_dirty;
     g_status_dirty = 0u;
-    irq_restore_wch(irq);
     return pending;
 }
 
 void restore_status_changes(uint32_t reasons)
 {
-    if (reasons == 0u) return;
-    const uint32_t irq = irq_save_wch();
     g_status_dirty |= reasons;
-    irq_restore_wch(irq);
 }
 
 bool send_status(uint16_t sequence)
 {
-    uint8_t payload[27];
+    if (!tx_has_capacity(0u)) return false;
+    uint8_t* payload = reserve_payload(KIND_STATUS, sequence, 27u);
+    if (payload == nullptr) return false;
     build_status_payload(payload);
-    return enqueue(KIND_STATUS, sequence, payload, sizeof(payload));
+    commit_payload(27u);
+    return true;
+}
+
+bool send_next_event()
+{
+    if (g_event_read == g_event_write || !tx_has_capacity(0u)) return false;
+    const LogRecord& record = g_events[g_event_read];
+    const uint8_t* payload = reinterpret_cast<const uint8_t*>(&record);
+    if (!enqueue(KIND_EVENT, g_sequence, payload, sizeof(LogRecord))) return false;
+    ++g_sequence;
+    g_event_read = static_cast<uint8_t>((g_event_read + 1u) & (kEventSlots - 1u));
+    return true;
 }
 
 void send_ack(uint16_t sequence, uint8_t request_kind, AckResult result)
 {
-    const uint8_t payload[2] = {request_kind, static_cast<uint8_t>(result)};
-    enqueue(KIND_ACK, sequence, payload, sizeof(payload));
+    uint8_t* payload = reserve_payload(KIND_ACK, sequence, 2u);
+    if (payload == nullptr) return;
+    payload[0] = request_kind;
+    payload[1] = static_cast<uint8_t>(result);
+    commit_payload(2u);
 }
 
 void send_pong(uint16_t sequence, const uint8_t token[4])
 {
-    uint8_t payload[8];
+    uint8_t* payload = reserve_payload(KIND_PONG, sequence, 8u);
+    if (payload == nullptr) return;
     for (uint8_t i = 0u; i < 4u; ++i) payload[i] = token[i];
     put32(&payload[4], time_ticks32());
-    enqueue(KIND_PONG, sequence, payload, sizeof(payload));
+    commit_payload(8u);
 }
 
-void handle_frame(const uint8_t* encoded, uint8_t encoded_length)
+void handle_frame(const uint8_t* raw, uint8_t length)
 {
-    uint8_t raw[kMaxDecoded];
-    const uint8_t length = cobs_decode(encoded, encoded_length, raw);
     if (length < 7u)
     {
         ++g_rx_frame_error;
@@ -324,7 +572,6 @@ void handle_frame(const uint8_t* encoded, uint8_t encoded_length)
         return;
     }
 
-    // A fully decoded, CRC-valid command proves the physical USART3 RX path.
     g_rx_diag_until_tick = time_ticks32() + time_hw_tpms * 5000u;
 
     const uint8_t kind = raw[1];
@@ -332,8 +579,9 @@ void handle_frame(const uint8_t* encoded, uint8_t encoded_length)
                               (static_cast<uint16_t>(raw[3]) << 8);
     const uint8_t* payload = &raw[5];
 
-    if (kind == KIND_GET_STATUS)
+    switch (kind)
     {
+    case KIND_GET_STATUS:
         if (payload_length != 0u)
         {
             send_ack(sequence, kind, ACK_BAD_VALUE);
@@ -341,43 +589,70 @@ void handle_frame(const uint8_t* encoded, uint8_t encoded_length)
         else
         {
             const uint32_t pending = take_status_changes();
+            apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
             if (!send_status(sequence)) restore_status_changes(pending);
         }
-        return;
-    }
-    if (kind == KIND_PING)
-    {
-        if (payload_length != 4u) send_ack(sequence, kind, ACK_BAD_VALUE);
-        else send_pong(sequence, payload);
-        return;
-    }
-    if (kind == KIND_SET_LED_MODE)
-    {
-        if (payload_length != 3u || payload[0] > 3u)
+        break;
+
+    case KIND_GET_FULL_STATUS:
+        if (payload_length != 2u || payload[0] == 0u ||
+            (payload[0] & static_cast<uint8_t>(~FULL_SECTION_ALL)) != 0u ||
+            (payload[1] & 0xF0u) != 0u ||
+            (payload[0] == FULL_SECTION_CHANNELS && payload[1] == 0u))
         {
             send_ack(sequence, kind, ACK_BAD_VALUE);
-            return;
         }
-        const uint16_t timeout = static_cast<uint16_t>(payload[1]) |
-                                 (static_cast<uint16_t>(payload[2]) << 8);
-        const uint8_t previous_led_mode = g_led_mode;
-        if (timeout == 0u || payload[0] == 0u)
+        else if (g_full_active)
         {
-            g_led_mode = 0u;
-            g_led_remaining_s = 0u;
-            g_led_restore_pending = 1u;
+            send_ack(sequence, kind, ACK_BUSY);
         }
         else
         {
-            g_led_mode = payload[0];
-            g_led_remaining_s = timeout;
+            capture_full_status(payload[0], payload[1], sequence);
         }
-        if (g_led_mode != previous_led_mode)
+        break;
+
+    case KIND_PING:
+        if (payload_length != 4u) send_ack(sequence, kind, ACK_BAD_VALUE);
+        else send_pong(sequence, payload);
+        break;
+
+    case KIND_SET_LED_MODE:
+        if (payload_length != 3u || payload[0] > 3u)
+        {
+            send_ack(sequence, kind, ACK_BAD_VALUE);
+            break;
+        }
+        {
+            const uint16_t timeout = static_cast<uint16_t>(payload[1]) |
+                                     (static_cast<uint16_t>(payload[2]) << 8);
+            if (timeout == 0u || payload[0] == 0u)
+            {
+                g_led_mode = 0u;
+                g_led_remaining_s = 0u;
+                g_led_restore_pending = 1u;
+            }
+            else
+            {
+                g_led_mode = payload[0];
+                g_led_remaining_s = timeout;
+            }
             bmcu_link_status_changed(BMCU_STATUS_CHANGE_LED);
-        send_ack(sequence, kind, ACK_OK);
-        return;
+            send_ack(sequence, kind, ACK_OK);
+        }
+        break;
+
+    default:
+        send_ack(sequence, kind, ACK_UNSUPPORTED);
+        break;
     }
-    send_ack(sequence, kind, ACK_UNSUPPORTED);
+}
+
+void reset_rx_parser(uint8_t possible_sync)
+{
+    g_rx_frame_length = 0u;
+    g_rx_expected_length = 0u;
+    g_rx_sync_state = possible_sync == kSync0 ? 1u : 0u;
 }
 
 void process_one_rx_frame()
@@ -386,23 +661,52 @@ void process_one_rx_frame()
     {
         const uint8_t value = g_rx[g_rx_read];
         g_rx_read = static_cast<uint8_t>((g_rx_read + 1u) & (kRxRingSize - 1u));
-        if (value == 0u)
+
+        if (g_rx_sync_state == 0u)
         {
-            if (!g_rx_discard && g_rx_frame_length != 0u)
-                handle_frame(g_rx_frame, g_rx_frame_length);
-            g_rx_frame_length = 0u;
-            g_rx_discard = 0u;
-            return;
+            if (value == kSync0) g_rx_sync_state = 1u;
+            continue;
         }
-        if (g_rx_discard) continue;
+        if (g_rx_sync_state == 1u)
+        {
+            if (value == kSync1)
+            {
+                g_rx_sync_state = 2u;
+                g_rx_frame_length = 0u;
+                g_rx_expected_length = 0u;
+            }
+            else if (value != kSync0)
+            {
+                g_rx_sync_state = 0u;
+            }
+            continue;
+        }
+
         if (g_rx_frame_length >= sizeof(g_rx_frame))
         {
-            g_rx_discard = 1u;
             ++g_rx_frame_error;
+            reset_rx_parser(value);
+            continue;
         }
-        else
+        g_rx_frame[g_rx_frame_length++] = value;
+
+        if (g_rx_frame_length == kHeaderSize)
         {
-            g_rx_frame[g_rx_frame_length++] = value;
+            const uint8_t payload_length = g_rx_frame[4];
+            if (payload_length > static_cast<uint8_t>(kMaxDecoded - kHeaderSize - kCrcSize))
+            {
+                ++g_rx_frame_error;
+                reset_rx_parser(value);
+                continue;
+            }
+            g_rx_expected_length = static_cast<uint8_t>(payload_length + kHeaderSize + kCrcSize);
+        }
+
+        if (g_rx_expected_length != 0u && g_rx_frame_length == g_rx_expected_length)
+        {
+            handle_frame(g_rx_frame, g_rx_frame_length);
+            reset_rx_parser(0u);
+            return;
         }
     }
 }
@@ -480,7 +784,9 @@ void bmcu_link_rx_isr_byte(uint8_t data)
 void bmcu_link_service(void)
 {
     tx_finish_if_complete();
+    const uint8_t tx_write_before = g_tx_write;
     process_one_rx_frame();
+    bool emitted = g_tx_write != tx_write_before;
 
     const uint32_t now = time_ticks32();
     tx_fail_if_needed(now);
@@ -497,16 +803,27 @@ void bmcu_link_service(void)
         }
     }
 
-    if (g_status_dirty != 0u)
+    if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
+    if (!emitted) emitted = send_next_event();
+
+    if (!emitted && g_status_dirty != 0u)
     {
         const uint32_t pending = take_status_changes();
         if (pending != 0u)
         {
-            if (send_status(g_sequence)) ++g_sequence;
-            else restore_status_changes(pending);
+            if (send_status(g_sequence))
+            {
+                ++g_sequence;
+                emitted = true;
+            }
+            else
+            {
+                restore_status_changes(pending);
+            }
         }
     }
 
+    if (!emitted) (void)send_next_full_status_record();
     tx_start_if_idle();
 }
 
@@ -554,18 +871,66 @@ void bmcu_link_set_control_error(int error)
 {
     if (g_control_error == error) return;
     g_control_error = error;
+    if (error) g_printer_bus.online = 0u;
     bmcu_link_status_changed(BMCU_STATUS_CHANGE_ERROR);
 }
 
 void bmcu_link_status_changed(uint32_t reasons)
 {
     if (reasons == 0u) return;
-    const uint32_t irq = irq_save_wch();
+    if (g_status_cache_valid) apply_status_changes(reasons, true);
     g_status_dirty |= reasons;
-    irq_restore_wch(irq);
+}
+
+void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault)
+{
+    if (previous_fault == fault) return;
+    push_state_event(STATE_FIELD_MOTION_FAULT, channel, previous_fault, fault,
+                     SOURCE_SAFETY, fault == 0u ? SEVERITY_NOTICE : SEVERITY_ERROR);
+    if (g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_MOTION, true);
+    g_status_dirty |= BMCU_STATUS_CHANGE_MOTION;
+}
+
+
+void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
+                                   uint8_t reason, uint16_t request_length,
+                                   uint16_t response_length)
+{
+    g_printer_bus.last_rx_class = rx_class;
+    g_printer_bus.last_command = command;
+    g_printer_bus.last_outcome = outcome;
+
+    const bool rejected = outcome == OUTCOME_REJECTED || outcome == OUTCOME_FAILED;
+    uint16_t& rx_counter = rejected ? g_printer_bus.invalid_rx_count : g_printer_bus.valid_rx_count;
+    if (rx_counter != 0xFFFFu) ++rx_counter;
+    if (!rejected)
+    {
+        g_printer_bus.online = 1u;
+        g_printer_bus.last_valid_tick = time_ticks32();
+    }
+    if (response_length != 0u && g_printer_bus.tx_count != 0xFFFFu) ++g_printer_bus.tx_count;
+
+    if (rejected)
+    {
+        LogRecord record = {};
+        record.header.hw_tick32 = time_ticks32();
+        record.header.type = RECORD_PRINTER_TRANSACTION;
+        record.header.severity = SEVERITY_WARNING;
+        record.header.source = SOURCE_PRINTER_BUS;
+        record.header.payload_length = sizeof(LogPrinterTransactionPayload);
+        record.payload.printer_transaction.command = command;
+        record.payload.printer_transaction.owner = OWNER_PRINTER;
+        record.payload.printer_transaction.outcome = static_cast<TransactionOutcome>(outcome);
+        record.payload.printer_transaction.reason = static_cast<DecisionReason>(reason);
+        record.payload.printer_transaction.request_length = request_length > 0xFFu
+            ? 0xFFu : static_cast<uint8_t>(request_length);
+        record.payload.printer_transaction.response_length = response_length > 0xFFu
+            ? 0xFFu : static_cast<uint8_t>(response_length);
+        push_log_record(record);
+    }
 }
 
 uint32_t bmcu_link_tx_drop_count(void)
 {
-    return g_tx_drop;
+    return g_tx_drop + g_event_drop;
 }

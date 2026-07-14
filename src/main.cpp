@@ -33,23 +33,40 @@ void RGB_update()
         return;
 
     static uint32_t last = 0u;
+    static uint8_t next_strip = 0u;
 
     uint32_t min_gap = time_hw_tpms;
     if (!min_gap) min_gap = 1u;
 
     const uint32_t now = time_ticks32();
-    if (last != 0u && (uint32_t)(now - last) < min_gap)
+    if (last != 0u && static_cast<uint32_t>(now - last) < min_gap)
         return;
 
-    last = now;
+    for (uint8_t attempt = 0u; attempt < 5u; ++attempt)
+    {
+        const uint8_t strip = next_strip;
+        if (++next_strip >= 5u) next_strip = 0u;
 
-    SYS_RGB.updata();
-    RGBOUT[0].updata();
-    RGBOUT[1].updata();
-    RGBOUT[2].updata();
-    RGBOUT[3].updata();
+        switch (strip)
+        {
+        case 0u:
+            if (SYS_RGB.is_dirty()) { SYS_RGB.updata(); last = now; return; }
+            break;
+        case 1u:
+            if (RGBOUT[0].is_dirty()) { RGBOUT[0].updata(); last = now; return; }
+            break;
+        case 2u:
+            if (RGBOUT[1].is_dirty()) { RGBOUT[1].updata(); last = now; return; }
+            break;
+        case 3u:
+            if (RGBOUT[2].is_dirty()) { RGBOUT[2].updata(); last = now; return; }
+            break;
+        default:
+            if (RGBOUT[3].is_dirty()) { RGBOUT[3].updata(); last = now; return; }
+            break;
+        }
+    }
 }
-
 static uint8_t g_fil_dirty = 0;
 static uint8_t g_loaded_ch = 0xFF;
 static uint8_t g_state_dirty = 0;
@@ -165,6 +182,20 @@ void ams_datas_save_run()
         g_fil_dirty &= (uint8_t)~(1u << fil);
 }
 
+static void persistence_save_run()
+{
+    if (!g_state_dirty && !g_fil_dirty) return;
+    if (!bus_port_to_host.quiet_for_us(5000u)) return;
+
+    static uint32_t last_save_tick = 0u;
+    const uint32_t now = time_ticks32();
+    const uint32_t min_gap = time_hw_tpms * 10u;
+    if (last_save_tick != 0u && static_cast<uint32_t>(now - last_save_tick) < min_gap) return;
+
+    if (g_state_dirty) ams_state_save_run();
+    else ams_datas_save_run();
+    last_save_tick = time_ticks32();
+}
 int main(void)
 {
     SystemInit();
@@ -250,9 +281,6 @@ int main(void)
 
                 if (ahub_stu == ahubus_package_type::heartbeat)
                     bus_host_device_type = host_device_type_ahub;
-
-                ams_datas_save_run();
-                ams_state_save_run();
             }
             else
             {
@@ -265,5 +293,6 @@ int main(void)
         bmcu_link_set_control_error(error);
         bmcu_link_service();
         RGB_update();
+        persistence_save_run();
     }
 }

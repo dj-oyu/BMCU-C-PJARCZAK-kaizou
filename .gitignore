@@ -3,3 +3,6 @@ tmp/
 __pycache__/
 *.py[cod]
 .venv/
+firmware-build/
+firmwares/
+dist/

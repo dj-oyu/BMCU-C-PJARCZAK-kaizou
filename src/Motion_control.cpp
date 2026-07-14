@@ -178,6 +178,28 @@ static inline float distance_counts_to_m(int32_t counts)
     return static_cast<float>(counts) / kAS5600_COUNTS_PER_M;
 }
 
+static constexpr uint32_t kFloatSignBit = 0x80000000u;
+static_assert(sizeof(float) == sizeof(uint32_t), "float sign-mask ABI mismatch");
+
+static inline __attribute__((always_inline)) float apply_float_sign_mask(float value, uint32_t sign_mask)
+{
+    uint32_t bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    bits ^= sign_mask;
+    __builtin_memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static constexpr uint32_t motor_polarity_to_sign_mask(int polarity)
+{
+    return polarity < 0 ? kFloatSignBit : 0u;
+}
+
+static constexpr int32_t motion_progress_negate_mask(bool send_out)
+{
+    return send_out ? -1 : 0;
+}
+
 // ===== AS5600 =====
 AS5600_soft_IIC_many MC_AS5600;
 static GPIO_TypeDef* const AS5600_SCL_PORT[4] = { GPIOB, GPIOB, GPIOB, GPIOB };
@@ -634,7 +656,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 // ===== zapis kierunku silników + progow DM key =====
 struct alignas(4) Motion_control_save_struct
 {
-    int Motion_control_dir[4];
+    int motor_polarity[4];
     uint32_t check;
     uint8_t dm_key_none_cv[4];
 } Motion_control_data_save;
@@ -643,7 +665,7 @@ static inline void Motion_control_defaults()
 {
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        Motion_control_data_save.Motion_control_dir[i] = 0;
+        Motion_control_data_save.motor_polarity[i] = 0;
         Motion_control_data_save.dm_key_none_cv[i] = 60u;
     }
 
@@ -800,10 +822,13 @@ public:
     uint8_t  send_len_abort = 0;
 
     uint64_t pull_start_ms = 0;
+    int32_t pull_progress_checkpoint_counts = 0;
+    uint64_t pull_progress_checkpoint_ms = 0ull;
+    uint8_t motion_fault = MOTION_FAULT_NONE;
 
     int32_t  directed_progress_counts = 0;
     uint32_t travel_budget_counts = 0;
-    int32_t  direction_mask = 0; // 0: keep raw delta, -1: negate raw delta
+    int32_t  progress_negate_mask = 0; // 0: keep raw delta, -1: negate raw delta
 
     bool send_stop_latch = false;
 
@@ -811,7 +836,8 @@ public:
     MOTOR_PID PID_pressure = MOTOR_PID(MC_PULL_PIDP_PCT, 0, 0);
 
     float pwm_zero = 500;
-    float dir = 0;
+    uint32_t motor_polarity_sign_mask = 0u;
+    uint8_t motor_polarity_valid = 0u;
 
     static float x_prev[4];
 
@@ -820,6 +846,16 @@ public:
     _MOTOR_CONTROL(int _CHx) : CHx(_CHx) {}
 
     void set_pwm_zero(float _pwm_zero) { pwm_zero = _pwm_zero; }
+
+    inline __attribute__((always_inline)) float apply_motor_polarity(float value) const
+    {
+        return apply_float_sign_mask(value, motor_polarity_sign_mask);
+    }
+
+    inline __attribute__((always_inline)) float to_logical_pwm(float value) const
+    {
+        return apply_float_sign_mask(value, motor_polarity_sign_mask);
+    }
 
     void set_motion(filament_motion_enum _motion, uint64_t over_time)
     {
@@ -850,14 +886,17 @@ public:
             send_len_abort = 0;
             directed_progress_counts = 0;
             travel_budget_counts = 0;
-            direction_mask = -1; // send-out is negative in raw AS5600 count space
+            progress_negate_mask = motion_progress_negate_mask(true);
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull) {
             pull_start_ms = time_now;
             directed_progress_counts = 0;
             travel_budget_counts = 0;
-            direction_mask = 0; // pull-back is positive in raw AS5600 count space
+            progress_negate_mask = motion_progress_negate_mask(false);
+            pull_progress_checkpoint_counts = 0;
+            pull_progress_checkpoint_ms = time_now;
+            motion_fault = MOTION_FAULT_NONE;
         }
 
         if (prev == filament_motion_enum::filament_motion_send &&
@@ -974,7 +1013,7 @@ public:
 
     static inline void hold_load(
         float pct,
-        float dir,
+        uint32_t motor_polarity_sign_mask,
         MOTOR_PID &PID_pressure,
         float &post_sendout_retract_thresh_pct,
         uint8_t &retract_hys_active,
@@ -1015,8 +1054,8 @@ public:
 
                 const float mag = retract_mag_from_err(err, 850.0f);
 
-                x = dir * mag;
-                if (x * dir < 0.0f) x = 0.0f;
+                x = apply_float_sign_mask(mag, motor_polarity_sign_mask);
+                if (apply_float_sign_mask(x, motor_polarity_sign_mask) < 0.0f) x = 0.0f;
             }
         }
         else
@@ -1043,7 +1082,7 @@ public:
                 if (pct <= push_start_pct) pwm = pwm_lo;
                 else                       pwm = pwm_hi + (push_hi_pct - pct) * slope;
 
-                x = -dir * pwm;
+                x = apply_float_sign_mask(-pwm, motor_polarity_sign_mask);
                 PID_pressure.clear();
 
                 on_use_need_move = true;
@@ -1072,6 +1111,16 @@ public:
             pwm_zeroed = 1;
             x_prev[CHx] = 0.0f;
             motion = filament_motion_enum::filament_motion_stop;
+            Motion_control_set_PWM(CHx, 0);
+            return;
+        }
+
+        if (!motor_polarity_valid)
+        {
+            PID_speed.clear();
+            PID_pressure.clear();
+            pwm_zeroed = 1;
+            x_prev[CHx] = 0.0f;
             Motion_control_set_PWM(CHx, 0);
             return;
         }
@@ -1202,7 +1251,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = -dir * DM_AUTO_PWM_PUSH;
+                                    dm_autoload_x = apply_motor_polarity(-DM_AUTO_PWM_PUSH);
                                 }
                                 break;
 
@@ -1222,7 +1271,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                    dm_autoload_x = apply_motor_polarity(DM_AUTO_PWM_PULL);
                                 }
                                 break;
 
@@ -1291,7 +1340,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = -dir * DM_AUTO_PWM_PUSH;
+                                    dm_autoload_x = apply_motor_polarity(-DM_AUTO_PWM_PUSH);
                                 }
                                 break;
 
@@ -1343,7 +1392,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                    dm_autoload_x = apply_motor_polarity(DM_AUTO_PWM_PULL);
                                 }
                                 break;
 
@@ -1365,7 +1414,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                    dm_autoload_x = apply_motor_polarity(DM_AUTO_PWM_PULL);
                                 }
                                 break;
 
@@ -1389,7 +1438,7 @@ public:
                                 }
                                 else
                                 {
-                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                    dm_autoload_x = apply_motor_polarity(DM_AUTO_PWM_PULL);
                                 }
                                 break;
 
@@ -1440,14 +1489,14 @@ public:
                         on_use_need_move = true;
                         on_use_abs_err   = -err;
 
-                        x = dir * PID_pressure.caculate(err, time_E);
+                        x = apply_motor_polarity(PID_pressure.caculate(err, time_E));
 
                         float lim_f = 500.0f + 80.0f * on_use_abs_err;
                         if (lim_f > 900.0f) lim_f = 900.0f;
 
                         if (x >  lim_f) x =  lim_f;
                         if (x < -lim_f) x = -lim_f;
-                        if (x * dir > 0.0f)
+                        if (to_logical_pwm(x) > 0.0f)
                         {
                             x = 0.0f;
                             PID_pressure.clear();
@@ -1462,7 +1511,7 @@ public:
                     if (MC_PULL_stu[CHx] != 0)
                     {
                         const float pct = MC_PULL_pct_f[CHx];
-                        x = dir * PID_pressure.caculate(pct - 50.0f, time_E);
+                        x = apply_motor_polarity(PID_pressure.caculate(pct - 50.0f, time_E));
                     }
                     else
                     {
@@ -1477,7 +1526,7 @@ public:
                 if (MC_PULL_stu[CHx] != 0)
                 {
                     const float pct = MC_PULL_pct_f[CHx];
-                    x = dir * PID_pressure.caculate(pct - 50.0f, time_E);
+                    x = apply_motor_polarity(PID_pressure.caculate(pct - 50.0f, time_E));
                 }
                 else
                 {
@@ -1488,7 +1537,7 @@ public:
         }
         else if (motion == filament_motion_enum::filament_motion_redetect) // wyjście do braku filamentu -> ponowne podanie
         {
-            x = -dir * 900.0f;
+            x = apply_motor_polarity(-900.0f);
         }
         else if (MC_ONLINE_key_stu[CHx] != 0) // kanał aktywny i jest filament
         {
@@ -1518,8 +1567,8 @@ public:
 
                     const float mag = retract_mag_from_err(err, 850.0f);
 
-                    x = dir * mag;          // tylko cofanie
-                    if (x * dir < 0.0f) x = 0.0f;
+                    x = apply_motor_polarity(mag); // tylko cofanie
+                    if (to_logical_pwm(x) < 0.0f) x = 0.0f;
                 }
             }
             else if (motion == filament_motion_enum::filament_motion_before_on_use)
@@ -1528,7 +1577,7 @@ public:
 
                 hold_load(
                     pct,
-                    dir,
+                    motor_polarity_sign_mask,
                     PID_pressure,
                     post_sendout_retract_thresh_pct,
                     retract_hys_active,
@@ -1614,7 +1663,7 @@ public:
 
                     if (pwm > pwm_cap) pwm = pwm_cap;
 
-                    x = -dir * pwm;
+                    x = apply_motor_polarity(-pwm);
                     PID_pressure.clear();
                     on_use_linear = true;
                 }
@@ -1625,7 +1674,7 @@ public:
                     const float err = pct - target_pct;
                     on_use_abs_err = (err < 0.0f) ? -err : err;
 
-                    x = dir * PID_pressure.caculate(err, time_E);
+                    x = apply_motor_polarity(PID_pressure.caculate(err, time_E));
 
                     float lim_f = 500.0f + 80.0f * on_use_abs_err;
                     if (lim_f > 900.0f) lim_f = 900.0f;
@@ -1726,7 +1775,7 @@ public:
 
                         hold_load(
                             pct,
-                            dir,
+                            motor_polarity_sign_mask,
                             PID_pressure,
                             post_sendout_retract_thresh_pct,
                             retract_hys_active,
@@ -1764,7 +1813,7 @@ public:
                 }
 
                 if (do_speed_pid)
-                    x = dir * PID_speed.caculate(now_speed - speed_set, time_E);
+                    x = apply_motor_polarity(PID_speed.caculate(now_speed - speed_set, time_E));
             }
         }
         else
@@ -1967,8 +2016,8 @@ public:
                     const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
 
                     const bool push_hi =
-                        (dir != 0.0f) &&
-                        (((float)pwm_cmd) * dir < 0.0f) &&
+                        motor_polarity_valid &&
+                        (to_logical_pwm((float)pwm_cmd) < 0.0f) &&
                         (ax > 800);
 
                     if (push_hi)
@@ -2152,7 +2201,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=
-            (diff ^ motor.direction_mask) - motor.direction_mask;
+            (diff ^ motor.progress_negate_mask) - motor.progress_negate_mask;
         motor.travel_budget_counts += delta_magnitude_counts(diff);
 
         // Future safety hardening: stop after reverse directed displacement
@@ -2190,6 +2239,27 @@ static float  before_pb_last_m[4]      = {0,0,0,0};
 static float  before_pb_retracted_m[4] = {0,0,0,0};
 static int8_t before_pb_sign[4]        = {0,0,0,0};
 
+static void latch_pull_fault(uint8_t channel, uint8_t fault, uint64_t time_now)
+{
+    auto &A = ams[motion_control_ams_num];
+    auto &motor = MOTOR_CONTROL[channel];
+
+    const uint8_t previous_fault = motor.motion_fault;
+    motor.motion_fault = fault;
+    bmcu_link_motion_fault(channel, previous_fault, fault);
+    motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+    filament_now_position[channel] = filament_idle;
+    g_pull_remain_m[channel] = 0.0f;
+    g_pull_speed_set[channel] = -PULL_V_FAST;
+
+    if (A.filament[channel].motion != _filament_motion::idle)
+    {
+        A.filament[channel].motion = _filament_motion::idle;
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+    }
+    MC_STU_RGB_set_latch(channel, 0xFFu, 0x00u, 0x00u, time_now, 1u);
+}
+
 static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
 {
     bool wait = false;
@@ -2203,14 +2273,19 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
         {
             MC_STU_RGB_set_latch(i, 0xFFu, 0x00u, 0xFFu, time_now, 1u);
 
+            auto &motor = MOTOR_CONTROL[i];
             const int32_t target_counts = filament_pull_back_target_counts[i];
-            const int32_t progress_counts = MOTOR_CONTROL[i].directed_progress_counts;
+            const int32_t progress_counts = motor.directed_progress_counts;
+            constexpr int32_t PULL_PROGRESS_QUANTUM_COUNTS = distance_m_to_counts(0.0005f);
+            constexpr uint32_t PULL_BUDGET_FLOOR_COUNTS =
+                static_cast<uint32_t>(distance_m_to_counts(0.050f));
+            constexpr uint64_t PULL_NO_PROGRESS_TIMEOUT_MS = 3000ull;
 
             if (target_counts <= 0 || progress_counts >= target_counts)
             {
                 g_pull_remain_m[i]  = 0.0f;
                 g_pull_speed_set[i] = -PULL_V_FAST;
-                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
                 filament_pull_back_target_counts[i] =
                     distance_m_to_counts(motion_control_pull_back_distance);
                 filament_now_position[i] = filament_redetect;
@@ -2219,23 +2294,46 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
             {
                 g_pull_remain_m[i]  = 0.0f;
                 g_pull_speed_set[i] = -PULL_V_FAST;
-                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
                 filament_pull_back_target_counts[i] =
                     distance_m_to_counts(motion_control_pull_back_distance);
                 filament_now_position[i] = filament_redetect;
             }
             else
             {
-                const int32_t remain_counts = target_counts - progress_counts;
-                g_pull_remain_m[i] = distance_counts_to_m(remain_counts);
+                if (progress_counts - motor.pull_progress_checkpoint_counts >=
+                    PULL_PROGRESS_QUANTUM_COUNTS)
+                {
+                    motor.pull_progress_checkpoint_counts = progress_counts;
+                    motor.pull_progress_checkpoint_ms = time_now;
+                }
 
-                float k = g_pull_remain_m[i] / PULL_RAMP_M;   // 1..0 w końcówce
-                k = clampf(k, 0.0f, 1.0f);
+                const uint32_t target_budget = static_cast<uint32_t>(target_counts);
+                const uint32_t budget_margin = target_budget > PULL_BUDGET_FLOOR_COUNTS
+                    ? target_budget : PULL_BUDGET_FLOOR_COUNTS;
+                const uint32_t pull_budget = target_budget + budget_margin;
 
-                const float v = PULL_V_END + (PULL_V_FAST - PULL_V_END) * k; // mm/s
-                g_pull_speed_set[i] = -v;
+                if (motor.travel_budget_counts >= pull_budget)
+                {
+                    latch_pull_fault(i, MOTION_FAULT_PULL_TRAVEL_BUDGET, time_now);
+                }
+                else if (time_now - motor.pull_progress_checkpoint_ms >=
+                         PULL_NO_PROGRESS_TIMEOUT_MS)
+                {
+                    latch_pull_fault(i, MOTION_FAULT_PULL_NO_PROGRESS, time_now);
+                }
+                else
+                {
+                    const int32_t remain_counts = target_counts - progress_counts;
+                    g_pull_remain_m[i] = distance_counts_to_m(remain_counts);
 
-                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_pull, 100, time_now);
+                    float k = g_pull_remain_m[i] / PULL_RAMP_M;
+                    k = clampf(k, 0.0f, 1.0f);
+
+                    const float v = PULL_V_END + (PULL_V_FAST - PULL_V_END) * k;
+                    g_pull_speed_set[i] = -v;
+                    motor.set_motion(filament_motion_enum::filament_motion_pull, 100, time_now);
+                }
             }
 
             wait = true;
@@ -2284,6 +2382,25 @@ static void motor_motion_switch(uint64_t time_now)
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
+        auto &motor = MOTOR_CONTROL[i];
+        if (motor.motion_fault != MOTION_FAULT_NONE)
+        {
+            const bool explicit_pull_retry =
+                (i == num) && (motion == _filament_motion::pull_back);
+            if (explicit_pull_retry)
+            {
+                const uint8_t previous_fault = motor.motion_fault;
+                motor.motion_fault = MOTION_FAULT_NONE;
+                bmcu_link_motion_fault(i, previous_fault, MOTION_FAULT_NONE);
+            }
+            else
+            {
+                filament_now_position[i] = filament_idle;
+                motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                continue;
+            }
+        }
+
         if (i != num)
         {
             filament_now_position[i] = filament_idle;
@@ -2707,8 +2824,9 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
         if (auto_unload_active[i])
         {
-            float x = MOTOR_CONTROL[i].dir * AUTO_UNLOAD_PWM_PULL;
-            if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
+            float x = MOTOR_CONTROL[i].motor_polarity_valid
+                ? MOTOR_CONTROL[i].apply_motor_polarity(AUTO_UNLOAD_PWM_PULL) : 0.0f;
+            if (MOTOR_CONTROL[i].to_logical_pwm(x) < 0.0f) x = 0.0f;
 
             MOTOR_CONTROL[i].PID_speed.clear();
             MOTOR_CONTROL[i].PID_pressure.clear();
@@ -2720,8 +2838,9 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         }
         else if (manual_empty_pull)
         {
-            float x = MOTOR_CONTROL[i].dir * 700.0f;
-            if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
+            float x = MOTOR_CONTROL[i].motor_polarity_valid
+                ? MOTOR_CONTROL[i].apply_motor_polarity(700.0f) : 0.0f;
+            if (MOTOR_CONTROL[i].to_logical_pwm(x) < 0.0f) x = 0.0f;
 
             MOTOR_CONTROL[i].PID_speed.clear();
             MOTOR_CONTROL[i].PID_pressure.clear();
@@ -2939,6 +3058,7 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     output->motor_pwm = g_motor_pwm[channel];
     output->sensor_online = MC_AS5600.online[channel] ? 1u : 0u;
     output->sensor_good = AS5600_is_good(channel) ? 1u : 0u;
+    output->motion_fault = MOTOR_CONTROL[channel].motion_fault;
     return true;
 }
 
@@ -3033,7 +3153,7 @@ static inline int M5600_angle_dis(int16_t angle1, int16_t angle2)
 // test kierunku silników
 static void MOTOR_get_dir()
 {
-    int  dir[4]     = {0,0,0,0};
+    int  polarity[4] = {0,0,0,0};
     bool test[4]    = {false,false,false,false};
     bool any_detect = false;
     bool any_change = false;
@@ -3043,7 +3163,7 @@ static void MOTOR_get_dir()
     if (!have_data)
     {
         for (uint8_t i = 0; i < kChCount; i++)
-            Motion_control_data_save.Motion_control_dir[i] = 0;
+            Motion_control_data_save.motor_polarity[i] = 0;
     }
 
     MC_AS5600.updata_angle();
@@ -3052,16 +3172,16 @@ static void MOTOR_get_dir()
     for (uint8_t i = 0; i < kChCount; i++)
     {
         last_angle[i] = MC_AS5600.raw_angle[i];
-        dir[i] = Motion_control_data_save.Motion_control_dir[i];
+        polarity[i] = Motion_control_data_save.motor_polarity[i];
     }
 
     // Start test tylko tam, gdzie:
     // - AS5600 online
     // - kanał fizycznie wpięty
-    // - dir nieznany (0)
+    // - polarity unknown (0)
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        if (AS5600_is_good(i) && filament_channel_inserted[i] && (dir[i] == 0))
+        if (AS5600_is_good(i) && filament_channel_inserted[i] && (polarity[i] == 0))
         {
             Motion_control_set_PWM(i, 1000);
             test[i] = true;
@@ -3099,7 +3219,7 @@ static void MOTOR_get_dir()
                 Motion_control_set_PWM(i, 0);
 
                 // AS5600 odwrotnie względem magnesu
-                dir[i] = (angle_dis > 0) ? 1 : -1;
+                polarity[i] = (angle_dis > 0) ? 1 : -1;
 
                 test[i] = false;
                 any_detect = true;
@@ -3118,17 +3238,17 @@ static void MOTOR_get_dir()
     for (uint8_t i = 0; i < kChCount; i++)
         if (test[i]) Motion_control_set_PWM(i, 0);
 
-    // zaktualizuj tylko tam, gdzie faktycznie zmieniło się dir
+    // update only channels where calibration changed the polarity
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        if (dir[i] != Motion_control_data_save.Motion_control_dir[i])
+        if (polarity[i] != Motion_control_data_save.motor_polarity[i])
         {
-            Motion_control_data_save.Motion_control_dir[i] = dir[i];
+            Motion_control_data_save.motor_polarity[i] = polarity[i];
             any_change = true;
         }
     }
 
-    // zapis tylko jeśli była realna detekcja ruchu (dir => ±1)
+    // save only after real movement established polarity (+1 or -1)
     // Jak brak 24V i nic się nie ruszyło -> any_detect=false -> NIE zapisujemy.
     if (any_detect && any_change)
     {
@@ -3153,7 +3273,9 @@ static void MOTOR_init()
     {
         Motion_control_set_PWM(i, 0);
         MOTOR_CONTROL[i].set_pwm_zero(500);
-        MOTOR_CONTROL[i].dir = (float)Motion_control_data_save.Motion_control_dir[i];
+        const int polarity = Motion_control_data_save.motor_polarity[i];
+        MOTOR_CONTROL[i].motor_polarity_sign_mask = motor_polarity_to_sign_mask(polarity);
+        MOTOR_CONTROL[i].motor_polarity_valid = polarity != 0 ? 1u : 0u;
     }
 }
 

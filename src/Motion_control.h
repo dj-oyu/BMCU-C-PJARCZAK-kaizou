@@ -5,6 +5,13 @@
 void Motion_control_init();
 void Motion_control_set_PWM(uint8_t CHx, int PWM);
 void Motion_control_run(int error);
+enum MotionControlFault : uint8_t
+{
+    MOTION_FAULT_NONE = 0u,
+    MOTION_FAULT_PULL_NO_PROGRESS = 1u,
+    MOTION_FAULT_PULL_TRAVEL_BUDGET = 2u,
+};
+
 bool Motion_control_save_dm_key_none_thresholds(void);
 
 struct MotionControlChannelTelemetry
@@ -13,6 +20,7 @@ struct MotionControlChannelTelemetry
     int16_t position_delta;
     int16_t motor_pwm;
     uint8_t sensor_online;
+    uint8_t motion_fault;
     uint8_t sensor_good;
 };
 

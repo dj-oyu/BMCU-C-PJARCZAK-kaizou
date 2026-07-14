@@ -6,14 +6,18 @@
 // Wire values are ABI: append new values, never renumber existing ones.
 namespace bmcu_link_protocol
 {
-constexpr uint8_t VERSION = 2u;
+constexpr uint8_t VERSION_PRERELEASE = 0x80u;
+constexpr uint8_t VERSION_REVISION = 3u;
+constexpr uint8_t VERSION = VERSION_PRERELEASE | VERSION_REVISION;
+static_assert(VERSION == 0x83u, "alpha.3 wire version changed");
 
 enum Kind : uint8_t
 {
     KIND_HELLO = 0x01u, KIND_STATUS = 0x02u, KIND_EVENT = 0x03u,
     KIND_PRINTER_TRANSACTION = 0x04u, KIND_SENSOR_RECORD = 0x05u,
     KIND_GET_STATUS = 0x10u, KIND_SET_LED_MODE = 0x11u, KIND_PING = 0x12u,
-    KIND_PONG = 0x72u, KIND_ACK = 0x7Fu,
+    KIND_GET_FULL_STATUS = 0x17u,
+    KIND_PONG = 0x72u, KIND_FULL_STATUS_RECORD = 0x73u, KIND_ACK = 0x7Fu,
 };
 
 enum Capability : uint16_t
@@ -21,6 +25,20 @@ enum Capability : uint16_t
     CAP_STATUS_EVENTS = 1u << 0, CAP_LED_OVERRIDE = 1u << 1,
     CAP_PING_PONG = 1u << 2, CAP_RAW_HW_TICK = 1u << 3,
     CAP_PRINTER_TRACE = 1u << 4, CAP_SENSOR_RECORD = 1u << 5,
+    CAP_FULL_STATUS = 1u << 6,
+};
+
+enum FullStatusSection : uint8_t
+{
+    FULL_SECTION_GLOBAL = 1u << 0, FULL_SECTION_CHANNELS = 1u << 1,
+    FULL_SECTION_PRINTER_BUS = 1u << 2, FULL_SECTION_COUNTERS = 1u << 3,
+    FULL_SECTION_ALL = 0x0Fu,
+};
+
+enum FullStatusRecordType : uint8_t
+{
+    FULL_RECORD_GLOBAL = 1u, FULL_RECORD_CHANNEL = 2u,
+    FULL_RECORD_PRINTER_BUS = 3u, FULL_RECORD_COUNTERS = 4u,
 };
 
 enum AckResult : uint8_t
@@ -74,6 +92,14 @@ enum SensorValidity : uint8_t
 {
     SENSOR_UNKNOWN = 0u, SENSOR_VALID = 1u, SENSOR_STALE = 2u,
     SENSOR_OFFLINE = 3u, SENSOR_FAULT = 4u,
+};
+
+enum StateField : uint8_t
+{
+    STATE_FIELD_SLOT = 1u, STATE_FIELD_INSERTED_MASK = 2u,
+    STATE_FIELD_ONLINE_MASK = 3u, STATE_FIELD_MOTION = 4u,
+    STATE_FIELD_PRESSURE = 5u, STATE_FIELD_LED_MODE = 6u,
+    STATE_FIELD_CONTROL_ERROR = 7u, STATE_FIELD_MOTION_FAULT = 8u,
 };
 
 // In-memory binary log record. It is copied to a wire payload without formatting.

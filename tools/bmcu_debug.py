@@ -4,6 +4,7 @@
 import argparse
 import sys
 import time
+import struct
 from datetime import datetime
 
 import serial
@@ -56,42 +57,64 @@ def show(raw):
         print(f"{now} INVALID ({error}): {raw.hex()}")
 
 
-def read_one(port, deadline):
-    buffer = bytearray()
+def read_wire_frame(port, deadline):
+    state = 0
+    body = bytearray()
+    expected = None
+    byte_count = 0
     while time.monotonic() < deadline:
-        for value in port.read(port.in_waiting or 1):
-            if value == 0:
-                if buffer:
-                    show(bytes(buffer) + b"\x00")
-                    return True
-            elif len(buffer) < 80:
-                buffer.append(value)
-            else:
-                buffer.clear()
-    return False
+        data = port.read(1)
+        byte_count += len(data)
+        if not data:
+            continue
+        value = data[0]
+        if state == 0:
+            if value == SYNC[0]:
+                state = 1
+            continue
+        if state == 1:
+            if value == SYNC[1]:
+                state = 2
+                body.clear()
+                expected = None
+            elif value != SYNC[0]:
+                state = 0
+            continue
+
+        body.append(value)
+        if len(body) == 5:
+            payload_length = body[4]
+            if payload_length > MAX_DECODED_FRAME - 7:
+                state = 1 if value == SYNC[0] else 0
+                body.clear()
+                expected = None
+                continue
+            expected = payload_length + 7
+        if expected is not None and len(body) == expected:
+            return SYNC + bytes(body), byte_count
+    return None, byte_count
+
+
+def read_one(port, deadline):
+    raw, _ = read_wire_frame(port, deadline)
+    if raw is None:
+        return False
+    show(raw)
+    return True
 
 
 def read_valid_frame(port, deadline):
-    buffer = bytearray()
     byte_count = 0
     while time.monotonic() < deadline:
-        data = port.read(port.in_waiting or 1)
-        byte_count += len(data)
-        for value in data:
-            if value == 0:
-                if buffer:
-                    raw = bytes(buffer) + b"\x00"
-                    buffer.clear()
-                    try:
-                        return decode_frame(raw), byte_count
-                    except LinkError:
-                        pass
-            elif len(buffer) < 80:
-                buffer.append(value)
-            else:
-                buffer.clear()
+        raw, consumed = read_wire_frame(port, deadline)
+        byte_count += consumed
+        if raw is None:
+            break
+        try:
+            return decode_frame(raw), byte_count
+        except LinkError:
+            pass
     return None, byte_count
-
 
 def csv_values(value, cast=str):
     try:
@@ -242,6 +265,95 @@ def ping(args):
         return 2
 
 
+def format_full_status_record(record):
+    data = record.data
+    if record.record_type == FULL_RECORD_GLOBAL:
+        slot, inserted, online, error = data[:4]
+        pressure = int.from_bytes(data[12:14], "little")
+        return (
+            f"GLOBAL slot={slot} inserted=0x{inserted:02X} online=0x{online:02X} "
+            f"error={error} motion={list(data[4:8])} pull={list(data[8:12])} "
+            f"pressure={pressure} led={data[14]}"
+        )
+    if record.record_type == FULL_RECORD_CHANNEL:
+        ch, motion, inserted, online, pull, validity, flags, angle, delta, pwm, _ = struct.unpack(
+            "<BBBBBBHHhhH", data
+        )
+        return (
+            f"CHANNEL ch={ch} motion={motion} inserted={inserted} online={online} "
+            f"pull={pull}% validity={validity} flags=0x{flags:04X} "
+            f"angle={angle} delta={delta} pwm={pwm}"
+        )
+    if record.record_type == FULL_RECORD_PRINTER_BUS:
+        online, rx_class, command, outcome, valid_rx, invalid_rx, tx, tx_drop, age = struct.unpack(
+            "<BBBBHHHHI", data
+        )
+        return (
+            f"PRINTER online={online} class={rx_class} command=0x{command:02X} "
+            f"outcome={outcome} valid_rx={valid_rx} invalid_rx={invalid_rx} "
+            f"tx={tx} tx_drop={tx_drop} age_ticks={age}"
+        )
+    if record.record_type == FULL_RECORD_COUNTERS:
+        tx_drop, rx_drop, crc_error, frame_error = struct.unpack("<IIII", data)
+        return (
+            f"COUNTERS tx_drop={tx_drop} rx_drop={rx_drop} "
+            f"crc_error={crc_error} frame_error={frame_error}"
+        )
+    return f"TYPE_{record.record_type} data={data.hex()}"
+
+
+def full_status(args):
+    if not 0 <= args.sequence <= 65535:
+        raise SystemExit("--sequence must be 0..65535")
+    if not 0 <= args.section_mask <= FULL_SECTION_ALL:
+        raise SystemExit("--section-mask must be 1..15")
+    if not 0 <= args.channel_mask <= 0x0F:
+        raise SystemExit("--channel-mask must be 0..15")
+
+    with open_port(args) as port:
+        port.reset_input_buffer()
+        payload = bytes([args.section_mask, args.channel_mask])
+        port.write(encode_frame(KIND_GET_FULL_STATUS, args.sequence, payload))
+        port.flush()
+        deadline = time.monotonic() + args.timeout
+        records = {}
+        snapshot_id = None
+        expected_count = None
+        while time.monotonic() < deadline:
+            frame, _ = read_valid_frame(port, deadline)
+            if frame is None:
+                break
+            if frame.kind == KIND_ACK and frame.sequence == args.sequence:
+                print(f"Request rejected: {frame.payload.hex()}", file=sys.stderr)
+                return 2
+            if frame.kind != KIND_FULL_STATUS_RECORD or frame.sequence != args.sequence:
+                continue
+            record = decode_full_status_record(frame.payload)
+            if snapshot_id is None:
+                snapshot_id = record.snapshot_id
+                expected_count = record.count
+            if record.snapshot_id != snapshot_id or record.count != expected_count:
+                print("Inconsistent snapshot metadata.", file=sys.stderr)
+                return 2
+            if record.index in records:
+                print(f"Duplicate record index {record.index}.", file=sys.stderr)
+                return 2
+            records[record.index] = record
+            if len(records) == expected_count:
+                for index in range(expected_count):
+                    print(format_full_status_record(records[index]))
+                print(
+                    f"Complete snapshot id={snapshot_id} records={expected_count} "
+                    f"hw_tick32={records[0].hw_tick32}"
+                )
+                return 0
+        print(
+            f"Incomplete snapshot: received={len(records)} expected={expected_count}",
+            file=sys.stderr,
+        )
+        return 2
+
+
 def serial_options(parser, default_parity="even"):
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=115200)
@@ -278,6 +390,14 @@ def main():
     command.add_argument("--sequence", type=int, default=1)
     command.add_argument("--timeout", type=float, default=2)
     command.set_defaults(func=lambda args: send(args, KIND_GET_STATUS, b""))
+
+    command = commands.add_parser("full-status")
+    serial_options(command)
+    command.add_argument("--section-mask", type=lambda value: int(value, 0), default=FULL_SECTION_ALL)
+    command.add_argument("--channel-mask", type=lambda value: int(value, 0), default=0x0F)
+    command.add_argument("--sequence", type=int, default=1)
+    command.add_argument("--timeout", type=float, default=3)
+    command.set_defaults(func=full_status)
 
     command = commands.add_parser("ping")
     serial_options(command)

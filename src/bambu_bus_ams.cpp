@@ -7,6 +7,7 @@
 #include "_bus_hardware.h"
 #include "crc_bus.h"
 #include "bmcu_link.h"
+#include "bmcu_link_protocol.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -187,39 +188,23 @@ static inline uint8_t bmcu_pressure_class(uint16_t pressure)
     return 1u;
 }
 
-class BmcuMotionStatusGuard
+class BmcuStatusNotifyGuard
 {
 public:
-    explicit BmcuMotionStatusGuard(_ams* state) : state_(state), slot_(state->now_filament_num),
-        pressure_class_(bmcu_pressure_class(state->pressure))
+    ~BmcuStatusNotifyGuard()
     {
-        for (uint8_t i = 0u; i < 4u; ++i) motion_[i] = state_->filament[i].motion;
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_SLOT |
+                                 BMCU_STATUS_CHANGE_MOTION |
+                                 BMCU_STATUS_CHANGE_PRESSURE);
     }
-
-    ~BmcuMotionStatusGuard()
-    {
-        uint32_t reasons = 0u;
-        if (slot_ != state_->now_filament_num) reasons |= BMCU_STATUS_CHANGE_SLOT;
-        if (pressure_class_ != bmcu_pressure_class(state_->pressure)) reasons |= BMCU_STATUS_CHANGE_PRESSURE;
-        for (uint8_t i = 0u; i < 4u; ++i)
-            if (motion_[i] != state_->filament[i].motion) reasons |= BMCU_STATUS_CHANGE_MOTION;
-        bmcu_link_status_changed(reasons);
-    }
-
-private:
-    _ams* state_;
-    uint8_t slot_;
-    uint8_t pressure_class_;
-    _filament_motion motion_[4];
 };
-
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     if (ams_num != fixed_ams_num) return false;
 
     _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
-    BmcuMotionStatusGuard status_guard(ams_ptr);
+    BmcuStatusNotifyGuard status_guard;
 
     if (read_num < 4)
     {
@@ -1295,7 +1280,38 @@ bambubus_package_type bambubus_run()
                 break;
             }
 
-            if (bus_port_to_host.send_data_len != 0) delay_us(50u);
+            const uint16_t response_length = bus_port_to_host.send_data_len > 0
+                ? static_cast<uint16_t>(bus_port_to_host.send_data_len) : 0u;
+            uint8_t command = len > 4 ? buf[4] : 0u;
+            if (len > 12 && (buf[1] == 0x04u || buf[1] == 0x05u)) command = buf[11];
+
+            bmcu_link_protocol::TransactionOutcome outcome;
+            bmcu_link_protocol::DecisionReason reason;
+            if (stu == bambubus_package_type::none)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
+                reason = bmcu_link_protocol::REASON_NO_HANDLER;
+            }
+            else if (stu == bambubus_package_type::ETC)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_IGNORED;
+                reason = bmcu_link_protocol::REASON_UNSUPPORTED;
+            }
+            else if (response_length != 0u)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REPLIED;
+                reason = bmcu_link_protocol::REASON_OK;
+            }
+            else
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
+                reason = bmcu_link_protocol::REASON_TX_BUSY;
+            }
+            bmcu_link_printer_transaction(
+                static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
+                static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
+
+            if (response_length != 0u) bus_port_to_host.defer_send_us(50u);
         }
 
         {

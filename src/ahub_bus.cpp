@@ -318,11 +318,6 @@ void ahubus_slave_get_package_set(uint8_t *buf)
     }
     case ahubus_set_type::all_filament_stu:
     {
-        const uint8_t local_ams = (uint8_t)BAMBU_BUS_AMS_NUM;
-        const uint8_t old_slot = ams[local_ams].now_filament_num;
-        _filament_motion old_motion[4];
-        for (uint8_t i = 0u; i < 4u; ++i) old_motion[i] = ams[local_ams].filament[i].motion;
-
         const uint8_t data_struct_count = buf[7];
         uint8_t *data_struct_ptr = data_ptr + 4;
 
@@ -343,11 +338,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
             data_struct_ptr += 6;
         }
 
-        uint32_t reasons = 0u;
-        if (old_slot != ams[local_ams].now_filament_num) reasons |= BMCU_STATUS_CHANGE_SLOT;
-        for (uint8_t i = 0u; i < 4u; ++i)
-            if (old_motion[i] != ams[local_ams].filament[i].motion) reasons |= BMCU_STATUS_CHANGE_MOTION;
-        bmcu_link_status_changed(reasons);
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_SLOT | BMCU_STATUS_CHANGE_MOTION);
         break;
     }
     default:

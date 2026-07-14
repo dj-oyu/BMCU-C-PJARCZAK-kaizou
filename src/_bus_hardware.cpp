@@ -127,6 +127,7 @@ void USART1_IRQHandler(void)
         GPIOA->BCR = GPIO_Pin_12;
 
         // TX done
+        bus_port_to_host.note_activity();
         bus_port_to_host.idle = true;
     }
 }
