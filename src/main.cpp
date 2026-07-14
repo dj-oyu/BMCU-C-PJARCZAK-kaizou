@@ -9,6 +9,7 @@
 #include "bambu_bus_ams.h"
 #include "ADC_DMA.h"
 #include "Debug_log.h"
+#include "bmcu_link.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -25,6 +26,7 @@ void RGB_init()
 
 void RGB_update()
 {
+    bmcu_link_apply_led_override();
     if (!(SYS_RGB.is_dirty() ||
           RGBOUT[0].is_dirty() || RGBOUT[1].is_dirty() ||
           RGBOUT[2].is_dirty() || RGBOUT[3].is_dirty()))
@@ -178,6 +180,9 @@ int main(void)
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
     GPIO_PinRemapConfig(GPIO_Remap_PD01, ENABLE);
 
+    // Start the dedicated monitor UART before any sensor/calibration waits.
+    bmcu_link_init();
+
     RGB_init();
     delay(10);
 
@@ -186,7 +191,6 @@ int main(void)
     RGB_update();
     delay(50);
 
-    DEBUG_init();
     ams_init();
     Flash_saves_init();
 
@@ -258,6 +262,8 @@ int main(void)
         }
 
         Motion_control_run(error);
+        bmcu_link_set_control_error(error);
+        bmcu_link_service();
         RGB_update();
     }
 }

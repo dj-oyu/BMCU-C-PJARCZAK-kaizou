@@ -6,6 +6,29 @@
 #include "many_soft_AS5600.h"
 #include "app_api.h"
 #include "hal/time_hw.h"
+#include "bmcu_link.h"
+
+static inline uint8_t bmcu_pressure_class(uint16_t pressure)
+{
+    if (pressure == 0xF06Fu) return 2u;
+    if (pressure == 0xFFFFu || pressure == 0xFF74u) return 0u;
+    return 1u;
+}
+
+static uint8_t g_bmcu_reported_pressure_class = 0xFFu;
+
+static inline void bmcu_set_pressure(_ams& state, uint16_t pressure)
+{
+    state.pressure = pressure;
+}
+
+static inline uint8_t inserted_mask()
+{
+    uint8_t mask = 0u;
+    for (uint8_t ch = 0u; ch < 4u; ++ch)
+        if (filament_channel_inserted[ch]) mask |= static_cast<uint8_t>(1u << ch);
+    return mask;
+}
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
 static inline float clampf(float x, float a, float b)
@@ -399,9 +422,12 @@ static inline float pull_v_apply_polarity(uint8_t ch, float v)
 
 void MC_PULL_detect_channels_inserted()
 {
+    const uint8_t before_mask = inserted_mask();
     if (!ADC_DMA_is_inited())
     {
         for (uint8_t ch = 0; ch < kChCount; ch++) filament_channel_inserted[ch] = false;
+        if (before_mask != inserted_mask())
+            bmcu_link_status_changed(BMCU_STATUS_CHANGE_INSERTED);
         return;
     }
 
@@ -429,6 +455,8 @@ void MC_PULL_detect_channels_inserted()
         const float a = s[ch] * invN;
         filament_channel_inserted[ch] = (a > VMIN) && (a < VMAX);
     }
+    if (before_mask != inserted_mask())
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_INSERTED);
 }
 
 static inline void MC_PULL_ONLINE_init()
@@ -576,11 +604,11 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
     {
         const uint8_t pct = MC_PULL_pct[num];
             const uint32_t hi = (pct > 50u) ? (uint32_t)(pct - 50u) : 0u;
-            A.pressure = (int)((hi * 65535u) / 50u);
+            bmcu_set_pressure(A, static_cast<uint16_t>((hi * 65535u) / 50u));
     }
     else
     {
-        A.pressure = 0xFFFF;
+        bmcu_set_pressure(A, 0xFFFFu);
     }
 }
 
@@ -1942,7 +1970,7 @@ public:
 
                     auto &A = ams[motion_control_ams_num];
                     if (g_on_use_jam_latch[CHx] && A.now_filament_num == (uint8_t)CHx)
-                        A.pressure = 0xF06Fu;
+                        bmcu_set_pressure(A, 0xF06Fu);
 
                     MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
 
@@ -2183,7 +2211,11 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
                 filament_now_position[i] = filament_idle;
 
                 A.filament_use_flag = 0x00;
-                A.filament[i].motion = _filament_motion::idle;
+                if (A.filament[i].motion != _filament_motion::idle)
+                {
+                    A.filament[i].motion = _filament_motion::idle;
+                    bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+                }
             }
 
             wait = true;
@@ -2773,7 +2805,7 @@ void Motion_control_run(int error)
             const _filament_motion m = A.filament[n].motion;
 
             if (m == _filament_motion::on_use || m == _filament_motion::send_out)
-                A.pressure = 0xF06Fu;
+                bmcu_set_pressure(A, 0xF06Fu);
         }
     }
 
@@ -2826,16 +2858,28 @@ void Motion_control_run(int error)
 
     AS5600_distance_updata(now_ticks);
 
+    uint8_t online_changed = 0u;
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        if (MC_ONLINE_key_stu[i] != 0u) A.filament[i].online = true;
-        else if ((filament_now_position[i] == filament_redetect) || (filament_now_position[i] == filament_pulling_back))
-            A.filament[i].online = true;
-        else
-            A.filament[i].online = false;
+        const bool online = (MC_ONLINE_key_stu[i] != 0u) ||
+            (filament_now_position[i] == filament_redetect) ||
+            (filament_now_position[i] == filament_pulling_back);
+        if (A.filament[i].online != online)
+        {
+            A.filament[i].online = online;
+            online_changed = 1u;
+        }
     }
+    if (online_changed) bmcu_link_status_changed(BMCU_STATUS_CHANGE_ONLINE);
 
     motor_motion_run(error, now_ms, now_ticks);
+
+    const uint8_t pressure_class = bmcu_pressure_class(A.pressure);
+    if (pressure_class != g_bmcu_reported_pressure_class)
+    {
+        g_bmcu_reported_pressure_class = pressure_class;
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_PRESSURE);
+    }
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
@@ -2904,7 +2948,9 @@ void MC_PWM_init()
     TIM_OC3PreloadConfig(TIM4, TIM_OCPreload_Enable);
     TIM_OC4PreloadConfig(TIM4, TIM_OCPreload_Enable);
 
-    GPIO_PinRemapConfig(GPIO_FullRemap_TIM2, ENABLE);
+    // CH1/CH2 still map to PA15/PB3, while CH3/CH4 stay off PB10/PB11.
+    // PB10/PB11 are the dedicated H1 USART3 monitor/control link.
+    GPIO_PinRemapConfig(GPIO_PartialRemap1_TIM2, ENABLE);
     GPIO_PinRemapConfig(GPIO_PartialRemap_TIM3, ENABLE);
     GPIO_PinRemapConfig(GPIO_Remap_TIM4, DISABLE);
 

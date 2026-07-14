@@ -6,6 +6,7 @@
 #include "app_api.h"
 #include "_bus_hardware.h"
 #include "crc_bus.h"
+#include "bmcu_link.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -178,12 +179,47 @@ uint8_t get_filament_left_char(const _ams *ams)
 static uint32_t time_sendout_onuse_ticks[4] = {};
 static uint8_t last_before_on_use_motion_flag = 0x00;
 static uint8_t count_on_use = 0u;
+
+static inline uint8_t bmcu_pressure_class(uint16_t pressure)
+{
+    if (pressure == 0xF06Fu) return 2u;
+    if (pressure == 0xFFFFu || pressure == 0xFF74u) return 0u;
+    return 1u;
+}
+
+class BmcuMotionStatusGuard
+{
+public:
+    explicit BmcuMotionStatusGuard(_ams* state) : state_(state), slot_(state->now_filament_num),
+        pressure_class_(bmcu_pressure_class(state->pressure))
+    {
+        for (uint8_t i = 0u; i < 4u; ++i) motion_[i] = state_->filament[i].motion;
+    }
+
+    ~BmcuMotionStatusGuard()
+    {
+        uint32_t reasons = 0u;
+        if (slot_ != state_->now_filament_num) reasons |= BMCU_STATUS_CHANGE_SLOT;
+        if (pressure_class_ != bmcu_pressure_class(state_->pressure)) reasons |= BMCU_STATUS_CHANGE_PRESSURE;
+        for (uint8_t i = 0u; i < 4u; ++i)
+            if (motion_[i] != state_->filament[i].motion) reasons |= BMCU_STATUS_CHANGE_MOTION;
+        bmcu_link_status_changed(reasons);
+    }
+
+private:
+    _ams* state_;
+    uint8_t slot_;
+    uint8_t pressure_class_;
+    _filament_motion motion_[4];
+};
+
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     if (ams_num != fixed_ams_num) return false;
 
     _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
+    BmcuMotionStatusGuard status_guard(ams_ptr);
 
     if (read_num < 4)
     {
