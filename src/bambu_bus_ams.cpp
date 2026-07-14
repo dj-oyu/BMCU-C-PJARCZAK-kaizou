@@ -8,6 +8,7 @@
 #include "crc_bus.h"
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "Motion_control.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -599,7 +600,10 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
     package_send->filament_channel_2 = ch;
 
     if (ch < 4u)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -810,7 +814,10 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     package_send->filament_channel = ch;
 
     if (ch < 4)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 

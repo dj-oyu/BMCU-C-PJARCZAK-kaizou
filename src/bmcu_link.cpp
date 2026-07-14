@@ -68,6 +68,7 @@ struct PrinterBusCache
 
 constexpr uint8_t kMaxFullStatusRecords = 7u;
 constexpr uint8_t kEventSlots = 8u;
+static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
 TxSlot g_tx[kTxSlots];
 uint8_t g_tx_read = 0u;
@@ -88,7 +89,7 @@ uint8_t g_rx_expected_length = 0u;
 uint8_t g_rx_sync_state = 0u;
 
 uint32_t g_last_led_tick = 0u;
-uint32_t g_status_dirty = 0u;
+volatile uint32_t g_status_dirty = 0u;
 uint8_t g_led_mode = 0u;
 uint16_t g_led_remaining_s = 0u;
 uint8_t g_led_restore_pending = 0u;
@@ -127,13 +128,21 @@ uint32_t g_rx_diag_until_tick = 0u;
 
 uint16_t crc16(const uint8_t* data, uint8_t length)
 {
+    // CCITT-FALSE nibble table: two small, branch-free rounds per byte.
+    // A 16-entry table avoids the flash/bus footprint of a 256-entry table
+    // while replacing the former eight inner-loop branches.
+    static constexpr uint16_t table[16] = {
+        0x0000u, 0x1021u, 0x2042u, 0x3063u,
+        0x4084u, 0x50A5u, 0x60C6u, 0x70E7u,
+        0x8108u, 0x9129u, 0xA14Au, 0xB16Bu,
+        0xC18Cu, 0xD1ADu, 0xE1CEu, 0xF1EFu,
+    };
     uint16_t crc = 0xFFFFu;
     while (length--)
     {
         crc ^= static_cast<uint16_t>(*data++) << 8;
-        for (uint8_t bit = 0u; bit < 8u; ++bit)
-            crc = (crc & 0x8000u) ? static_cast<uint16_t>((crc << 1) ^ 0x1021u)
-                                  : static_cast<uint16_t>(crc << 1);
+        crc = static_cast<uint16_t>((crc << 4) ^ table[crc >> 12]);
+        crc = static_cast<uint16_t>((crc << 4) ^ table[crc >> 12]);
     }
     return crc;
 }
@@ -142,12 +151,12 @@ void tx_start_if_idle()
 {
     if (g_tx_active || g_tx_read == g_tx_write) return;
     TxSlot& slot = g_tx[g_tx_read];
-    DMA_Cmd(DMA1_Channel2, DISABLE);
-    DMA_ClearFlag(DMA1_FLAG_TC2 | DMA1_FLAG_GL2);
-    USART_ClearFlag(USART3, USART_FLAG_TC);
+    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
+    DMA1->INTFCR = DMA1_FLAG_TC2 | DMA1_FLAG_GL2;
+    USART3->STATR = static_cast<uint16_t>(~USART_STATR_TC);
     DMA1_Channel2->MADDR = reinterpret_cast<uint32_t>(slot.data);
     DMA1_Channel2->CNTR = slot.length;
-    DMA_Cmd(DMA1_Channel2, ENABLE);
+    DMA1_Channel2->CFGR |= DMA_CFGR2_EN;
     g_tx_active = 1u;
     g_tx_started_tick = time_ticks32();
     g_link_diag = kDiagTxPending;
@@ -156,10 +165,10 @@ void tx_start_if_idle()
 void tx_finish_if_complete()
 {
     if (!g_tx_active) return;
-    if (DMA_GetFlagStatus(DMA1_FLAG_TC2) == RESET) return;
-    if (USART_GetFlagStatus(USART3, USART_FLAG_TC) == RESET) return;
-    DMA_Cmd(DMA1_Channel2, DISABLE);
-    DMA_ClearFlag(DMA1_FLAG_TC2 | DMA1_FLAG_GL2);
+    if ((DMA1->INTFR & DMA1_FLAG_TC2) == 0u) return;
+    if ((USART3->STATR & USART_STATR_TC) == 0u) return;
+    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
+    DMA1->INTFCR = DMA1_FLAG_TC2 | DMA1_FLAG_GL2;
     g_tx_active = 0u;
     g_tx_read = static_cast<uint8_t>((g_tx_read + 1u) & (kTxSlots - 1u));
     g_link_diag = kDiagTxOk;
@@ -173,11 +182,11 @@ void tx_fail_if_needed(uint32_t now)
     const uint32_t timeout_ticks = time_hw_tpms * 250u;
     const bool timed_out = timeout_ticks != 0u &&
                            static_cast<uint32_t>(now - g_tx_started_tick) >= timeout_ticks;
-    const bool transfer_error = DMA_GetFlagStatus(DMA1_FLAG_TE2) != RESET;
+    const bool transfer_error = (DMA1->INTFR & DMA1_FLAG_TE2) != 0u;
     if (!timed_out && !transfer_error) return;
 
-    DMA_Cmd(DMA1_Channel2, DISABLE);
-    DMA_ClearFlag(DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2);
+    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
+    DMA1->INTFCR = DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2;
     g_tx_active = 0u;
     g_tx_fault = 1u;
     g_tx_read = g_tx_write;
@@ -228,15 +237,6 @@ void commit_payload(uint8_t payload_length)
     slot.length = static_cast<uint8_t>(payload_length + 9u);
     g_tx_write = static_cast<uint8_t>((g_tx_write + 1u) & (kTxSlots - 1u));
     tx_start_if_idle();
-}
-
-bool enqueue(uint8_t kind, uint16_t sequence, const uint8_t* payload, uint8_t payload_length)
-{
-    uint8_t* output = reserve_payload(kind, sequence, payload_length);
-    if (output == nullptr) return false;
-    for (uint8_t i = 0u; i < payload_length; ++i) output[i] = payload[i];
-    commit_payload(payload_length);
-    return true;
 }
 
 void put16(uint8_t* output, uint16_t value)
@@ -362,7 +362,8 @@ void apply_status_changes(uint32_t reasons, bool emit_events)
                       STATE_FIELD_CONTROL_ERROR, 0xFFu, SOURCE_SAFETY,
                       g_control_error ? SEVERITY_ERROR : SEVERITY_NOTICE, emit);
 
-    for (uint8_t ch = 0u; ch < 4u; ++ch) g_status_cache.pull_pct[ch] = MC_PULL_pct[ch];
+    if (all || (reasons & (BMCU_STATUS_CHANGE_PRESSURE | BMCU_STATUS_CHANGE_MOTION)))
+        __builtin_memcpy(g_status_cache.pull_pct, MC_PULL_pct, sizeof(g_status_cache.pull_pct));
     g_status_cache_valid = 1u;
 }
 void build_status_payload(uint8_t payload[27])
@@ -493,7 +494,7 @@ bool send_next_full_status_record()
     payload[4] = record.type;
     payload[5] = 0u;
     put32(&payload[6], g_full_tick);
-    for (uint8_t i = 0u; i < 16u; ++i) payload[10u + i] = record.data[i];
+    __builtin_memcpy(&payload[10], record.data, sizeof(record.data));
 
     commit_payload(26u);
     if (++g_full_record_next >= g_full_record_count) g_full_active = 0u;
@@ -526,8 +527,10 @@ bool send_next_event()
 {
     if (g_event_read == g_event_write || !tx_has_capacity(0u)) return false;
     const LogRecord& record = g_events[g_event_read];
-    const uint8_t* payload = reinterpret_cast<const uint8_t*>(&record);
-    if (!enqueue(KIND_EVENT, g_sequence, payload, sizeof(LogRecord))) return false;
+    uint8_t* payload = reserve_payload(KIND_EVENT, g_sequence, sizeof(LogRecord));
+    if (payload == nullptr) return false;
+    __builtin_memcpy(payload, &record, sizeof(record));
+    commit_payload(sizeof(LogRecord));
     ++g_sequence;
     g_event_read = static_cast<uint8_t>((g_event_read + 1u) & (kEventSlots - 1u));
     return true;
@@ -811,6 +814,7 @@ void bmcu_link_service(void)
         const uint32_t pending = take_status_changes();
         if (pending != 0u)
         {
+            apply_status_changes(pending, true);
             if (send_status(g_sequence))
             {
                 ++g_sequence;
@@ -878,7 +882,7 @@ void bmcu_link_set_control_error(int error)
 void bmcu_link_status_changed(uint32_t reasons)
 {
     if (reasons == 0u) return;
-    if (g_status_cache_valid) apply_status_changes(reasons, true);
+    // Producer hot path: one OR only. Snapshot/event work stays in service().
     g_status_dirty |= reasons;
 }
 
@@ -887,7 +891,6 @@ void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fau
     if (previous_fault == fault) return;
     push_state_event(STATE_FIELD_MOTION_FAULT, channel, previous_fault, fault,
                      SOURCE_SAFETY, fault == 0u ? SEVERITY_NOTICE : SEVERITY_ERROR);
-    if (g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_MOTION, true);
     g_status_dirty |= BMCU_STATUS_CHANGE_MOTION;
 }
 
@@ -896,6 +899,7 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
                                    uint8_t reason, uint16_t request_length,
                                    uint16_t response_length)
 {
+    const uint32_t tick = time_ticks32();
     g_printer_bus.last_rx_class = rx_class;
     g_printer_bus.last_command = command;
     g_printer_bus.last_outcome = outcome;
@@ -906,14 +910,14 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
     if (!rejected)
     {
         g_printer_bus.online = 1u;
-        g_printer_bus.last_valid_tick = time_ticks32();
+        g_printer_bus.last_valid_tick = tick;
     }
     if (response_length != 0u && g_printer_bus.tx_count != 0xFFFFu) ++g_printer_bus.tx_count;
 
     if (rejected)
     {
         LogRecord record = {};
-        record.header.hw_tick32 = time_ticks32();
+        record.header.hw_tick32 = tick;
         record.header.type = RECORD_PRINTER_TRANSACTION;
         record.header.severity = SEVERITY_WARNING;
         record.header.source = SOURCE_PRINTER_BUS;
