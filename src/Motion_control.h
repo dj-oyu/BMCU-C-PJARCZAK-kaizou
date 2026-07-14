@@ -7,6 +7,16 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM);
 void Motion_control_run(int error);
 bool Motion_control_save_dm_key_none_thresholds(void);
 
+struct MotionControlChannelTelemetry
+{
+    uint16_t raw_angle;
+    int16_t position_delta;
+    int16_t motor_pwm;
+    uint8_t sensor_online;
+    uint8_t sensor_good;
+};
+
+bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);
 void MC_PULL_detect_channels_inserted();
 
 // Externy

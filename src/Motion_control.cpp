@@ -160,6 +160,23 @@ static constexpr float    kAS5600_PI = 3.14159265358979323846f;
 
 // stała do przeliczenia AS5600 - liczona raz
 static constexpr float kAS5600_MM_PER_CNT = -(kAS5600_PI * 7.5f) / 4096.0f;
+static constexpr float kAS5600_COUNTS_PER_M = 1000.0f / (-kAS5600_MM_PER_CNT);
+
+static constexpr int32_t distance_m_to_counts(float meters)
+{
+    return static_cast<int32_t>(meters * kAS5600_COUNTS_PER_M + 0.5f);
+}
+
+static inline uint32_t delta_magnitude_counts(int32_t delta)
+{
+    const int32_t mask = delta >> 31;
+    return static_cast<uint32_t>((delta ^ mask) - mask);
+}
+
+static inline float distance_counts_to_m(int32_t counts)
+{
+    return static_cast<float>(counts) / kAS5600_COUNTS_PER_M;
+}
 
 // ===== AS5600 =====
 AS5600_soft_IIC_many MC_AS5600;
@@ -173,6 +190,8 @@ float speed_as5600[4] = {0, 0, 0, 0};
 static uint8_t g_as5600_good[4]     = {0,0,0,0};
 static uint8_t g_as5600_fail[4]     = {0,0,0,0};
 static uint8_t g_as5600_okstreak[4] = {0,0,0,0};
+static int16_t g_as5600_last_delta[4] = {0,0,0,0};
+static int16_t g_motor_pwm[4] = {0,0,0,0};
 static constexpr uint8_t kAS5600_FAIL_TRIP   = 3;
 static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
@@ -778,10 +797,13 @@ public:
     uint64_t on_use_hi_gate_t0_ms = 0ull;
 
     uint64_t send_start_ms = 0;
-    float    send_start_m  = 0.0f;
     uint8_t  send_len_abort = 0;
 
     uint64_t pull_start_ms = 0;
+
+    int32_t  directed_progress_counts = 0;
+    uint32_t travel_budget_counts = 0;
+    int32_t  direction_mask = 0; // 0: keep raw delta, -1: negate raw delta
 
     bool send_stop_latch = false;
 
@@ -826,11 +848,16 @@ public:
             send_start_ms = time_now;
             send_stop_latch = false;
             send_len_abort = 0;
-            send_start_m = ams[motion_control_ams_num].filament[CHx].meters;
+            directed_progress_counts = 0;
+            travel_budget_counts = 0;
+            direction_mask = -1; // send-out is negative in raw AS5600 count space
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull) {
             pull_start_ms = time_now;
+            directed_progress_counts = 0;
+            travel_budget_counts = 0;
+            direction_mask = 0; // pull-back is positive in raw AS5600 count space
         }
 
         if (prev == filament_motion_enum::filament_motion_send &&
@@ -839,7 +866,6 @@ public:
             send_start_ms = 0;
             send_stop_latch = false;
             send_len_abort = 0;
-            send_start_m = 0.0f;
         }
 
         if (prev == filament_motion_enum::filament_motion_pull &&
@@ -1637,9 +1663,10 @@ public:
 
                     if (!send_len_abort)
                     {
-                        constexpr float SEND_MAX_M = 10.0f;
-                        const float moved_m = absf(ams[motion_control_ams_num].filament[CHx].meters - send_start_m);
-                        if (moved_m >= SEND_MAX_M) send_len_abort = 1;
+                        constexpr uint32_t SEND_MAX_COUNTS =
+                            static_cast<uint32_t>(distance_m_to_counts(10.0f));
+                        if (travel_budget_counts >= SEND_MAX_COUNTS)
+                            send_len_abort = 1;
                     }
 
                     if (send_len_abort)
@@ -2000,6 +2027,11 @@ float _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
 void Motion_control_set_PWM(uint8_t CHx, int PWM)
 {
+    if (CHx >= kChCount) return;
+    if (PWM > PWM_lim) PWM = PWM_lim;
+    if (PWM < -PWM_lim) PWM = -PWM_lim;
+    g_motor_pwm[CHx] = static_cast<int16_t>(PWM);
+
     uint16_t set1 = 0, set2 = 0;
 
     if (PWM > 0)       set1 = (uint16_t)PWM;
@@ -2095,6 +2127,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         {
             was_ok[i] = 0u;
             speed_as5600[i] = 0.0f;
+            g_as5600_last_delta[i] = 0;
             continue;
         }
 
@@ -2102,6 +2135,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         {
             as5600_distance_save[i] = MC_AS5600.raw_angle[i];
             speed_as5600[i] = 0.0f;
+            g_as5600_last_delta[i] = 0;
             was_ok[i] = 1u;
             continue;
         }
@@ -2114,6 +2148,16 @@ void AS5600_distance_updata(uint32_t now_ticks)
         if (diff < -2048) diff += 4096;
 
         as5600_distance_save[i] = now;
+        g_as5600_last_delta[i] = static_cast<int16_t>(diff);
+
+        auto &motor = MOTOR_CONTROL[i];
+        motor.directed_progress_counts +=
+            (diff ^ motor.direction_mask) - motor.direction_mask;
+        motor.travel_budget_counts += delta_magnitude_counts(diff);
+
+        // Future safety hardening: stop after reverse directed displacement
+        // persists beyond a validated count/time window. Until then, reverse
+        // motion reduces progress and can never satisfy the completion target.
 
         const float dist_mm = (float)diff * kAS5600_MM_PER_CNT;
         speed_as5600[i] = dist_mm * inv_dt;
@@ -2133,13 +2177,12 @@ enum filament_now_position_enum
 };
 
 static filament_now_position_enum filament_now_position[4];
-static float filament_pull_back_meters[4];
 
-static float filament_pull_back_target[4] = {
-    motion_control_pull_back_distance,
-    motion_control_pull_back_distance,
-    motion_control_pull_back_distance,
-    motion_control_pull_back_distance
+static int32_t filament_pull_back_target_counts[4] = {
+    distance_m_to_counts(motion_control_pull_back_distance),
+    distance_m_to_counts(motion_control_pull_back_distance),
+    distance_m_to_counts(motion_control_pull_back_distance),
+    distance_m_to_counts(motion_control_pull_back_distance)
 };
 
 // BEFORE_PULLBACK: zapis realnie "wycofanej" drogi (m) (sumowanie całego wycofania)
@@ -2160,15 +2203,16 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
         {
             MC_STU_RGB_set_latch(i, 0xFFu, 0x00u, 0xFFu, time_now, 1u);
 
-            const float target = filament_pull_back_target[i];
-            const float d = absf(A.filament[i].meters - filament_pull_back_meters[i]);
+            const int32_t target_counts = filament_pull_back_target_counts[i];
+            const int32_t progress_counts = MOTOR_CONTROL[i].directed_progress_counts;
 
-            if (target <= 0.0f || d >= target)
+            if (target_counts <= 0 || progress_counts >= target_counts)
             {
                 g_pull_remain_m[i]  = 0.0f;
                 g_pull_speed_set[i] = -PULL_V_FAST;
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                filament_pull_back_target[i] = motion_control_pull_back_distance;
+                filament_pull_back_target_counts[i] =
+                    distance_m_to_counts(motion_control_pull_back_distance);
                 filament_now_position[i] = filament_redetect;
             }
             else if (MC_ONLINE_key_stu[i] == 0)
@@ -2176,13 +2220,14 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
                 g_pull_remain_m[i]  = 0.0f;
                 g_pull_speed_set[i] = -PULL_V_FAST;
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                filament_pull_back_target[i] = motion_control_pull_back_distance;
+                filament_pull_back_target_counts[i] =
+                    distance_m_to_counts(motion_control_pull_back_distance);
                 filament_now_position[i] = filament_redetect;
             }
             else
             {
-                const float remain = target - d; // m (>=0)
-                g_pull_remain_m[i] = (remain > 0.0f) ? remain : 0.0f;
+                const int32_t remain_counts = target_counts - progress_counts;
+                g_pull_remain_m[i] = distance_counts_to_m(remain_counts);
 
                 float k = g_pull_remain_m[i] / PULL_RAMP_M;   // 1..0 w końcówce
                 k = clampf(k, 0.0f, 1.0f);
@@ -2302,8 +2347,6 @@ static void motor_motion_switch(uint64_t time_now)
                 MC_STU_RGB_set_latch(num, 0xA0u, 0x2Du, 0xFFu, time_now, 1u);
                 filament_now_position[num] = filament_pulling_back;
 
-                filament_pull_back_meters[num] = A.filament[num].meters;
-
                 float target;
                 if (g_on_use_jam_latch[num])
                 {
@@ -2318,14 +2361,14 @@ static void motor_motion_switch(uint64_t time_now)
                     if (target > motion_control_pull_back_distance) target = motion_control_pull_back_distance;
                 }
 
-                filament_pull_back_target[num] = target;
+                filament_pull_back_target_counts[num] = distance_m_to_counts(target);
 
                 g_pull_remain_m[num]  = target;
                 g_pull_speed_set[num] = -PULL_V_FAST;
 
                 before_pb_retracted_m[num] = 0.0f;
                 before_pb_sign[num]        = 0;
-                before_pb_last_m[num]      = filament_pull_back_meters[num];
+                before_pb_last_m[num]      = A.filament[num].meters;
 
                 MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_pull, 100, time_now);
                 break;
@@ -2886,6 +2929,17 @@ void Motion_control_run(int error)
         if ((MC_AS5600.online[i] == false) || (MC_AS5600.magnet_stu[i] == -1))
             MC_STU_RGB_set(i, 0xFF, 0x00, 0x00);
     }
+}
+
+bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output)
+{
+    if (channel >= kChCount || output == nullptr) return false;
+    output->raw_angle = MC_AS5600.raw_angle[channel];
+    output->position_delta = g_as5600_last_delta[channel];
+    output->motor_pwm = g_motor_pwm[channel];
+    output->sensor_online = MC_AS5600.online[channel] ? 1u : 0u;
+    output->sensor_good = AS5600_is_good(channel) ? 1u : 0u;
+    return true;
 }
 
 // ===== PWM init =====
