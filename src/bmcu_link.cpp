@@ -176,6 +176,17 @@ void tx_finish_if_complete()
     tx_start_if_idle();
 }
 
+__attribute__((noinline, cold)) void tx_abort_cold()
+{
+    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
+    DMA1->INTFCR = DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2;
+    g_tx_active = 0u;
+    g_tx_fault = 1u;
+    g_tx_read = g_tx_write;
+    ++g_tx_drop;
+    g_link_diag = kDiagTxTimeout;
+}
+
 void tx_fail_if_needed(uint32_t now)
 {
     if (!g_tx_active) return;
@@ -184,14 +195,7 @@ void tx_fail_if_needed(uint32_t now)
                            static_cast<uint32_t>(now - g_tx_started_tick) >= timeout_ticks;
     const bool transfer_error = (DMA1->INTFR & DMA1_FLAG_TE2) != 0u;
     if (!timed_out && !transfer_error) return;
-
-    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
-    DMA1->INTFCR = DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2;
-    g_tx_active = 0u;
-    g_tx_fault = 1u;
-    g_tx_read = g_tx_write;
-    ++g_tx_drop;
-    g_link_diag = kDiagTxTimeout;
+    tx_abort_cold();
 }
 
 bool tx_has_capacity(uint8_t reserved_slots)
@@ -775,7 +779,7 @@ void bmcu_link_init(void)
 void bmcu_link_rx_isr_byte(uint8_t data)
 {
     const uint8_t next = static_cast<uint8_t>((g_rx_write + 1u) & (kRxRingSize - 1u));
-    if (next == g_rx_read)
+    if (__builtin_expect(next == g_rx_read, 0))
     {
         ++g_rx_drop;
         return;

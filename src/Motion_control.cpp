@@ -203,6 +203,14 @@ static constexpr uint8_t kAS5600_FAIL_TRIP   = 3;
 static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
 
+// Preconditions: hi >= lo and all operands stay within the calibrated sensor range.
+static inline __attribute__((always_inline)) bool in_closed_range_i32(
+    int32_t value, int32_t lo, int32_t hi)
+{
+    return static_cast<uint32_t>(value - lo) <=
+           static_cast<uint32_t>(hi - lo);
+}
+
 // ---- liniowe zwalnianie końcówki + minimalny PWM ----
 static constexpr float PULL_RAMP_M = 0.015f; // 15 mm braking zone
 static constexpr int32_t PULL_PWM_MIN = 400; // minimum pull-back PWM
@@ -410,7 +418,7 @@ static void blink_all_blue_3s()
     RGB_update();
 }
 
-static void calibration_reset_and_reboot()
+static __attribute__((noinline, cold)) void calibration_reset_and_reboot()
 {
     for (uint8_t i = 0; i < kChCount; i++) Motion_control_set_PWM(i, 0);
 
@@ -593,7 +601,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
                 {
                     gst_step[i] = 0;
                 }
-                else if (pct_q >= 4500 && pct_q <= 5500)
+                else if (in_closed_range_i32(pct_q, 4500, 5500))
                 {
                     gst_active[i] = true;
                     gst_act_t0_ticks[i] = now_ticks;
@@ -803,6 +811,35 @@ enum class filament_motion_enum
     filament_motion_before_pull_back,
 };
 
+static constexpr uint16_t motion_bit(filament_motion_enum value)
+{
+    return static_cast<uint16_t>(1u << static_cast<uint8_t>(value));
+}
+
+static constexpr uint16_t kMotionSend =
+    motion_bit(filament_motion_enum::filament_motion_send);
+static constexpr uint16_t kMotionRedetect =
+    motion_bit(filament_motion_enum::filament_motion_redetect);
+static constexpr uint16_t kMotionPull =
+    motion_bit(filament_motion_enum::filament_motion_pull);
+static constexpr uint16_t kMotionStop =
+    motion_bit(filament_motion_enum::filament_motion_stop);
+static constexpr uint16_t kMotionBeforeOnUse =
+    motion_bit(filament_motion_enum::filament_motion_before_on_use);
+static constexpr uint16_t kMotionStopOnUse =
+    motion_bit(filament_motion_enum::filament_motion_stop_on_use);
+static constexpr uint16_t kMotionPressureOnUse =
+    motion_bit(filament_motion_enum::filament_motion_pressure_ctrl_on_use);
+static constexpr uint16_t kMotionPressureIdle =
+    motion_bit(filament_motion_enum::filament_motion_pressure_ctrl_idle);
+static constexpr uint16_t kMotionBeforePullBack =
+    motion_bit(filament_motion_enum::filament_motion_before_pull_back);
+static constexpr uint16_t kMotionOnUseLike =
+    kMotionPressureOnUse | kMotionBeforeOnUse | kMotionStopOnUse;
+static constexpr uint16_t kMotionHold =
+    kMotionPressureIdle | kMotionPressureOnUse |
+    kMotionBeforeOnUse | kMotionStopOnUse;
+
 
 
 // ===== Motor control =====
@@ -813,6 +850,7 @@ public:
     int CHx = 0;
 
     uint8_t pwm_zeroed = 1;
+    uint16_t motion_mask = kMotionStop;
 
     uint32_t motor_stop_time = 0u;
 
@@ -873,6 +911,7 @@ public:
 
         const filament_motion_enum prev = motion;
         motion = _motion;
+        motion_mask = motion_bit(_motion);
 
         if ((_motion != filament_motion_enum::filament_motion_pressure_ctrl_on_use) &&
             g_on_use_low_latch[CHx] && !g_on_use_jam_latch[CHx])
@@ -1008,6 +1047,15 @@ public:
 
     filament_motion_enum get_motion() { return motion; }
 
+    __attribute__((noinline, cold)) void stop_output_cold()
+    {
+        PID_speed.clear();
+        PID_pressure.clear();
+        pwm_zeroed = 1;
+        x_prev[CHx] = 0;
+        Motion_control_set_PWM(CHx, 0);
+    }
+
     static inline void hold_load(
         int32_t pct_q,
         int32_t motor_polarity_negate_mask,
@@ -1087,45 +1135,37 @@ public:
 
     void run(uint32_t dt_us, uint32_t now_ms)
     {
-        if (motion == filament_motion_enum::filament_motion_stop &&
+        const uint16_t mode = motion_mask;
+
+        if ((mode & kMotionStop) != 0u &&
             motor_stop_time == 0 &&
             pwm_zeroed)
             return;
 
-        if (motion != filament_motion_enum::filament_motion_stop &&
-            motor_stop_time != 0 &&
-            static_cast<int32_t>(now_ms - motor_stop_time) >= 0)
+        if (__builtin_expect((mode & kMotionStop) == 0u &&
+                             motor_stop_time != 0 &&
+                             static_cast<int32_t>(now_ms - motor_stop_time) >= 0, 0))
         {
-            if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
+            if ((mode & kMotionPressureOnUse) != 0u)
                 g_last_on_use_exit_ms[CHx] = now_ms;
 
-            PID_speed.clear();
-            PID_pressure.clear();
-            pwm_zeroed = 1;
-            x_prev[CHx] = 0;
             motion = filament_motion_enum::filament_motion_stop;
-            Motion_control_set_PWM(CHx, 0);
+            motion_mask = kMotionStop;
+            stop_output_cold();
             return;
         }
 
-        if (!motor_polarity_valid)
+        if (__builtin_expect(!motor_polarity_valid, 0))
         {
-            PID_speed.clear();
-            PID_pressure.clear();
-            pwm_zeroed = 1;
-            x_prev[CHx] = 0;
-            Motion_control_set_PWM(CHx, 0);
+            stop_output_cold();
             return;
         }
 
-        if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use && g_on_use_low_latch[CHx])
+        if ((mode & kMotionPressureOnUse) != 0u &&
+            __builtin_expect(g_on_use_low_latch[CHx] != 0u, 0))
         {
             g_on_use_hi_pwm_us[CHx] = 0u;
-            PID_speed.clear();
-            PID_pressure.clear();
-            pwm_zeroed = 1;
-            x_prev[CHx] = 0;
-            Motion_control_set_PWM(CHx, 0);
+            stop_output_cold();
             return;
         }
 
@@ -1146,7 +1186,7 @@ public:
 
         // aktywne tylko: idle + brak filamentu + kanał wpięty + kiedykolwiek był w on_use
         const bool post_on_use_active =
-            (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle) &&
+            ((mode & kMotionPressureIdle) != 0u) &&
             (MC_ONLINE_key_stu[CHx] == 0) &&
             filament_channel_inserted[CHx] &&
             had_on_use;
@@ -1155,17 +1195,15 @@ public:
             post_on_use_active && has_exit_ts && (dt_exit < 10000u);
 
         const bool on_use_like =
-            (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ||
-            (motion == filament_motion_enum::filament_motion_before_on_use) ||
-            (motion == filament_motion_enum::filament_motion_stop_on_use) ||
+            (mode & kMotionOnUseLike) != 0u ||
             post_on_use_10s ||
-            ((motion == filament_motion_enum::filament_motion_send) && send_stop_latch);
+            (((mode & kMotionSend) != 0u) && send_stop_latch);
 
         bool  on_use_need_move = false;
         int32_t on_use_abs_err_q = 0;
         bool  on_use_linear    = false;
 
-        if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
+        if ((mode & kMotionPressureIdle) != 0u)
         {
         #if BMCU_DM_TWO_MICROSWITCH
                     // --- DM autoload (Stage1 + Stage2) ---
@@ -1534,13 +1572,13 @@ public:
                 }
             }
         }
-        else if (motion == filament_motion_enum::filament_motion_redetect) // wyjście do braku filamentu -> ponowne podanie
+        else if ((mode & kMotionRedetect) != 0u) // wyjście do braku filamentu -> ponowne podanie
         {
             x = apply_motor_polarity(-900);
         }
         else if (MC_ONLINE_key_stu[CHx] != 0) // kanał aktywny i jest filament
         {
-            if (motion == filament_motion_enum::filament_motion_before_pull_back)
+            if ((mode & kMotionBeforePullBack) != 0u)
             {
                 const int32_t pct_q = MC_PULL_pct_q[CHx];
                 constexpr int32_t target_q = 5000;
@@ -1564,7 +1602,7 @@ public:
                     if (to_logical_pwm(x) < 0) x = 0;
                 }
             }
-            else if (motion == filament_motion_enum::filament_motion_before_on_use)
+            else if ((mode & kMotionBeforeOnUse) != 0u)
             {
                 hold_load(
                     MC_PULL_pct_q[CHx],
@@ -1578,7 +1616,7 @@ public:
                     on_use_linear
                 );
             }
-            else if (motion == filament_motion_enum::filament_motion_stop_on_use)
+            else if ((mode & kMotionStopOnUse) != 0u)
             {
                 PID_pressure.clear();
                 pwm_zeroed = 1;
@@ -1586,7 +1624,7 @@ public:
                 Motion_control_set_PWM(CHx, 0);
                 return;
             }
-            else if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
+            else if ((mode & kMotionPressureOnUse) != 0u)
             {
                 const int32_t pct_q = MC_PULL_pct_q[CHx];
                 constexpr int32_t target_q =
@@ -1628,7 +1666,7 @@ public:
 
                 retract_hys_active = 0u;
 
-                if (pct_q >= band_lo_q && pct_q <= band_hi_eff_q)
+                if (in_closed_range_i32(pct_q, band_lo_q, band_hi_eff_q))
                 {
                     x = 0;
                     PID_pressure.clear();
@@ -1681,7 +1719,7 @@ public:
             }
             else
             {
-                if (motion == filament_motion_enum::filament_motion_stop)
+                if ((mode & kMotionStop) != 0u)
                 {
                     PID_speed.clear();
                     pwm_zeroed = 1;
@@ -1692,7 +1730,7 @@ public:
 
                 bool do_speed_pid = true;
 
-                if (motion == filament_motion_enum::filament_motion_send)
+                if ((mode & kMotionSend) != 0u)
                 {
                     const int32_t pct_q = MC_PULL_pct_q[CHx];
 
@@ -1791,7 +1829,7 @@ public:
                     }
                 }
 
-                if (motion == filament_motion_enum::filament_motion_pull) // cofanie
+                if ((mode & kMotionPull) != 0u) // cofanie
                 {
                     speed_set_q = g_pull_speed_set_q[CHx]; // 0.001 mm/s
                 }
@@ -1807,17 +1845,14 @@ public:
         }
 
         // stałe tryby
-        const bool pull_mode = (motion == filament_motion_enum::filament_motion_pull);
-        const bool pb_mode = (motion == filament_motion_enum::filament_motion_before_pull_back);
+        const bool pull_mode = ((mode & kMotionPull) != 0u);
+        const bool pb_mode = ((mode & kMotionBeforePullBack) != 0u);
 
         const bool send_stop_hold_mode =
-            (motion == filament_motion_enum::filament_motion_send) && send_stop_latch;
+            ((mode & kMotionSend) != 0u) && send_stop_latch;
 
         const bool hold_mode =
-            (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle) ||
-            (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ||
-            (motion == filament_motion_enum::filament_motion_before_on_use) ||
-            (motion == filament_motion_enum::filament_motion_stop_on_use) ||
+            (mode & kMotionHold) != 0u ||
             post_on_use_active ||
             send_stop_hold_mode;
 
@@ -1843,7 +1878,7 @@ public:
         }
 
         // clamp
-        if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
+        if ((mode & kMotionPressureIdle) != 0u)
         {
         #if BMCU_DM_TWO_MICROSWITCH
             const int32_t lim = dm_autoload_active ? DM_AUTO_IDLE_LIM : 800;
@@ -1929,7 +1964,7 @@ public:
             block_until_ms[CHx] = 0u;
         }
 
-        if (motion == filament_motion_enum::filament_motion_redetect)
+        if ((mode & kMotionRedetect) != 0u)
         {
             const int pwm_out = (int)x;
             pwm_zeroed = (pwm_out == 0);
@@ -1939,20 +1974,20 @@ public:
         }
 
         const bool use_ramping =
-            ((motion == filament_motion_enum::filament_motion_send) && !send_stop_latch) ||
-            (motion == filament_motion_enum::filament_motion_pull);
+            (((mode & kMotionSend) != 0u) && !send_stop_latch) ||
+            ((mode & kMotionPull) != 0u);
 
         if (use_ramping)
         {
             const bool pull_soft_start =
-                (motion == filament_motion_enum::filament_motion_pull) &&
+                ((mode & kMotionPull) != 0u) &&
                 (pull_start_ms != 0) &&
                 ((now_ms - pull_start_ms) < 400u);
 
             uint32_t rate_up = pull_soft_start ? 2500u : 4500u;
             uint32_t rate_down = 6500u;
 
-            if (motion == filament_motion_enum::filament_motion_send)
+            if ((mode & kMotionSend) != 0u)
             {
                 rate_down = 25000u;
                 rate_up   = 18000u;
@@ -1974,7 +2009,7 @@ public:
 
         const int pwm_out0 = (int)x;
 
-        if (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use && !g_on_use_low_latch[CHx])
+        if ((mode & kMotionPressureOnUse) != 0u && !g_on_use_low_latch[CHx])
         {
             if (MC_ONLINE_key_stu[CHx] == 0u)
             {
@@ -2015,7 +2050,7 @@ public:
                     }
                 }
 
-                if (g_on_use_low_latch[CHx])
+                if (__builtin_expect(g_on_use_low_latch[CHx] != 0u, 0))
                 {
                     g_on_use_hi_pwm_us[CHx] = 0u;
 
@@ -2229,7 +2264,7 @@ static int8_t  before_pb_sign[4]             = {0,0,0,0};
 static constexpr int32_t BEFORE_PB_SIGN_COUNTS = distance_m_to_counts(0.0005f);
 static constexpr int32_t BEFORE_PB_MAX_COUNTS  = distance_m_to_counts(2.0f);
 
-static void latch_pull_fault(uint8_t channel, uint8_t fault, uint32_t time_now)
+static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, uint8_t fault, uint32_t time_now)
 {
     auto &A = ams[motion_control_ams_num];
     auto &motor = MOTOR_CONTROL[channel];
@@ -2767,8 +2802,11 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             {
                 const uint32_t dt = time_now - auto_unload_arm_t0_ms[i];
 
-                if ((pct_q > static_cast<int32_t>(AUTO_UNLOAD_NEUTRAL_LO_PCT * 100.0f)) &&
-                    (pct_q < static_cast<int32_t>(AUTO_UNLOAD_NEUTRAL_HI_PCT * 100.0f)))
+                constexpr int32_t neutral_lo_q =
+                    static_cast<int32_t>(AUTO_UNLOAD_NEUTRAL_LO_PCT * 100.0f) + 1;
+                constexpr int32_t neutral_hi_q =
+                    static_cast<int32_t>(AUTO_UNLOAD_NEUTRAL_HI_PCT * 100.0f) - 1;
+                if (in_closed_range_i32(pct_q, neutral_lo_q, neutral_hi_q))
                 {
                     if (!auto_unload_blocked[i] && dt <= AUTO_UNLOAD_ARM_MS)
                     {
