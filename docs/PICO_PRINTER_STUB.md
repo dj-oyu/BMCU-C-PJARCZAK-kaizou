@@ -6,7 +6,7 @@ Related documents:
 
 - [BMCU UART physical interface](BMCU_UART_PHYSICAL_SPEC.md)
 - [Pico command surface and physical paths](PICO_COMMAND_SURFACE.md)
-- [BMCU Link Protocol v2](BMCU_LINK_PROTOCOL_V2.md)
+- [BMCU Link Protocol alpha.3](BMCU_LINK_PROTOCOL_ALPHA3.md)
 - [BMCU command ownership](BMCU_COMMAND_OWNERSHIP.md)
 
 ## 1. Purpose

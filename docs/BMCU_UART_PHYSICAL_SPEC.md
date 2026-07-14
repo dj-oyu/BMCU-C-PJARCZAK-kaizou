@@ -119,7 +119,7 @@ lines are required. A permanent connection is preferred over hot-swapping.
 
 - USART3 owns PB10/PB11 for the H1 link.
 - TX uses DMA1 Channel 2 at low priority.
-- RX IRQ only enqueues bytes; COBS decoding, CRC validation, and command
+- RX IRQ only enqueues bytes; sync-header parsing, CRC validation, and command
   execution occur in the main loop.
 - The interrupt function must have C linkage. With LTO enabled, omitting
   `extern "C"` leaves the weak startup handler installed and the first RX byte
@@ -143,8 +143,8 @@ a BMCU Link mode based on a probe or timeout.
 Detect the peer by protocol handshake, not by scanning or dynamically
 reassigning pins:
 
-1. BMCU initializes H1 USART3 and emits protocol-v2 `HELLO` once at boot.
-2. Pico validates COBS framing and CRC, then sends `GET_STATUS` on H1.
+1. BMCU initializes H1 USART3 and emits protocol alpha.3 `HELLO` once at boot.
+2. Pico validates `A5 5A` framing and CRC, then sends `GET_STATUS` on H1.
 3. BMCU marks the H1 peer present only after a complete, version-compatible,
    CRC-valid command.
 4. Pico/Bambuddy marks the BMCU link offline after a configurable STATUS

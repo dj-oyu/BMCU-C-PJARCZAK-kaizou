@@ -129,8 +129,8 @@ BMCUのローカル停止とBambuddyからA1 miniへのpause/stopは別々に確
 ## 6. 共通ワイヤ形式
 
 - 115200 bps、8E1
-- COBS、`0x00`終端
-- decoded最大64 byte、payload最大57 byte
+- 同期ヘッダ `0xA5 0x5A`
+- body最大64 byte、payload最大57 byte
 - little-endian
 - CRC-16/CCITT-FALSE (`init=0xFFFF`, `poly=0x1021`)
 
@@ -141,7 +141,7 @@ version:u8 | kind:u8 | sequence:u16 | payload_length:u8 | payload | crc16:u16
 UART全体ではなく、**kindごとのpayloadを固定長**にする。commandは引数を持ってよいが、
 kindごとに型・長さ・範囲を固定する。可変文字列、JSON、任意TLVはBMCUに入れない。
 
-- version 2のheader/kindと全enum値をwire ABIとして固定する。値は追加のみとし、既存値を再採番しない。
+- alpha.3のheader/kindと全enum値をwire ABIとして固定する。値は追加のみとし、既存値を再採番しない。
 - 応答は要求と同じsequenceを返す。
 - 自発通知はBMCU側連番を使う。
 - 互換追加はcapabilityと新kind、非互換変更だけversionを上げる。
@@ -228,7 +228,7 @@ DENIED、EXPIRED、DUPLICATE、INTERNAL` を後方互換で追加する。
 ## 8. 計測点と性能
 
 Printer traceはISRで構築しない。既存parser/handlerの入口と出口で小さい観測構造体へ
-値をコピーし、管理TXキューへ積む。raw packet全体のCOBS化・複製は禁止する。
+値をコピーし、管理TXキューへ積む。printer raw packet全体の複製は禁止する。
 
 - RX IRQ: 管理byteをringへ置くだけ
 - state producerは値が意味的に変化した時、global dirty maskへreason bitをcallbackする
@@ -279,7 +279,7 @@ RX/decision/TXを1つの操作として表示する。UARTはローカル信頼�
 
 ## 11. 実装順序
 
-1. **完了**: H1全二重、COBS/CRC、DMA TX、RX IRQ、HELLO/STATUS、LED command。
+1. **完了**: H1全二重、同期ヘッダ/CRC、DMA TX、RX IRQ、HELLO/STATUS、LED command。
 2. printer transaction observerとBUS_STATUSを追加する。
 3. side-effectなしのsensor snapshot APIとGLOBAL/CHANNEL messageを追加する。
 4. motion、runout、jam、auto unload/swapの状態遷移eventを追加する。

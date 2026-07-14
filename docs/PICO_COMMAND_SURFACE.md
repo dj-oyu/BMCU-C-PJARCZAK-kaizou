@@ -91,7 +91,7 @@ autonomously start mechanical USER operations merely because Bambuddy disconnect
 
 ## 4. H1 management command types
 
-H1 commands are transported by BMCU Link: COBS, CRC16, fixed integer fields, and 115200 8E1.
+H1 commands are transported by BMCU Link: sync header, CRC16, fixed integer fields, and 115200 8E1.
 
 ### 4.1 QUERY
 
@@ -110,7 +110,7 @@ Read-only from the machine-control perspective. Responses may be split into boun
 
 | Command | Status | Result |
 | --- | --- | --- |
-| `GET_FULL_STATUS` | specified | global, four channels, printer bus, counters |
+| `GET_FULL_STATUS` | implemented | global, four channels, printer bus, counters |
 | `GET_SENSOR_SNAPSHOT` | candidate | detailed cached sensor records |
 | `GET_BUS_STATUS` | candidate | printer link state and parser/response counters |
 | `GET_RECENT_EVENTS` | candidate | bounded binary event-ring drain |

@@ -55,23 +55,22 @@ A1 mini <-- 1.25 Mbps half-duplex --> BMCU <-- UART3 --> Pico 2 W <-- Wi-Fi --> 
 
 ### 4.1 フレーミング
 
-UART の1フレームは COBS エンコードし、`0x00` を終端とする。
-デコード後の共通ヘッダーは次である。
+UART の1フレームは同期ヘッダ `0xA5 0x5A` で開始し、続けて次のbodyを送る。
 
 ```text
-version:u8 | kind:u8 | sequence:u16 | payload_length:u8 | payload | crc16:u16
+A5 5A | version:u8 | kind:u8 | sequence:u16 | payload_length:u8 | payload | crc16:u16
 ```
 
-- CRC はヘッダーから payload 末尾までを対象にする。
-- 最大デコード長は 64 byte。超過、COBS不正、長さ不正、CRC不正は破棄する。
+- CRC は `version` から payload 末尾までを対象にし、同期ヘッダは含めない。
+- body最大長は64 byte、payload最大長は57 byte。長さ不正・CRC不正は破棄し、次の同期ヘッダを探索する。
+- wire長は `payload + 9 byte` で、旧COBS形式と同じオーバーヘッドである。
 - `sequence` は送信元ごとの連番。応答は要求の `sequence` を返す。
 - ACK を要求するコマンドだけが応答を持つ。イベントに対する ACK や再送はしない。
-
 ### 4.2 Phase 1 のメッセージ
 
 | kind | 方向 | 内容 |
 | --- | --- | --- |
-| `0x01 HELLO` | BMCU→Pico | protocol v2、機能ビット、ファームウェア版、`tick_hz` |
+| `0x01 HELLO` | BMCU→Pico | protocol alpha.3 (`0x83`)、機能ビット、ファームウェア版、`tick_hz` |
 | `0x02 STATUS` | BMCU→Pico | 意味的状態変化時と明示要求時の集約状態 |
 | `0x03 EVENT` | BMCU→Pico | 状態遷移、A1要求の分類、センサー異常など |
 | `0x10 GET_STATUS` | Pico→BMCU | 即時の `STATUS` を要求 |
@@ -107,7 +106,7 @@ A1 mini バス、保存領域を触るコマンドは Phase 1 に加えない。
 ### 5.1 送信経路
 
 1. 制御ループの安全な観測点だけが、固定長イベントを SPSC TXリングへ書く。
-2. リング容量は 32 件、1イベントは最大48 byteとする。動的メモリ、`printf`、
+2. リング容量は 8 slot、1フレームは最大66 byteとする。動的メモリ、`printf`、
    浮動小数点整形、ロックを使わない。
 3. UART3 TX はDMAで送る。DMA送信中は次のフレームをリングに積むだけで、
    制御ループは送信完了を待たない。
@@ -115,12 +114,12 @@ A1 mini バス、保存領域を触るコマンドは Phase 1 に加えない。
    それでも満杯なら捨てて `tx_drop_count` を次のSTATUSに載せる。
 
 送信開始・DMA完了の処理は短いIRQ処理に限定する。A1 mini通信の UART1 IRQ、
-ADC/DMA、モーター周期処理からログ生成・COBS化を呼ばない。
+ADC/DMA、モーター周期処理からログ生成・フレーム化を呼ばない。
 
 ### 5.2 受信経路
 
 - USART3 RX IRQ は受信バイトを固定長RXリングへ格納するだけにする。
-- COBSデコード、CRC検証、コマンド実行判定はメインループ末尾で、1周につき
+- 同期ヘッダ解析、CRC検証、コマンド実行判定はメインループ末尾で、1周につき
   最大1フレームだけ処理する。
 - 不正フレームには応答せず捨てる。正規コマンドへのACKだけをTXリングへ積む。
 - LEDモード変更は `RGB_update()` と競合しない共有状態へ代入し、次回の通常
@@ -165,7 +164,7 @@ PicoがBambuddyと接続できない時は、BMCUイベントを短期バッフ�
 
 ## 7. 段階導入
 
-1. BMCU Linkのリング、COBS/CRC、HELLO/STATUSと受信メトリクスを実装する。
+1. BMCU Linkのリング、同期ヘッダ/CRC、HELLO/STATUSと受信メトリクスを実装する。
 2. PicoでUARTフレームを受信し、USBシリアルにデコード表示して配線と安定性を検証する。
 3. `SET_LED_MODE` とACKを実装し、双方向通信の安全性を検証する。
 4. PicoのmDNSとBambuddyオプションデバイス・アダプタを接続する。

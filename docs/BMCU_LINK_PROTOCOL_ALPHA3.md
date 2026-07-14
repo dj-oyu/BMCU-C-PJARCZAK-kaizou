@@ -1,6 +1,6 @@
-# BMCU Link Protocol v2
+# BMCU Link Protocol alpha.3
 
-Status: base protocol implemented; `GET_FULL_STATUS` and full-status records are specified for the next firmware/Pico phase.
+Status: protocol, events, and full-status synchronization are implemented.
 
 This document is the canonical wire contract between BMCU, Raspberry Pi Pico 2 W, and Bambuddy.
 Physical wiring is defined separately in `BMCU_UART_PHYSICAL_SPEC.md`.
@@ -27,30 +27,33 @@ the full-status response is insufficient because later state changes arrive as `
 
 - UART: 115200 baud, 8 data bits, even parity, 1 stop bit (`8E1`)
 - Multibyte integers: little-endian
-- Frame encoding: COBS
-- Frame delimiter: `0x00`
-- Maximum decoded frame: 64 bytes
+- Synchronization bytes: `0xA5 0x5A`
+- Maximum body (`version` through CRC): 64 bytes
 - Maximum payload: 57 bytes
 - CRC: CRC-16/CCITT-FALSE, polynomial `0x1021`, initial value `0xFFFF`
 
-Decoded frame:
+Wire frame:
 
 ```text
 offset  size  field
-0       1     version
-1       1     kind
-2       2     sequence
-4       1     payload_length
-5       N     payload
-5+N     2     crc16
+0       2     sync = A5 5A
+2       1     version
+3       1     kind
+4       2     sequence
+6       1     payload_length
+7       N     payload
+7+N     2     crc16
 ```
 
-CRC covers bytes `0` through `4+N`. A receiver must reject malformed COBS, decoded lengths outside `7..64`,
-payload-length mismatches, unsupported versions, and CRC mismatches before dispatch.
-
+CRC covers `version` through the last payload byte; synchronization bytes are excluded. The wire size is
+`N+9`, exactly the same overhead as the former COBS-delimited format. A receiver scans for `A5 5A`, reads
+the fixed five-byte body header, bounds-checks `payload_length`, and then reads exactly
+`payload_length+2` bytes. It must reject body lengths outside `7..64`, payload-length mismatches,
+unsupported versions, and CRC mismatches before dispatch. After an invalid length or CRC, resume scanning
+for the synchronization bytes.
 ## 3. Version, sequence, and enums
 
-The current protocol version is `2`. Every enum value is wire ABI: existing numeric values must never be
+The current wire version is `0x83` (`alpha.3`). Bit 7 marks a prerelease and bits 6..0 carry the prerelease revision. After real-device validation and ABI freeze, the first stable release will use `0x01` (stable v1). Every enum value is wire ABI: existing numeric values must never be
 renumbered or reused. New values may be appended.
 
 - Responses use the request's sequence.
@@ -63,15 +66,15 @@ renumbered or reused. New values may be appended.
 | ---: | --- | --- | --- |
 | `0x01` | `HELLO` | BMCU → Pico | implemented |
 | `0x02` | `STATUS` | BMCU → Pico | implemented |
-| `0x03` | `EVENT` | BMCU → Pico | ABI reserved |
+| `0x03` | `EVENT` | BMCU → Pico | implemented |
 | `0x04` | `PRINTER_TRANSACTION` | BMCU → Pico | ABI reserved |
 | `0x05` | `SENSOR_RECORD` | BMCU → Pico | ABI reserved |
 | `0x10` | `GET_STATUS` | Pico → BMCU | implemented |
 | `0x11` | `SET_LED_MODE` | Pico → BMCU | implemented |
 | `0x12` | `PING` | Pico → BMCU | implemented |
-| `0x17` | `GET_FULL_STATUS` | Pico → BMCU | specified |
+| `0x17` | `GET_FULL_STATUS` | Pico → BMCU | implemented |
 | `0x72` | `PONG` | BMCU → Pico | implemented |
-| `0x73` | `FULL_STATUS_RECORD` | BMCU → Pico | specified |
+| `0x73` | `FULL_STATUS_RECORD` | BMCU → Pico | implemented |
 | `0x7F` | `ACK` | BMCU → Pico | implemented |
 
 ### 3.2 ACK results
@@ -231,7 +234,14 @@ Full-status record types:
 | 8 | u16 | cached angle/raw position |
 | 10 | i16 | cached position delta |
 | 12 | i16 | cached motor command/PWM |
-| 14 | u16 | reserved, zero |
+| 14 | u8 | motion fault enum |
+| 15 | u8 | reserved, zero |
+
+Channel flag bit 4 is set when `motion fault enum` is nonzero. Defined fault values are:
+
+- `0`: none
+- `1`: pull-back made no expected-direction progress for the safety interval
+- `2`: pull-back exceeded its direction-independent travel budget
 
 Unavailable measurements must use zero data with the appropriate validity/flag indication; they must not
 cause synchronous sensor access.
@@ -290,17 +300,20 @@ command result, safety decision, and diagnostic counter records. Unused union by
 severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric enums defined in
 `src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
 
+`STATE_CHANGE` field `8` is the per-channel motion-fault latch. Its `slot` is the channel index and its
+value uses the motion-fault enum documented in the CHANNEL full-status record.
+
 ## 8. Pico decoder requirements
 
 The recommended hot path is:
 
-1. Accumulate bytes until `0x00` into a fixed 66-byte buffer.
-2. COBS-decode into a fixed 64-byte buffer.
-3. Validate length, version, and CRC before reading payload fields.
-4. Dispatch on `kind` with a table or switch.
-5. Decode integers by fixed offsets; do not parse strings or JSON.
-6. Extend `hw_tick32`, add Pico receive time, and forward a typed object to Bambuddy.
-
+1. Scan the byte stream for `A5 5A`.
+2. Read the five-byte body header and reject `payload_length > 57`.
+3. Read the exact remaining payload and CRC bytes into a fixed 64-byte body buffer.
+4. Validate length, version, and CRC before reading payload fields.
+5. Dispatch on `kind` with a `switch`.
+6. Decode integers by fixed offsets; do not parse strings or JSON.
+7. Extend `hw_tick32`, add Pico receive time, and forward a typed object to Bambuddy.
 Do not cast arbitrary receive-buffer addresses directly to native structs unless packing, alignment, endianness,
 and ABI size are explicitly verified. Little-endian load helpers or `memcpy` into size-asserted structures are
 safe and still far faster than UART arrival at 115200 baud.
@@ -315,7 +328,9 @@ Pico state handling:
 
 ## 9. Compatibility and resource limits
 
-- Protocol v1 and v2 are wire-incompatible because STATUS offset 0 changed from uptime seconds to raw ticks.
+- `0x83` is alpha.3 and must not be accepted as stable v1.
+- Promotion to stable v1 changes the version byte to `0x01` only after payloads and behavior are frozen.
+- Alpha and stable peers reject each other explicitly; there is no implicit downgrade.
 - Unknown kinds and enum values must be preserved numerically by Pico/Bambuddy and must not crash decoding.
 - Reserved fields must be transmitted as zero and ignored on receive.
 - BMCU must reject commands with unexpected payload lengths.
