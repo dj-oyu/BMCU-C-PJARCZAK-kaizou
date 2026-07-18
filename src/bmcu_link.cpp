@@ -453,7 +453,7 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
             put16(&record.data[10], static_cast<uint16_t>(telemetry.position_delta));
             put16(&record.data[12], static_cast<uint16_t>(telemetry.motor_pwm));
             record.data[14] = telemetry.motion_fault;
-            record.data[15] = 0u;
+            record.data[15] = static_cast<uint8_t>(0x80u | telemetry.controller_motion);
         }
     }
 

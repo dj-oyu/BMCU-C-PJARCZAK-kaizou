@@ -22,6 +22,7 @@ struct MotionControlChannelTelemetry
     uint8_t sensor_online;
     uint8_t motion_fault;
     uint8_t sensor_good;
+    uint8_t controller_motion;
 };
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);

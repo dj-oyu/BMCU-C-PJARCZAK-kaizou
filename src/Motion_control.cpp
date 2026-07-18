@@ -800,15 +800,15 @@ public:
 
 enum class filament_motion_enum
 {
-    filament_motion_send,
-    filament_motion_redetect,
-    filament_motion_pull,
-    filament_motion_stop,
-    filament_motion_before_on_use,
-    filament_motion_stop_on_use,
-    filament_motion_pressure_ctrl_on_use,
-    filament_motion_pressure_ctrl_idle,
-    filament_motion_before_pull_back,
+    filament_motion_send = 0,
+    filament_motion_redetect = 1,
+    filament_motion_pull = 2,
+    filament_motion_stop = 3,
+    filament_motion_before_on_use = 4,
+    filament_motion_stop_on_use = 5,
+    filament_motion_pressure_ctrl_on_use = 6,
+    filament_motion_pressure_ctrl_idle = 7,
+    filament_motion_before_pull_back = 8,
 };
 
 static constexpr uint16_t motion_bit(filament_motion_enum value)
@@ -3113,6 +3113,7 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     output->sensor_online = MC_AS5600.online[channel] ? 1u : 0u;
     output->sensor_good = AS5600_is_good(channel) ? 1u : 0u;
     output->motion_fault = MOTOR_CONTROL[channel].motion_fault;
+    output->controller_motion = static_cast<uint8_t>(MOTOR_CONTROL[channel].motion);
     return true;
 }
 

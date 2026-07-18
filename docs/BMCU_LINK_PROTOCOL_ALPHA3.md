@@ -225,7 +225,7 @@ Full-status record types:
 | Offset | Type | Field |
 | ---: | --- | --- |
 | 0 | u8 | channel index |
-| 1 | u8 | motion enum |
+| 1 | u8 | AMS logical motion enum |
 | 2 | u8 | inserted flag |
 | 3 | u8 | online flag |
 | 4 | u8 | pull percentage |
@@ -235,7 +235,12 @@ Full-status record types:
 | 10 | i16 | cached position delta |
 | 12 | i16 | cached motor command/PWM |
 | 14 | u8 | motion fault enum |
-| 15 | u8 | reserved, zero |
+| 15 | u8 | BMCU controller motion: bit 7 valid, bits 0..6 enum |
+
+Controller motion values are `0=send`, `1=redetect`, `2=pull`, `3=stop`, `4=before-on-use`,
+`5=stop-on-use`, `6=pressure-control-on-use`, `7=pressure-control-idle`, and `8=before-pull-back`.
+This is a sampled controller phase, not proof of physical movement. Consumers must evaluate it together
+with motor PWM, position delta, sensor validity, and motion fault.
 
 Channel flag bit 4 is set when `motion fault enum` is nonzero. Defined fault values are:
 
