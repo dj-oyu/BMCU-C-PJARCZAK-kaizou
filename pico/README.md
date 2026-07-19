@@ -26,15 +26,15 @@ ring, retry state, liveness, and error counters.
 ## Install
 
 1. Install a current MicroPython build for Pico W/Pico 2 W.
-2. Copy `bmcu_link.py` and `main.py` to the Pico filesystem.
+2. Run `deploy.ps1` to copy the monitor, transport, configuration, and UI
+   modules to the Pico filesystem.
 3. Optionally copy `config_example.py` to `config.py` and adjust the UART pin
    assignment.
 4. Reset the Pico. With `DEBUG_USB=True`, it prints decoded BMCU frames as
    one-line JSON to USB serial for commissioning.
 
-The checked-in implementation is a UART monitor and read-only local HTTP
-status page; it does **not** yet implement the Pico-to-Bambuddy transport.
-The target envelope, identity, retry, and loss contract is
+The implementation includes the UART monitor, local HTTP status and
+commissioning pages, and the Pico-to-Bambuddy push transport. Its contract is
 [`docs/PICO_BAMBUDDY_ENVELOPE.md`](../docs/PICO_BAMBUDDY_ENVELOPE.md).
 Authentication credentials and the deployment-specific Bambuddy ingest URL
 remain configuration, not repository defaults.
@@ -65,7 +65,10 @@ printer, motor, slot, or filament control API.
 Copy `secrets_example.py` to `secrets.py` **on the Pico filesystem** and set
 `WIFI_SSID` and `WIFI_PASSWORD`. `pico/secrets.py` is ignored by Git and must
 never be committed. Wi-Fi connection and retry are non-blocking; the UART
-reader is run before every network-state service pass.
+reader is run before every network-state service pass. Open
+`http://<MDNS_HOSTNAME>.local/settings` to provision the trusted-LAN
+`ws://` URL and the `telemetry:write` credential. The token is stored on the
+Pico but is never returned by the settings API.
 
 Set `MDNS_HOSTNAME` there to a unique, lowercase LAN name such as
 `bmcu-monitor-a`. It is applied before Wi-Fi station mode is enabled, so the
@@ -76,9 +79,8 @@ ingestion endpoint and Bambuddy must not poll its HTTP API.
 
 `DEBUG_USB` is `False` by default. Set it to `True` only while commissioning,
 because USB JSON printing is intentionally excluded from the UART receive
-path. `publish()` is the future integration boundary for the bounded outbound
-Bambuddy WebSocket transport defined by the envelope contract; it is not an
-implemented network transport yet.
+path. `publish()` only enqueues; socket work runs in a later cooperative poll.
+
 ## Deploy from this workstation
 
 With the Pico held in BOOTSEL mode, run this from the repository root to copy
@@ -95,8 +97,9 @@ After it restarts, identify the new MicroPython COM port.  Create a local
 .\pico\deploy.ps1 -Port COMx -SecretsPath .\pico\secrets.py
 ```
 
-`deploy.ps1` uploads only `bmcu_link.py`, `wifi.py`, `main.py`, and the
-explicitly supplied `secrets.py`; it never touches BMCU firmware sources.
+`deploy.ps1` uploads the Pico monitor, transport, configuration, Wi-Fi, UI,
+and main modules plus the explicitly supplied `secrets.py`; it never touches
+BMCU firmware sources.
 
 ## Browser status page
 
@@ -106,7 +109,9 @@ status snapshots, decoded channel telemetry, decoder error counts, Wi-Fi state, 
 The channel view keeps printer-facing AMS motion separate from the BMCU controller phase and also shows
 cached motor PWM, encoder delta, sensor validity, and motion faults.
 
-The HTTP API is deliberately read-only. Link-scoped endpoints are:
+Telemetry HTTP endpoints are deliberately read-only. The only write endpoint is
+the CSRF-protected Bambuddy commissioning configuration at
+`POST /api/bambuddy/config`. Link-scoped telemetry endpoints are:
 
 - `GET /api/devices`
 - `GET /api/devices/<link-id>/status`

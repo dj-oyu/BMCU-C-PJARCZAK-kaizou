@@ -1,7 +1,7 @@
 # Pico to Bambuddy transport
 
-Status: production transport architecture; endpoint and credential details are
-deployment-specific and remain to be supplied by Bambuddy.
+Status: telemetry-only Phase 5 transport implemented against the Bambuddy
+Issue #2 contract.
 
 ## 1. Data path
 
@@ -19,12 +19,11 @@ transport confidentiality. Routed or untrusted deployments require a
 WSS-capable gateway or a future non-blocking TLS adapter.
 
 The Pico initiates and owns one persistent authenticated WebSocket connection.
-Bambuddy must not discover a Pico and poll its local HTTP API. The HTTP server
-is an independent, read-only diagnostic surface for a browser on the same LAN;
-it has no delivery acknowledgement, replay, or completeness guarantee.
+Bambuddy must not discover a Pico and poll its local HTTP API. Its telemetry
+endpoints are independent, read-only diagnostics with no delivery ACK, replay,
+or completeness guarantee. The only local write is commissioning configuration.
 
-Commands within the approved scope travel from Bambuddy to the Pico over the
-same WebSocket that the Pico initiated. The Pico does not open a production
+Phase 5 accepts no CONTROL messages. The Pico does not open a production
 listener and does not accept inbound Bambuddy connections.
 
 ## 2. Responsibilities
@@ -41,7 +40,7 @@ The Pico:
 
 Bambuddy:
 
-- provides the authenticated WSS ingest endpoint and provisions credentials;
+- provides the authenticated WebSocket ingest endpoint and credentials;
 - persists envelopes before acknowledging their deduplication keys;
 - deduplicates reconnect replay and reports telemetry gaps;
 - owns history, UI, notification, authorization, and retention; and
@@ -74,6 +73,10 @@ count. Bambuddy then accepts oldest-first telemetry and acknowledges only data
 that it has durably persisted. Replayed records are safe because their dedup
 keys are stable for the boot/link session.
 
+Each telemetry text message is either one envelope or a JSON array of envelopes;
+there is no batch wrapper object. The Pico uses at most 16 records per batch,
+below Bambuddy's 500-envelope server limit.
+
 ## 4. Queue and backpressure
 
 The FIFO covers the most recent 30 seconds and has a fixed record limit. Socket
@@ -90,7 +93,7 @@ deduplication rules are normative in the envelope contract.
 The Pico may publish its hostname with mDNS for commissioning and browser
 diagnostics. Neither mDNS nor `GET /api/*` is a production Bambuddy ingestion
 mechanism. Bambuddy endpoint discovery/configuration is the opposite direction:
-the Pico must be provisioned with, or securely obtain, the Bambuddy WSS URL.
+the Pico is provisioned with the Bambuddy WebSocket URL and token.
 
 The diagnostic API may show a newer in-memory snapshot than Bambuddy has
 persisted, and it may omit transient events. No production adapter may scrape
@@ -104,14 +107,16 @@ deduplication key, and durable ACK semantics. It is not periodic Bambuddy-side
 polling. This fallback adds connection/TLS overhead and cannot carry commands;
 therefore WebSocket remains the preferred transport.
 
-## 7. Implementation gate
+## 7. Implemented Phase 5 profile
 
-The checked-in Pico code stops at `publish()` today. Production transport code
-must not be added until the Bambuddy deployment supplies:
-
-1. the WSS endpoint and handshake path;
-2. the authentication and credential-provisioning scheme;
-3. the exact ACK and reconnect-resume messages; and
-4. the allowed command schema, operation ID, and TTL rules.
-
-These are adapter inputs, not reasons to replace push with Bambuddy polling.
+- endpoint: `ws://<host>:8000/api/v1/bmcu-link/ws?token=<token>` on a trusted
+  private LAN;
+- commissioning: bounded CSRF-protected local POST, atomic flash replacement,
+  token never returned, plus `secrets.py` bootstrap fallback;
+- reconnect: transport HELLO envelope, then oldest-unacknowledged arrays;
+- ACK: at least 10 second progress timeout, per-link persisted watermark, and
+  partial rejection by batch index;
+- retry: retryable rejection remains queued; non-retryable rejection is
+  quarantined and counted as a transport drop; and
+- CONTROL: excluded from Phase 5. Future presentation, reset, and motion
+  commands require their separately scoped and authenticated contract.

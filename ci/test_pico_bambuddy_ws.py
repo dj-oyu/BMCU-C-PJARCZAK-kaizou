@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -79,11 +80,45 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(endpoint["path"], "/path?q=1")
         with self.assertRaises(ValueError):
             ws.parse_ws_url("https://host/path")
+        with self.assertRaises(ValueError):
+            ws.parse_ws_url("ws://host/path\r\nInjected: value")
+        self.assertEqual(ws._quote("a b&c"), "a%20b%26c")
 
     def test_client_frames_are_masked_and_round_trip(self):
         frame = ws.client_frame("hello", mask=b"1234")
         self.assertTrue(frame[1] & 0x80)
         self.assertEqual(decode_client_frame(frame), b"hello")
+
+    def test_transport_hello_lists_observed_link_sessions(self):
+        outbox = self.outbox()
+        outbox.publish({
+            "type": "hello", "link_id": "bmcu-a",
+            "bmcu_boot_session": 3,
+        }, 1, 1000)
+        hello = self.client(outbox)._hello()
+        self.assertEqual(hello["frame"]["kind"], "hello")
+        self.assertEqual(hello["data"]["links"][0]["link_id"], "bmcu-a")
+        self.assertEqual(hello["data"]["links"][0]["bmcu_boot_session"], 3)
+
+    def test_unpersisted_transport_hello_is_reused_on_reconnect(self):
+        client = self.client()
+        first = client._hello()
+        client._close()
+        self.assertIs(client._hello(), first)
+        link = first["link"]
+        client._handle_message(json.dumps({
+            "type": "ack",
+            "persisted": [{
+                "link_id": link["id"],
+                "pico_boot_session": link["pico_boot_session"],
+                "transport_sequence": link["transport_sequence"],
+            }],
+        }).encode())
+        client._close()
+        second = client._hello()
+        self.assertGreater(second["link"]["transport_sequence"],
+                           first["link"]["transport_sequence"])
+
 
     def test_server_parser_handles_split_input_and_ping(self):
         parser = ws.ServerFrameParser()
@@ -91,6 +126,38 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(parser.feed(encoded[:1]), [])
         self.assertEqual(parser.feed(encoded[1:]), [(1, b"ok")])
         self.assertEqual(parser.feed(server_frame(b"x", 9)), [(9, b"x")])
+
+    def test_telemetry_message_is_envelope_array_without_wrapper(self):
+        outbox = self.outbox()
+        outbox.publish({"type": "status", "link_id": "a"}, 1, 1000)
+        fake = FakeSocket()
+        client = self.client(outbox, lambda _host, _port: fake)
+        client.sock = fake
+        client.state = "online"
+        client._hello_sent = True
+        client.poll(1, True)
+        client.poll(2, True)
+        message = json.loads(decode_client_frame(bytes(fake.sent)))
+        self.assertIsInstance(message, list)
+        self.assertEqual(message[0]["frame"]["kind"], "status")
+
+
+
+    def test_idle_socket_uses_ping_and_liveness_deadline(self):
+        fake = FakeSocket()
+        client = self.client(socket_factory=lambda _host, _port: fake)
+        client.sock = fake
+        client.state = "online"
+        client._hello_sent = True
+        client.poll(0, True)
+        client.poll(30000, True)
+        client.poll(30001, True)
+        frame = bytes(fake.sent)
+        self.assertEqual(frame[0] & 0x0F, 9)
+        client.poll(40000, True)
+        self.assertEqual(client.state, "backoff")
+        self.assertIn("liveness", client.last_error)
+
 
     def test_handshake_is_validated_and_token_is_only_in_request(self):
         key = ws._b64(self.random(16))

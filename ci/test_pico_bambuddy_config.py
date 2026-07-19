@@ -1,0 +1,137 @@
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PICO = ROOT / "pico"
+sys.path.insert(0, str(PICO))
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, PICO / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+config_module = load("bambuddy_config")
+web_module = load("web_ui")
+
+
+class FixedRandom:
+    def __init__(self):
+        self.value = 0
+
+    def __call__(self, size):
+        self.value += 1
+        return bytes([self.value]) * size
+
+
+class BambuddyConfigTests(unittest.TestCase):
+    def test_update_persists_but_never_returns_token(self):
+        random = FixedRandom()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "bambuddy.json")
+            settings = config_module.BambuddyConfig(
+                path=path, random_bytes=random)
+            public = settings.public()
+            saved = settings.update({
+                "csrf": public["csrf"],
+                "enabled": True,
+                "url": "ws://bambuddy.local:8000/api/v1/bmcu-link/ws",
+                "token": "private-token",
+            })
+            self.assertTrue(saved["token_set"])
+            self.assertNotIn("token", saved)
+            reloaded = config_module.BambuddyConfig(
+                path=path, random_bytes=random)
+            self.assertEqual(reloaded.token, "private-token")
+            self.assertTrue(reloaded.enabled)
+
+    def test_invalid_persisted_config_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bambuddy.json"
+            path.write_text('{"enabled":true,"url":"https://bad","token":"x"}')
+            settings = config_module.BambuddyConfig(path=str(path))
+            self.assertFalse(settings.enabled)
+            self.assertEqual(settings.url, "")
+
+    def test_csrf_is_required_and_rotates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = config_module.BambuddyConfig(
+                path=str(Path(directory) / "bambuddy.json"),
+                random_bytes=FixedRandom())
+            old = settings.public()["csrf"]
+            with self.assertRaises(ValueError):
+                settings.update({"csrf": "bad", "enabled": False})
+            result = settings.update({"csrf": old, "enabled": False})
+            self.assertNotEqual(result["csrf"], old)
+
+
+class WebUIConfigTests(unittest.TestCase):
+
+    def test_url_must_not_embed_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = config_module.BambuddyConfig(
+                path=str(Path(directory) / "bambuddy.json"))
+            with self.assertRaises(ValueError):
+                settings.update({
+                    "csrf": settings.public()["csrf"],
+                    "enabled": True,
+                    "url": "ws://host/ws?token=leak",
+                    "token": "separate",
+                })
+
+    def settings(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return config_module.BambuddyConfig(
+            path=str(Path(directory.name) / "bambuddy.json"),
+            random_bytes=FixedRandom())
+
+    def web(self, settings):
+        return web_module.WebUI(
+            lambda _path: {"ok": True},
+            config_provider=settings.public,
+            config_updater=settings.update)
+
+    def test_get_config_contains_no_secret(self):
+        settings = self.settings()
+        web = self.web(settings)
+        web.request = bytearray(
+            b"GET /api/bambuddy/config HTTP/1.1\r\nHost: pico\r\n\r\n")
+        self.assertTrue(web._request_ready())
+        web._finish_request()
+        self.assertIn(b"200 OK", web.response)
+        self.assertNotIn(b'"token":', web.response)
+
+    def test_post_waits_for_full_body_and_updates(self):
+        settings = self.settings()
+        web = self.web(settings)
+        body = json.dumps({
+            "csrf": settings.public()["csrf"],
+            "enabled": True,
+            "url": "ws://host:8000/ws",
+            "token": "secret",
+        }).encode()
+        header = (
+            b"POST /api/bambuddy/config HTTP/1.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + ("Content-Length: %d\r\n\r\n" % len(body)).encode()
+        )
+        web.request = bytearray(header + body[:-1])
+        self.assertFalse(web._request_ready())
+        web.request.extend(body[-1:])
+        self.assertTrue(web._request_ready())
+        web._finish_request()
+        self.assertIn(b"200 OK", web.response)
+        self.assertTrue(settings.enabled)
+        self.assertNotIn(b"secret", web.response)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -92,6 +92,14 @@ class BambuddyTransportTests(unittest.TestCase):
         self.assertIn("transport_drop", kinds)
         self.assertEqual(outbox.queue.dropped_count, 1)
 
+    def test_batch_expires_stale_records_before_replay(self):
+        queue = transport.TelemetryQueue(limit=4, max_age_ms=10)
+        builder = self.builder()
+        queue.enqueue(builder.build({"type": "event", "link_id": "a"}, 0), 0)
+        self.assertEqual(queue.batch(now_ms=11), [])
+        self.assertEqual(queue.dropped_count, 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()

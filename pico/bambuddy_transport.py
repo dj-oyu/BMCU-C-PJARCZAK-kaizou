@@ -59,6 +59,16 @@ class EnvelopeBuilder:
         self._protocol = {}
         self._link_state = {}
 
+    def link_sessions(self):
+        link_ids = set(self._transport_sequence)
+        link_ids.update(self._bmcu_boot_session)
+        link_ids.update(self._link_state)
+        return [{
+            "link_id": link_id,
+            "bmcu_boot_session": self._bmcu_boot_session.get(link_id, 0),
+            "state": self._link_state.get(link_id, "unknown"),
+        } for link_id in sorted(link_ids)]
+
     def _next_sequence(self, link_id):
         value = self._transport_sequence.get(link_id, 0)
         self._transport_sequence[link_id] = value + 1
@@ -157,7 +167,9 @@ class TelemetryQueue:
                              "critical": bool(critical)})
         return self.dropped_count - before
 
-    def batch(self, limit=16):
+    def batch(self, limit=16, now_ms=None):
+        if now_ms is not None:
+            self._expire(now_ms)
         return [record["envelope"] for record in self.records[:limit]]
 
     @staticmethod

@@ -8,6 +8,18 @@ import socket
 
 
 PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>BMCU Monitor</title><style>:root{color-scheme:dark;--bg:#0b1018;--card:#151d29;--line:#2a3b52;--muted:#9eafc5;--ok:#44d19a;--bad:#ff7180}*{box-sizing:border-box}body{max-width:920px;margin:auto;padding:20px;font:15px system-ui,sans-serif;background:var(--bg);color:#edf4ff}h1{margin:0;font-size:1.5rem}.sub{color:var(--muted);margin:.35rem 0 1rem}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.label{font-size:.78rem;color:var(--muted);text-transform:uppercase}.value{font-size:1.35rem;font-weight:650;margin-top:4px}.ok{color:var(--ok)}.bad{color:var(--bad)}h2{font-size:1rem;margin:24px 0 10px}.slots{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.slot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}.slot.active{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok)}.slot b{font-size:1.05rem}dl{margin:9px 0 0}dt{color:var(--muted);font-size:.75rem}dd{margin:1px 0 8px}details{margin-top:20px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}pre{overflow:auto;white-space:pre-wrap;font-size:.75rem;color:var(--muted)}@media(max-width:500px){.slots{grid-template-columns:repeat(2,1fr)}}</style></head><body><h1>BMCU Monitor</h1><p class="sub" id="summary">Connecting...</p><section class="grid"><article class="card"><div class="label">BMCU Link</div><div class="value" id="link">--</div></article><article class="card"><div class="label">Wi-Fi</div><div class="value" id="wifi">--</div></article><article class="card"><div class="label">Selected Slot</div><div class="value" id="selected">--</div></article><article class="card"><div class="label">Selected Pull</div><div class="value" id="pull">--</div></article><article class="card"><div class="label">Pull Delta</div><div class="value" id="delta">--</div></article></section><h2>Filament Channels</h2><section class="slots" id="slots"></section><h2>Link Diagnostics</h2><section class="grid"><article class="card"><div class="label">BMCU TX drop</div><div class="value" id="txdrop">--</div></article><article class="card"><div class="label">BMCU RX / CRC / frame</div><div class="value" id="errors">--</div></article></section><h2>Recent Events</h2><section class="grid" id="events"></section><details><summary>Show diagnostic JSON</summary><pre id="raw"></pre></details><script>const $=id=>document.getElementById(id),bit=(m,n)=>((m||0)&(1<<n))?'Present':'None';function val(x,d='--'){return x===undefined||x===null?d:x}const amsName=n=>['idle','send-out','on-use','before-pull-back','pull-back','before-on-use','stop-on-use'][n]||'#'+val(n),ctrlName=n=>n===undefined||n===null?'--':(['send','redetect','pull','stop','before-on-use','stop-on-use','pressure-on-use','pressure-idle','before-pull-back'][n]||'#'+n);function set(id,x,good){let e=$(id);e.textContent=x;e.className='value '+(good===true?'ok':good===false?'bad':'')}function draw(x){let b=x.bmcu||{},s=b.status||{},c=b.channels||[],on=b.link==='online',w=x.wifi||{};set('link',on?'ONLINE':'STALE',on);set('wifi',val(w.state).toUpperCase(),w.state==='online');let selected=s.current_slot,active=(selected!==undefined&&selected!==255&&((s.inserted_mask||0)&(1<<selected))&&s.pull_pct)?s.pull_pct[selected]:null;set('selected',selected===255||selected===undefined?'None':'#'+(selected+1));set('pull',active===null?'N/A':active+' %',active!==null);set('delta',active===null?'N/A':(active>=50?'+':'')+(active-50)+' pts',active!==null);$('summary').textContent=w.hostname?'Pico http://'+w.hostname+'.local/ ('+val(w.ip,'no IP')+') / refreshes every second':'Pico '+val(w.ip,'no IP')+' / refreshes every second';$('slots').innerHTML=[0,1,2,3].map(i=>{let active=s.current_slot===i,t=c[i]||{};return '<article class="slot '+(active?'active':'')+'"><b>Slot '+(i+1)+'</b><dl><dt>Filament</dt><dd>'+bit(s.inserted_mask,i)+'</dd><dt>Online</dt><dd>'+bit(s.online_mask,i)+'</dd><dt>Pull</dt><dd>'+val(s.pull_pct&&s.pull_pct[i])+' %</dd><dt>AMS state</dt><dd>'+amsName(s.motion&&s.motion[i])+'</dd><dt>Controller</dt><dd>'+ctrlName(t.controller_motion)+'</dd><dt>Motor PWM</dt><dd>'+val(t.motor_pwm)+'</dd><dt>Encoder delta</dt><dd>'+val(t.position_delta)+'</dd><dt>Sensor</dt><dd>'+(t.sensor_good?'Good':(t.sensor_online?'Fault':'Offline'))+'</dd><dt>Motion fault</dt><dd>#'+val(t.motion_fault)+'</dd></dl></article>'}).join('');set('txdrop',val(s.tx_drop));set('errors',val(s.rx_drop)+' / '+val(s.crc_error)+' / '+val(s.frame_error));$('events').innerHTML=(b.events||[]).slice().reverse().map(e=>'<article class="card"><div class="label">'+e.event_name+' / severity '+e.severity+'</div><div>'+((e.event_name==='state_change')?'Field '+e.field+', slot '+e.slot+': '+e.previous_value+' -> '+e.value:((e.event_name==='sensor')?'Sensor '+e.sensor+', slot '+e.slot+': '+e.value:'Record '+e.record_type))+'</div></article>').join('')||'<article class="card">No push events received yet.</article>';$('raw').textContent=JSON.stringify(x,null,2)}async function refresh(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);draw(await r.json())}catch(e){$('summary').textContent='Refresh error: '+e}}refresh();setInterval(refresh,1000)</script></body></html>""".encode()
+PAGE = PAGE.replace(b"</h1>", b"</h1><p><a href='/settings'>Bambuddy settings</a></p>", 1)
+SETTINGS_PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bambuddy settings</title><style>body{max-width:640px;margin:2rem auto;padding:0 1rem;font:16px system-ui;background:#0b1018;color:#edf4ff}label{display:block;margin:1rem 0}input[type=url],input[type=password]{width:100%;padding:.7rem;background:#151d29;color:inherit;border:1px solid #456;border-radius:6px}button{padding:.7rem 1rem}#status{margin-left:1rem}</style></head><body><p><a href="/">Monitor</a></p><h1>Bambuddy transport</h1><p>Trusted-LAN ws:// push transport. Credential scope: telemetry:write.</p><form id="form"><label><input id="enabled" type="checkbox"> Enable transport</label><label>WebSocket URL<input id="url" type="url" placeholder="ws://bambuddy.local:8000/api/v1/bmcu-link/ws"></label><label>Token (leave blank to keep current)<input id="token" type="password" autocomplete="new-password"></label><button>Save</button><span id="status"></span></form><script>let csrf;async function load(){let r=await fetch('/api/bambuddy/config',{cache:'no-store'}),x=await r.json();csrf=x.csrf;enabled.checked=x.enabled;url.value=x.url;status.textContent=x.token_set?'Token is set':'No token'}form.onsubmit=async e=>{e.preventDefault();let body={csrf,enabled:enabled.checked,url:url.value,token:token.value},r=await fetch('/api/bambuddy/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),x=await r.json();if(!r.ok){status.textContent=x.error||'Save failed';return}csrf=x.csrf;token.value='';status.textContent='Saved'};load()</script></body></html>""".encode()
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"</form>", b"<p id='transport'>Connection: --</p></form>", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"status.textContent=x.token_set?'Token is set':'No token'",
+    b"status.textContent=x.token_set?'Token is set':'No token';"
+    b"let t=x.transport||{};transport.textContent='Connection: '+"
+    b"(t.state||'disabled')+(t.last_error?' / '+t.last_error:'')", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"status.textContent='Saved'};load()",
+    b"status.textContent='Saved';setTimeout(load,300)};load()", 1)
 
 
 def _json_safe(value):
@@ -23,8 +35,11 @@ def _json_safe(value):
 class WebUI:
     """Services at most one non-blocking HTTP connection at a time."""
 
-    def __init__(self, state_provider, port=80):
+    def __init__(self, state_provider, port=80, config_provider=None,
+                 config_updater=None):
         self.state_provider = state_provider
+        self.config_provider = config_provider
+        self.config_updater = config_updater
         self.port = port
         self.server = None
         self.client = None
@@ -48,20 +63,74 @@ class WebUI:
                   (status, content_type, len(body)))
         return header.encode() + body
 
+    def _request_ready(self):
+        marker = self.request.find(b'\r\n\r\n')
+        if marker < 0:
+            return False
+        header = bytes(self.request[:marker]).split(b'\r\n')
+        content_length = 0
+        for line in header[1:]:
+            name, separator, value = line.partition(b':')
+            if separator and name.strip().lower() == b'content-length':
+                try:
+                    content_length = int(value.strip())
+                except ValueError:
+                    content_length = -1
+        if content_length < 0 or content_length > 2048:
+            self.response = self._http_response(
+                '413 Payload Too Large', 'text/plain', b'Request too large\n')
+            return False
+        return len(self.request) >= marker + 4 + content_length
+
+    def _json_response(self, status, value):
+        body = json.dumps(_json_safe(value)).encode()
+        return self._http_response(status, 'application/json', body)
+
     def _finish_request(self):
-        first_line = bytes(self.request).split(b'\r\n', 1)[0].split()
+        marker = self.request.find(b'\r\n\r\n')
+        header = bytes(self.request[:marker])
+        body = bytes(self.request[marker + 4:])
+        first_line = header.split(b'\r\n', 1)[0].split()
+        method = first_line[0] if len(first_line) >= 1 else b''
         path = first_line[1] if len(first_line) >= 2 else b''
-        if path == b'/':
-            self.response = self._http_response('200 OK', 'text/html; charset=utf-8', PAGE)
-        elif path.startswith(b'/api/'):
+        if method == b'GET' and path == b'/':
+            self.response = self._http_response(
+                '200 OK', 'text/html; charset=utf-8', PAGE)
+        elif method == b'GET' and path == b'/settings':
+            self.response = self._http_response(
+                '200 OK', 'text/html; charset=utf-8', SETTINGS_PAGE)
+        elif path == b'/api/bambuddy/config' and method == b'GET':
+            if self.config_provider is None:
+                self.response = self._json_response('404 Not Found',
+                                                    {"error": "Not found"})
+            else:
+                self.response = self._json_response('200 OK',
+                                                    self.config_provider())
+        elif path == b'/api/bambuddy/config' and method == b'POST':
+            if self.config_updater is None:
+                self.response = self._json_response('404 Not Found',
+                                                    {"error": "Not found"})
+            else:
+                try:
+                    request = json.loads(body.decode())
+                    result = self.config_updater(request)
+                    self.response = self._json_response('200 OK', result)
+                except (ValueError, TypeError) as exc:
+                    self.response = self._json_response(
+                        '400 Bad Request', {"error": str(exc)})
+        elif method == b'GET' and path.startswith(b'/api/'):
             state = self.state_provider(path.decode())
             if state is None:
-                self.response = self._http_response('404 Not Found', 'text/plain', b'Not found\n')
+                self.response = self._json_response('404 Not Found',
+                                                    {"error": "Not found"})
             else:
-                body = json.dumps(_json_safe(state)).encode()
-                self.response = self._http_response('200 OK', 'application/json', body)
+                self.response = self._json_response('200 OK', state)
+        elif method not in (b'GET', b'POST'):
+            self.response = self._http_response(
+                '405 Method Not Allowed', 'text/plain', b'Method not allowed\n')
         else:
-            self.response = self._http_response('404 Not Found', 'text/plain', b'Not found\n')
+            self.response = self._http_response(
+                '404 Not Found', 'text/plain', b'Not found\n')
 
     def _close_client(self):
         if self.client:
@@ -95,9 +164,9 @@ class WebUI:
                 self._close_client()
                 return
             self.request.extend(data)
-            if len(self.request) > 1024:
+            if len(self.request) > 3072:
                 self.response = self._http_response('413 Payload Too Large', 'text/plain', b'Request too large\n')
-            elif b'\r\n\r\n' in self.request:
+            elif self._request_ready():
                 self._finish_request()
             return
         try:

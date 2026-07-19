@@ -112,8 +112,9 @@ not as filament faults.
 
 ## 4. Security and control scope
 
-The WebSocket/POST endpoint requires Bambuddy authentication before it accepts
-telemetry. TLS and credential provisioning are deployment concerns of the
-Bambuddy fork. This contract covers S0/S1 observation and LED feedback only;
-all CONTROL operations remain disabled until Bambuddy authentication and their
-separate lease/TTL safety contract are implemented.
+The WebSocket/POST endpoint requires a device-scoped `telemetry:write`
+credential before it accepts telemetry.
+Trusted private LAN deployments may use `ws://`; routed or untrusted
+deployments require TLS termination. Phase 5 is telemetry-only. All CONTROL
+operations remain disabled until their separate scope, authentication, replay,
+TTL, and safety contracts are implemented.

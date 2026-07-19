@@ -23,7 +23,7 @@ except ImportError:
 
 
 _GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-_WOULD_BLOCK = (11, 35, 10035, 115)
+_WOULD_BLOCK = (11, 35, 57, 107, 115, 10035, 10057)
 
 
 def ticks_diff(now, then):
@@ -34,9 +34,19 @@ def ticks_diff(now, then):
     return time.ticks_diff(now, then) if hasattr(time, "ticks_diff") else now - then
 
 
+def ticks_add(value, delta):
+    try:
+        import utime as time
+    except ImportError:
+        import time
+    return time.ticks_add(value, delta) if hasattr(time, "ticks_add") else value + delta
+
+
 def parse_ws_url(url):
     if not isinstance(url, str) or "://" not in url:
         raise ValueError("invalid WebSocket URL")
+    if "\r" in url or "\n" in url:
+        raise ValueError("invalid characters in WebSocket URL")
     scheme, rest = url.split("://", 1)
     if scheme != "ws":
         raise ValueError("only trusted-LAN ws:// is currently supported")
@@ -70,6 +80,17 @@ def _b64(data):
     if isinstance(encoded, bytes):
         encoded = encoded.strip().decode()
     return encoded.strip()
+
+
+def _quote(value):
+    safe = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    result = []
+    for value_byte in value.encode():
+        if value_byte in safe:
+            result.append(chr(value_byte))
+        else:
+            result.append("%%%02X" % value_byte)
+    return "".join(result)
 
 
 def _sha1(data):
@@ -153,7 +174,7 @@ class BambuddyWebSocketClient:
 
     def __init__(self, outbox, url, token, firmware="unknown", capabilities=None,
                  batch_limit=16, ack_timeout_ms=10000, socket_factory=None,
-                 random_bytes=None):
+                 random_bytes=None, clock_us=None):
         self.outbox = outbox
         self.endpoint = parse_ws_url(url)
         self.token = token
@@ -163,6 +184,7 @@ class BambuddyWebSocketClient:
         self.ack_timeout_ms = max(10000, ack_timeout_ms)
         self.socket_factory = socket_factory or self._default_socket
         self.random_bytes = random_bytes or os.urandom
+        self.clock_us = clock_us or (lambda: 0)
         self.state = "wifi_wait"
         self.last_error = None
         self.sock = None
@@ -176,6 +198,12 @@ class BambuddyWebSocketClient:
         self._inflight_at = 0
         self._backoff_index = 0
         self._retry_at = 0
+
+        self._resend_not_before = 0
+        self._hello_envelope = None
+        self._hello_persisted = False
+        self._ping_at = 0
+        self._pong_deadline = 0
 
     def _default_socket(self, host, port):
         address = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0][-1]
@@ -194,7 +222,7 @@ class BambuddyWebSocketClient:
         target = endpoint["path"]
         separator = "&" if "?" in target else "?"
         if self.token:
-            target += separator + "token=" + self.token
+            target += separator + "token=" + _quote(self.token)
         host = endpoint["host"]
         if endpoint["port"] != 80:
             host += ":" + str(endpoint["port"])
@@ -216,7 +244,7 @@ class BambuddyWebSocketClient:
         self._handshake_out = self._request()
         self._handshake_in = bytearray()
         self._parser = ServerFrameParser()
-        self.state = "handshake"
+        self.state = "authenticate"
 
     def _close(self):
         if self.sock is not None:
@@ -227,13 +255,18 @@ class BambuddyWebSocketClient:
         self.sock = None
         self._send_buffer = b""
         self._hello_sent = False
+        if self._hello_persisted:
+            self._hello_envelope = None
+            self._hello_persisted = False
+        self._ping_at = 0
+        self._pong_deadline = 0
 
     def _fail(self, now_ms, reason):
         self.last_error = str(reason)
         self._close()
         delay = self.BACKOFF_MS[min(self._backoff_index, len(self.BACKOFF_MS) - 1)]
         jitter = int.from_bytes(self.random_bytes(2), "big") % 251
-        self._retry_at = now_ms + delay + jitter
+        self._retry_at = ticks_add(now_ms, delay + jitter)
         self._backoff_index = min(self._backoff_index + 1,
                                   len(self.BACKOFF_MS) - 1)
         self.state = "backoff"
@@ -294,16 +327,17 @@ class BambuddyWebSocketClient:
             self._handle_frames(remainder)
 
     def _hello(self):
-        return {
-            "type": "hello",
-            "schema": "bmcu.management.v2",
-            "device_id": self.outbox.builder.device_id,
-            "pico_boot_session": self.outbox.pico_boot_session,
-            "firmware": self.firmware,
-            "capabilities": self.capabilities,
-            "scope": "telemetry:write",
-            "drop_count": self.outbox.queue.dropped_count,
-        }
+        if self._hello_envelope is None:
+            self._hello_envelope = self.outbox.builder.build({
+                "type": "hello",
+                "link_id": "transport",
+                "firmware": self.firmware,
+                "capabilities": self.capabilities,
+                "links": self.outbox.builder.link_sessions(),
+                "scope": "telemetry:write",
+                "drop_count": self.outbox.queue.dropped_count,
+            }, self.clock_us(), len(self.outbox.queue))
+        return self._hello_envelope
 
     def _queue_json(self, value):
         self._send_buffer = client_frame(json.dumps(value),
@@ -331,9 +365,28 @@ class BambuddyWebSocketClient:
 
     def _handle_message(self, payload):
         message = json.loads(payload.decode())
+        if message.get("type") == "error":
+            detail = str(message.get("detail", message.get("code", "server error")))
+            if self.token:
+                detail = detail.replace(self.token, "***")
+            self.last_error = "Bambuddy: " + detail[:160]
+            return
         if message.get("type") != "ack":
             return
-        self.outbox.apply_ack(self._enrich_ack(message))
+        if self._hello_envelope is not None:
+            hello_link = self._hello_envelope["link"]
+            for item in message.get("persisted", []):
+                if (item.get("link_id") == hello_link["id"] and
+                        item.get("pico_boot_session") ==
+                        hello_link["pico_boot_session"] and
+                        item.get("transport_sequence", -1) >=
+                        hello_link["transport_sequence"]):
+                    self._hello_persisted = True
+        result = self.outbox.apply_ack(self._enrich_ack(message))
+        if result["persisted"] == 0 and result["rejected"] == 0:
+            self._resend_not_before = ticks_add(self._inflight_at, 1000)
+        else:
+            self._resend_not_before = 0
         self._inflight = None
 
     def _handle_frames(self, data):
@@ -341,7 +394,13 @@ class BambuddyWebSocketClient:
             if opcode == 1:
                 self._handle_message(payload)
             elif opcode == 8:
-                raise OSError("WebSocket closed")
+                code = ((payload[0] << 8) | payload[1]) if len(payload) >= 2 else 0
+                reason = payload[2:].decode() if len(payload) > 2 else ""
+                if code == 4401:
+                    reason = reason or "authentication failed"
+                elif code == 4404:
+                    reason = reason or "BMCU Link feature disabled"
+                raise OSError("WebSocket close %d: %s" % (code, reason))
             elif opcode == 9:
                 if self._send_buffer:
                     raise OSError("ping received while send is pending")
@@ -359,7 +418,20 @@ class BambuddyWebSocketClient:
             raise OSError("WebSocket closed")
         if data:
             self._handle_frames(data)
+            self._ping_at = ticks_add(now_ms, 30000)
+            self._pong_deadline = 0
         if self._send_buffer:
+            return
+        if (self._pong_deadline and
+                ticks_diff(now_ms, self._pong_deadline) >= 0):
+            raise OSError("WebSocket liveness timeout")
+        if not self._ping_at:
+            self._ping_at = ticks_add(now_ms, 30000)
+        elif ticks_diff(now_ms, self._ping_at) >= 0:
+            self._send_buffer = client_frame(
+                b"bmcu", opcode=9, mask=self.random_bytes(4))
+            self._pong_deadline = ticks_add(now_ms, 10000)
+            self._ping_at = ticks_add(now_ms, 30000)
             return
         if not self._hello_sent:
             self._queue_json(self._hello())
@@ -369,11 +441,14 @@ class BambuddyWebSocketClient:
             if ticks_diff(now_ms, self._inflight_at) >= self.ack_timeout_ms:
                 raise OSError("Bambuddy ACK timeout")
             return
-        batch = self.outbox.queue.batch(self.batch_limit)
+        if (self._resend_not_before and
+                ticks_diff(now_ms, self._resend_not_before) < 0):
+            return
+        batch = self.outbox.queue.batch(self.batch_limit, now_ms)
         if batch:
             self._inflight = batch
             self._inflight_at = now_ms
-            self._queue_json({"type": "telemetry_batch", "records": batch})
+            self._queue_json(batch)
 
     def poll(self, now_ms, wifi_online=True):
         if not wifi_online:
@@ -392,12 +467,16 @@ class BambuddyWebSocketClient:
                 self._fail(now_ms, exc)
                 return
         try:
-            if self.state == "handshake":
+            if self.state == "authenticate":
                 self._poll_handshake()
             elif self.state == "online":
                 self._poll_online(now_ms)
         except Exception as exc:
             self._fail(now_ms, exc)
+
+    def stop(self):
+        self._close()
+        self.state = "disabled"
 
     def status(self):
         return {

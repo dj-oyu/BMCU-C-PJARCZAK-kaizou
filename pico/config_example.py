@@ -7,6 +7,7 @@ UART_RX_PIN = 1
 UART_BAUDRATE = 115200
 WEB_PORT = 80
 BRIDGE_ID = "pico-bmcu-bridge"
+PICO_FIRMWARE_VERSION = "alpha.3"
 BMCU_LINKS = (
     {"id": "bmcu-a", "uart": 0, "tx": 0, "rx": 1},
     {"id": "bmcu-b", "uart": 1, "tx": 4, "rx": 5},

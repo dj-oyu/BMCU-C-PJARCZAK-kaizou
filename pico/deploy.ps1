@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "mpremote Python environment not found: $python"
 }
 
-$files = @('bmcu_link.py', 'wifi.py', 'web_ui.py', 'main.py')
+$files = @('bmcu_link.py', 'bambuddy_transport.py', 'bambuddy_ws.py', 'bambuddy_config.py', 'wifi.py', 'web_ui.py', 'main.py')
 foreach ($name in $files) {
     $source = Join-Path $PSScriptRoot $name
     & $python -m mpremote connect $Port fs cp $source (':' + $name)
