@@ -28,7 +28,8 @@ Every envelope has this shape (additional fields are allowed):
     "state": "online",
     "pico_boot_session": "pico-random-at-boot",
     "bmcu_boot_session": 4,
-    "sequence": 1234,
+    "transport_sequence": 1234,
+    "bmcu_sequence": 77,
     "queue_depth": 2
   },
   "frame": {"kind": "status", "kind_id": 2, "protocol": 131},
@@ -47,12 +48,17 @@ Every envelope has this shape (additional fields are allowed):
   Pico boot. `bmcu_boot_session` starts at zero for a new Pico session and is
   incremented after each valid BMCU `HELLO`; it changes even if BMCU sequence
   numbers happen to repeat.
-- `sequence` is the received BMCU UART sequence for a frame. Pico-local
-  messages use a bridge-generated sequence in the same link session.
+- `transport_sequence` is a Pico-generated `u64`, starts at zero for each
+  `(link.id, pico_boot_session)`, and increments for every envelope. It is the
+  transport ordering and acknowledgement value.
+- `bmcu_sequence`, when present, is the received wrapping BMCU UART `u16`.
+  Multiple full-status records may share it; it is diagnostic metadata and is
+  never a transport deduplication key.
 - `mode` is exactly `production_monitor` or `bench_stub`.
 
 Bambuddy deduplicates with `(device_id, link.id, pico_boot_session,
-bmcu_boot_session, sequence)`. It must retain raw numeric enum values and
+`transport_sequence)`. It must retain `bmcu_boot_session`, `bmcu_sequence`,
+raw numeric enum values and
 unknown fields. `registry_version` selects
 [`bmcu_link_enum_registry.json`](bmcu_link_enum_registry.json); an unknown
 number is displayed/stored numerically rather than rejected.
@@ -73,7 +79,8 @@ later queued telemetry:
   "device_id": "stable-pico-id",
   "received_at_us": 123456999,
   "link": {"id": "default", "pico_boot_session": "pico-random-at-boot",
-           "bmcu_boot_session": 4, "queue_depth": 30},
+           "bmcu_boot_session": 4, "transport_sequence": 1235,
+           "queue_depth": 30},
   "frame": {"kind": "transport_drop", "kind_id": null, "protocol": 131},
   "data": {"dropped_count": 7, "reason": "queue_overflow"}
 }
@@ -83,8 +90,12 @@ later queued telemetry:
 reset except by a new `pico_boot_session`. A reconnect begins with a transport
 HELLO containing `device_id`, Pico firmware version, BMCU firmware/protocol
 range, capabilities, mode, both boot sessions, and current cumulative drop
-count. Bambuddy acknowledges the highest fully persisted deduplication key;
-Pico may discard only acknowledged records.
+count. Bambuddy acknowledges the highest fully persisted
+`(link_id, pico_boot_session, transport_sequence)` watermark. Pico may discard
+only acknowledged records. A partial batch rejection identifies its zero-based
+batch index, `transport_sequence` when parseable, stable error code, and
+`retryable` flag. Pico retains retryable failures; it quarantines non-retryable
+records, increments the cumulative drop count, and continues with later data.
 
 ## 3. Rate and backpressure
 

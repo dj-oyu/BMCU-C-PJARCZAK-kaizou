@@ -42,6 +42,11 @@ Bambuddy:
 - owns history, UI, notification, authorization, and retention; and
 - sends only commands covered by a separately approved command contract.
 
+Credentials are least-privilege. Telemetry uses `telemetry:write`; LED feedback
+uses `presentation:write`; soft reset uses `device:reset`; future mechanical
+operations require `motion:control` and remain disabled. The telemetry token
+never authorizes a control operation.
+
 ## 3. Connection state machine
 
 The network service is cooperative and non-blocking:
