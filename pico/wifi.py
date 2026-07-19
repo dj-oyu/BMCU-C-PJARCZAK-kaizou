@@ -16,6 +16,9 @@ class WiFiStation:
         self.wlan = network.WLAN(network.STA_IF)
         self.ssid = getattr(secrets, "WIFI_SSID", "") if secrets else ""
         self.password = getattr(secrets, "WIFI_PASSWORD", "") if secrets else ""
+        # Set this before enabling STA mode: MicroPython advertises it through
+        # DHCP and mDNS when the port/firmware supports those facilities.
+        self.hostname = getattr(secrets, "MDNS_HOSTNAME", "") if secrets else ""
         self.enabled = bool(self.ssid)
         self.last_attempt_ms = None
         self.reported_connected = None
@@ -34,6 +37,11 @@ class WiFiStation:
         if not self.enabled:
             self._emit("unconfigured")
             return
+        if self.hostname:
+            try:
+                network.hostname(self.hostname)
+            except (AttributeError, ValueError, OSError) as error:
+                self._emit("hostname_error", error=str(error))
         self.wlan.active(True)
         self._connect(now_ms)
 
@@ -46,7 +54,6 @@ class WiFiStation:
             self._emit("connecting", ssid=self.ssid)
         except OSError as error:
             self._emit("error", error=str(error))
-
     def poll(self, now_ms):
         if not self.enabled:
             return

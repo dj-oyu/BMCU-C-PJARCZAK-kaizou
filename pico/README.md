@@ -40,16 +40,22 @@ printer, motor, slot, or filament control API.
 ## Wi-Fi configuration
 
 Copy `secrets_example.py` to `secrets.py` **on the Pico filesystem** and set
-`WIFI_SSID` and `WIFI_PASSWORD`.  `pico/secrets.py` is ignored by Git and must
-never be committed.  Wi-Fi connection and retry are non-blocking; the UART
+`WIFI_SSID` and `WIFI_PASSWORD`. `pico/secrets.py` is ignored by Git and must
+never be committed. Wi-Fi connection and retry are non-blocking; the UART
 reader is run before every network-state service pass.
 
-`DEBUG_USB` is `False` by default.  Set it to `True` in `config.py` only while
+Set `MDNS_HOSTNAME` there to a unique, lowercase LAN name such as
+`bmcu-monitor-a`. It is applied before Wi-Fi station mode is enabled, so the
+Pico is reachable as `http://bmcu-monitor-a.local/` as well as by its DHCP IP.
+Each Pico must use a different hostname. A Bambuddy systemd service can use
+this `.local` address through the host resolver; verify it with
+`resolvectl query -p mdns bmcu-monitor-a.local` on the Bambuddy host.
+
+`DEBUG_USB` is `False` by default. Set it to `True` in `config.py` only while
 commissioning, because USB JSON printing is intentionally excluded from the
-UART receive path.  `publish()` is the one integration boundary to replace
+UART receive path. `publish()` is the one integration boundary to replace
 with a bounded Bambuddy WebSocket/HTTP transport after its authenticated API
 is available.
-
 ## Deploy from this workstation
 
 With the Pico held in BOOTSEL mode, run this from the repository root to copy
@@ -71,7 +77,7 @@ explicitly supplied `secrets.py`; it never touches BMCU firmware sources.
 
 ## Browser status page
 
-Once Wi-Fi is connected, open `http://<Pico-IP>/` from the same LAN.  The page
+Once Wi-Fi is connected, open `http://<MDNS_HOSTNAME>.local/` (or `http://<Pico-IP>/`) from the same LAN. The page
 refreshes once per second and exposes the typed BMCU status, completed full
 status snapshots, decoded channel telemetry, decoder error counts, Wi-Fi state, and BMCU-link state.
 The channel view keeps printer-facing AMS motion separate from the BMCU controller phase and also shows
@@ -80,3 +86,7 @@ cached motor PWM, encoder delta, sensor validity, and motion faults.
 The HTTP API is deliberately read-only: `GET /api/status`.  It exposes no
 motor, slot, or filament operations, and no LED control endpoint until an
 authenticated Bambuddy/UI contract is defined.
+
+The complete Bambuddy-facing field inventory, enum registry, and current
+integration limitations are documented in
+[`docs/PICO_BAMBUDDY_OUTPUT.md`](../docs/PICO_BAMBUDDY_OUTPUT.md).

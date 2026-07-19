@@ -54,7 +54,7 @@ wifi = WiFiStation(secrets, publish)
 def web_state():
     online = not monitor.is_stale(time.ticks_ms())
     return {
-        "wifi": {"state": wifi.state, "ip": wifi.ip},
+        "wifi": {"state": wifi.state, "ip": wifi.ip, "hostname": wifi.hostname},
         "bmcu": {
             "link": "online" if online else "stale",
             "tick_hz": monitor.tick_hz,
