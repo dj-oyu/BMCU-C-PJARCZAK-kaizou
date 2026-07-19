@@ -94,6 +94,7 @@ uint8_t g_led_mode = 0u;
 uint16_t g_led_remaining_s = 0u;
 uint8_t g_led_restore_pending = 0u;
 int g_control_error = 0;
+bool g_calibration_busy = false;
 
 FullStatusRecord g_full_records[kMaxFullStatusRecords];
 uint16_t g_full_snapshot_id = 0u;
@@ -609,7 +610,7 @@ void handle_frame(const uint8_t* raw, uint8_t length)
         {
             send_ack(sequence, kind, ACK_BAD_VALUE);
         }
-        else if (g_full_active)
+        else if (g_calibration_busy || g_full_active)
         {
             send_ack(sequence, kind, ACK_BUSY);
         }
@@ -873,6 +874,11 @@ void bmcu_link_apply_led_override(void)
         else SYS_RGB.set_RGB(0x38u, 0x35u, 0x32u, 0u);
         g_led_restore_pending = 0u;
     }
+}
+
+void bmcu_link_set_calibration_busy(bool busy)
+{
+    g_calibration_busy = busy;
 }
 
 void bmcu_link_set_control_error(int error)
