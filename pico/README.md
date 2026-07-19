@@ -44,6 +44,9 @@ installs the returned records only when the full record set is complete. The
 monitor requests another snapshot only after reconnect, sequence gap, incomplete
 snapshot, or an explicit diagnostic request. Steady state uses incremental
 `STATUS`/`EVENT` updates and PING/PONG.
+PING is idle-aware: it is sent only after a link has produced no valid frame for
+two seconds. Active `STATUS`/`EVENT` traffic therefore suppresses probe frames.
+
 
 Only `set_led_mode()` is exposed as a write command.  It does not provide any
 printer, motor, slot, or filament control API.

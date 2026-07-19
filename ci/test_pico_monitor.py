@@ -70,6 +70,20 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertNotIn("old", self.monitor.status)
         self.assertTrue(any(item.get("type") == "resync" for item in self.messages))
 
+    def test_ping_is_suppressed_while_frames_are_active(self):
+        self.assertFalse(self.monitor.ping_if_idle(100))
+        self.monitor.last_valid_ms = 1900
+        self.assertFalse(self.monitor.ping_if_idle(2100))
+        self.assertEqual(self.uart.writes, [])
+
+    def test_ping_probes_an_idle_link_at_the_interval(self):
+        self.assertFalse(self.monitor.ping_if_idle(100))
+        self.monitor.last_valid_ms = 500
+        self.assertTrue(self.monitor.ping_if_idle(2500))
+        decoded = link.FrameDecoder().feed(self.uart.writes[-1])
+        self.assertEqual(decoded[0]["kind"], link.PING)
+        self.assertFalse(self.monitor.ping_if_idle(3000))
+
     def test_snapshot_is_installed_only_after_all_unique_records(self):
         self.hello()
         self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,
