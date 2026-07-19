@@ -53,9 +53,13 @@ class WebUI:
         path = first_line[1] if len(first_line) >= 2 else b''
         if path == b'/':
             self.response = self._http_response('200 OK', 'text/html; charset=utf-8', PAGE)
-        elif path == b'/api/status':
-            body = json.dumps(_json_safe(self.state_provider())).encode()
-            self.response = self._http_response('200 OK', 'application/json', body)
+        elif path.startswith(b'/api/'):
+            state = self.state_provider(path.decode())
+            if state is None:
+                self.response = self._http_response('404 Not Found', 'text/plain', b'Not found\n')
+            else:
+                body = json.dumps(_json_safe(state)).encode()
+                self.response = self._http_response('200 OK', 'application/json', body)
         else:
             self.response = self._http_response('404 Not Found', 'text/plain', b'Not found\n')
 
@@ -74,6 +78,7 @@ class WebUI:
             try:
                 sent = self.client.send(self.response)
             except OSError:
+                self._close_client()
                 return
             if sent >= len(self.response):
                 self._close_client()
@@ -84,6 +89,7 @@ class WebUI:
             try:
                 data = self.client.recv(256)
             except OSError:
+                self._close_client()
                 return
             if not data:
                 self._close_client()

@@ -11,6 +11,7 @@ except ImportError:
 
 
 SYNC = b"\xa5\x5a"
+MAX_DECODER_BUFFER = 128
 VERSION_ALPHA3 = 0x83
 MAX_PAYLOAD = 57
 
@@ -62,7 +63,12 @@ class FrameDecoder:
         self.frame_errors = 0
 
     def feed(self, data):
+        if len(data) > MAX_DECODER_BUFFER:
+            self.frame_errors += 1
+            data = data[-MAX_DECODER_BUFFER:]
         self._buffer.extend(data)
+        if len(self._buffer) > MAX_DECODER_BUFFER:
+            self._buffer = self._buffer[-MAX_DECODER_BUFFER:]
         frames = []
         while True:
             start = self._buffer.find(SYNC)
@@ -110,11 +116,15 @@ def encode_frame(kind, sequence, payload=b""):
 
 class BMCUMonitor:
     """Protocol state machine; ``on_message`` receives typed dictionaries."""
+    SNAPSHOT_TIMEOUT_MS = 1200
+    SNAPSHOT_MAX_RETRIES = 3
 
-    def __init__(self, uart, on_message=None):
+
+    def __init__(self, uart, on_message=None, link_id="bmcu-a"):
         self.uart = uart
         self.on_message = on_message
         self.decoder = FrameDecoder()
+        self.link_id = link_id
         self.next_sequence = 1
         self.last_valid_ms = None
         self.last_ping_ms = None
@@ -128,7 +138,17 @@ class BMCUMonitor:
         self.events = []
         self.sensors = {}
 
+        self._snapshot_deadline_ms = None
+        self._snapshot_retry_ms = None
+        self._snapshot_retries = 0
+        self._last_unsolicited_sequence = None
+        self._last_hw_tick32 = None
+        self._hw_tick_epoch = 0
+        self.bmcu_boot_session = 0
+        self.link_state = "stale"
+        self._clock_ms = 0
     def _emit(self, message):
+        message.setdefault("link_id", self.link_id)
         if self.on_message:
             self.on_message(message)
 
@@ -138,11 +158,17 @@ class BMCUMonitor:
         self.uart.write(encode_frame(kind, sequence, payload))
         return sequence
 
+    @staticmethod
+    def _ticks_diff(now, then):
+        return time.ticks_diff(now, then) if hasattr(time, "ticks_diff") else now - then
+
     def get_status(self):
         return self._send(GET_STATUS)
 
     def get_full_status(self):
-        return self._send(GET_FULL_STATUS, b"\x0f\x0f")
+        sequence = self._send(GET_FULL_STATUS, b"\x0f\x0f")
+        self._snapshot_deadline_ms = self._clock_ms + self.SNAPSHOT_TIMEOUT_MS
+        return sequence
 
     def ping(self, token):
         return self._send(PING, struct.pack("<I", token & 0xffffffff))
@@ -158,49 +184,125 @@ class BMCUMonitor:
         if self.snapshot is None and self._snapshot_parts is None:
             self.get_full_status()
 
+    def _invalidate_baseline(self, now_ms, reason):
+        self.status = None
+        self.snapshot = None
+        self.channels = [None, None, None, None]
+        self._snapshot_parts = None
+        self._snapshot_id = None
+        self._snapshot_count = 0
+        self._snapshot_deadline_ms = None
+        self._snapshot_retries = 0
+        self.link_state = "resyncing"
+        self._emit({"type": "resync", "reason": reason})
+        self.get_status()
+        self.get_full_status()
+
+    def _schedule_snapshot_retry(self, now_ms):
+        self._snapshot_deadline_ms = None
+        delay_ms = 250 << min(self._snapshot_retries, 2)
+        self._snapshot_retry_ms = now_ms + delay_ms
+
+    def _service_snapshot_timeout(self, now_ms):
+        if self._snapshot_deadline_ms is not None:
+            if self._ticks_diff(now_ms, self._snapshot_deadline_ms) >= 0:
+                self._snapshot_parts = None
+                self._snapshot_id = None
+                self._snapshot_retries += 1
+                self._emit({"type": "snapshot_error", "reason": "timeout"})
+                self._schedule_snapshot_retry(now_ms)
+        if self._snapshot_retry_ms is not None and self._ticks_diff(now_ms, self._snapshot_retry_ms) >= 0:
+            self._snapshot_retry_ms = None
+            if self._snapshot_retries <= self.SNAPSHOT_MAX_RETRIES:
+                self.get_full_status()
+            else:
+                self.link_state = "stale"
+                self._emit({"type": "snapshot_error", "reason": "retry_exhausted"})
+
+    def _extend_hw_tick(self, tick32, message):
+        if self._last_hw_tick32 is not None and tick32 < self._last_hw_tick32:
+            if self._last_hw_tick32 - tick32 > 0x80000000:
+                self._hw_tick_epoch += 1 << 32
+            else:
+                self._hw_tick_epoch = 0
+                message["tick_epoch_reset"] = True
+        self._last_hw_tick32 = tick32
+        message["hw_tick64"] = self._hw_tick_epoch + tick32
+
     def poll(self, now_ms):
-        available = self.uart.any()
+        available = min(self.uart.any(), MAX_DECODER_BUFFER)
+        self._clock_ms = now_ms
         if available:
             data = self.uart.read(available)
             if data:
                 for frame in self.decoder.feed(data):
                     self._handle_frame(frame, now_ms)
+        self._service_snapshot_timeout(now_ms)
+        if self.is_stale(now_ms) and self.link_state not in ("stale", "incompatible"):
+            self.link_state = "stale"
+            self._last_hw_tick32 = None
+            self._last_unsolicited_sequence = None
+            self._emit({"type": "link_state", "state": "stale"})
+
 
     def is_stale(self, now_ms):
         if self.last_valid_ms is None:
             return True
-        if hasattr(time, "ticks_diff"):
-            return time.ticks_diff(now_ms, self.last_valid_ms) > 6000
-        return now_ms - self.last_valid_ms > 6000
+        return self._ticks_diff(now_ms, self.last_valid_ms) > 6000
 
     def _handle_frame(self, frame, now_ms):
+        self._clock_ms = now_ms
         if frame["version"] != VERSION_ALPHA3:
+            self.link_state = "incompatible"
             self._emit({"type": "protocol_error", "reason": "unsupported_version", "frame": frame})
             return
         self.last_valid_ms = now_ms
         kind, payload = frame["kind"], frame["payload"]
         message = {"type": "frame", "kind": kind, "sequence": frame["sequence"]}
         if kind == HELLO and len(payload) == 9:
+            self.bmcu_boot_session += 1
+            self._last_unsolicited_sequence = frame["sequence"]
+            self._last_hw_tick32 = None
+            self._hw_tick_epoch = 0
+            self.status = None
+            self.snapshot = None
+            self.channels = [None, None, None, None]
+            self._snapshot_parts = None
+            self._snapshot_retries = 0
+            self.link_state = "resyncing"
             self.tick_hz = _u32(payload, 5)
             message.update({"type": "hello", "protocol": payload[0], "capabilities": _u16(payload, 1),
-                            "firmware": [payload[3], payload[4]], "tick_hz": self.tick_hz})
+                            "firmware": [payload[3], payload[4]], "tick_hz": self.tick_hz,
+                            "bmcu_boot_session": self.bmcu_boot_session})
             self._emit(message)
             self._request_missing_baseline()
             return
+        if kind in (STATUS, EVENT):
+            previous = self._last_unsolicited_sequence
+            expected = None if previous is None else (previous + 1) & 0xffff
+            self._last_unsolicited_sequence = frame["sequence"]
+            if expected is not None and frame["sequence"] != expected:
+                self._invalidate_baseline(now_ms, "sequence_gap")
+                message["sequence_gap"] = {"expected": expected, "received": frame["sequence"]}
+
         if kind == STATUS and len(payload) == 27:
             self.status = self._decode_status(payload)
             message.update({"type": "status", "data": self.status})
+            self._extend_hw_tick(self.status["hw_tick32"], message)
         elif kind == EVENT and len(payload) == 16:
             event = self._decode_event(payload)
             self._apply_event(event)
             message.update({"type": "event", "data": event})
+            self._extend_hw_tick(event["hw_tick32"], message)
         elif kind == PONG and len(payload) == 8:
             message.update({"type": "pong", "token": _u32(payload, 0), "hw_tick32": _u32(payload, 4)})
             self._request_missing_baseline()
         elif kind == ACK and len(payload) == 2:
             message.update({"type": "ack", "request_kind": payload[0], "result": payload[1]})
+            if payload[0] == GET_FULL_STATUS and payload[1] == 3:
+                self._schedule_snapshot_retry(now_ms)
         elif kind == FULL_STATUS_RECORD and len(payload) == 26:
-            self._handle_snapshot(payload, message)
+            self._handle_snapshot(payload, message, now_ms)
         else:
             message.update({"type": "unknown_or_invalid", "payload": payload})
         self._emit(message)
@@ -259,7 +361,7 @@ class BMCUMonitor:
         elif field == 8 and slot < 4:
             faults = self.status.setdefault("motion_fault", [0, 0, 0, 0])
             faults[slot] = value & 0xff
-    def _handle_snapshot(self, data, message):
+    def _handle_snapshot(self, data, message, now_ms=0):
         snapshot_id, index, count, record_type = _u16(data, 0), data[2], data[3], data[4]
         record_data = bytes(data[10:26])
         message.update({"type": "full_status_record", "snapshot_id": snapshot_id, "record_index": index,
@@ -284,16 +386,33 @@ class BMCUMonitor:
             message["snapshot_error"] = "invalid_index"
             self._snapshot_parts = None
             return
-        if (self._snapshot_parts is None or self._snapshot_id != snapshot_id or
-                self._snapshot_count != count):
+        if self._snapshot_parts is not None:
+            if self._snapshot_id != snapshot_id or self._snapshot_count != count:
+                message["snapshot_error"] = "inconsistent_metadata"
+                self._snapshot_parts = None
+                self._snapshot_retries += 1
+                self._schedule_snapshot_retry(now_ms)
+                return
+            if index in self._snapshot_parts:
+                message["snapshot_error"] = "duplicate_index"
+                self._snapshot_parts = None
+                self._snapshot_retries += 1
+                self._schedule_snapshot_retry(now_ms)
+                return
+        if self._snapshot_parts is None:
             self._snapshot_parts, self._snapshot_count = {}, count
             self._snapshot_id = snapshot_id
+            self._snapshot_deadline_ms = now_ms + self.SNAPSHOT_TIMEOUT_MS
         self._snapshot_parts[index] = message.copy()
         if len(self._snapshot_parts) == count:
             self.snapshot = [self._snapshot_parts[i] for i in range(count)]
             self._snapshot_parts = None
             self._snapshot_id = None
             channels = [None, None, None, None]
+            self._snapshot_deadline_ms = None
+            self._snapshot_retry_ms = None
+            self._snapshot_retries = 0
+            self.link_state = "online"
             for part in self.snapshot:
                 channel = part.get("channel_data")
                 if channel is not None:
