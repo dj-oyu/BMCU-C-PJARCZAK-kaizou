@@ -206,6 +206,9 @@ Full-status record types:
 | 3 | `PRINTER_BUS` | zero or one |
 | 4 | `COUNTERS` | zero or one |
 | 5 | `PRINTER_AUTH` | zero or one |
+| 6 | `PRINTER_RX_CORE` | zero or one |
+| 7 | `PRINTER_RX_LOSS` | zero or one |
+| 8 | `PRINTER_RX_DMA` | zero or one |
 
 #### GLOBAL record_data — 16 bytes
 
@@ -282,6 +285,33 @@ This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is 
 | 14 | u8 | last response length, saturated |
 | 15 | u8 | FNV-1a fingerprint of at most the first 32 payload bytes |
 
+#### PRINTER_RX_CORE record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | bytes delivered from the active RX transport to the CPU parser |
+| 4 | u32 | frames completed by the compatibility framer |
+| 8 | u32 | invalid or over-limit declared lengths |
+| 12 | u32 | header CRC8 failures |
+
+#### PRINTER_RX_LOSS record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | bytes skipped while seeking synchronization, including overrun loss |
+| 4 | u32 | complete frames dropped because a prior frame was still pending |
+| 8 | u32 | DMA transfer errors |
+| 12 | u32 | USART hardware overruns |
+
+#### PRINTER_RX_DMA record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | DMA producer-over-consumer ring overruns |
+| 4 | u32 | completed DMA ring revolutions |
+| 8 | u32 | maximum observed unconsumed DMA bytes |
+| 12 | u32 | frames copied into the transitional contiguous parser buffers |
+
 #### COUNTERS record_data — 16 bytes
 
 | Offset | Type | Field |
@@ -301,7 +331,8 @@ This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is 
 - Never block for UART completion; DMA remains responsible for transmission.
 - Do not emit a success ACK. The complete typed record set is the success response.
 
-A full request selects at most eight records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH, and one COUNTERS.
+A full request selects at most eleven records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH,
+three PRINTER_RX records, and one COUNTERS.
 At 115200 8E1 this is only a few hundred wire bytes, but staged emission prevents a burst from occupying all
 seven usable TX queue entries.
 

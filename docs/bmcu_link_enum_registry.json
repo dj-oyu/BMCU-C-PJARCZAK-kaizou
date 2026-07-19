@@ -39,7 +39,10 @@
       "2": "channel",
       "3": "printer_bus",
       "4": "counters",
-      "5": "printer_auth"
+      "5": "printer_auth",
+      "6": "printer_rx_core",
+      "7": "printer_rx_loss",
+      "8": "printer_rx_dma"
     },
     "ack_result": {
       "0": "ok",

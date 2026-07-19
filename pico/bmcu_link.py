@@ -27,6 +27,9 @@ FULL_STATUS_RECORD = 0x73
 ACK = 0x7f
 
 FULL_RECORD_PRINTER_AUTH = 5
+FULL_RECORD_PRINTER_RX_CORE = 6
+FULL_RECORD_PRINTER_RX_LOSS = 7
+FULL_RECORD_PRINTER_RX_DMA = 8
 RECORD_PRINTER_LONG_TRANSACTION = 9
 
 
@@ -136,6 +139,7 @@ class BMCUMonitor:
         self.snapshot = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
+        self.printer_rx = None
         self._snapshot_parts = None
         self._snapshot_count = 0
         self._snapshot_id = None
@@ -206,6 +210,7 @@ class BMCUMonitor:
         self.snapshot = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
+        self.printer_rx = None
         self._snapshot_parts = None
         self._snapshot_id = None
         self._snapshot_count = 0
@@ -286,6 +291,7 @@ class BMCUMonitor:
             self.snapshot = None
             self.channels = [None, None, None, None]
             self.printer_auth = None
+            self.printer_rx = None
             self._snapshot_parts = None
             self._snapshot_retries = 0
             self.link_state = "resyncing"
@@ -416,6 +422,27 @@ class BMCUMonitor:
                 "reason": record_data[13], "response_length": record_data[14],
                 "payload_hash": record_data[15],
             }
+        if record_type == FULL_RECORD_PRINTER_RX_CORE:
+            message["printer_rx_data"] = {
+                "rx_bytes": _u32(record_data, 0),
+                "rx_frames_valid": _u32(record_data, 4),
+                "rx_bad_length": _u32(record_data, 8),
+                "rx_header_crc_error": _u32(record_data, 12),
+            }
+        if record_type == FULL_RECORD_PRINTER_RX_LOSS:
+            message["printer_rx_data"] = {
+                "rx_resync_bytes": _u32(record_data, 0),
+                "rx_publish_drop": _u32(record_data, 4),
+                "rx_dma_error": _u32(record_data, 8),
+                "rx_usart_overrun": _u32(record_data, 12),
+            }
+        if record_type == FULL_RECORD_PRINTER_RX_DMA:
+            message["printer_rx_data"] = {
+                "rx_dma_overrun": _u32(record_data, 0),
+                "rx_dma_wrap": _u32(record_data, 4),
+                "rx_dma_max_pending": _u32(record_data, 8),
+                "rx_compat_copy": _u32(record_data, 12),
+            }
         if count == 0 or index >= count:
             message["snapshot_error"] = "invalid_index"
             self._snapshot_parts = None
@@ -444,6 +471,7 @@ class BMCUMonitor:
             self._snapshot_id = None
             channels = [None, None, None, None]
             printer_auth = None
+            printer_rx = {}
             self._snapshot_deadline_ms = None
             self._snapshot_retry_ms = None
             self._snapshot_retries = 0
@@ -454,6 +482,10 @@ class BMCUMonitor:
                     channels[channel["channel"]] = channel
                 if part.get("printer_auth_data") is not None:
                     printer_auth = part["printer_auth_data"]
+                rx_data = part.get("printer_rx_data")
+                if rx_data is not None:
+                    printer_rx.update(rx_data)
             self.channels = channels
             self.printer_auth = printer_auth
+            self.printer_rx = printer_rx or None
             message["snapshot_complete"] = True

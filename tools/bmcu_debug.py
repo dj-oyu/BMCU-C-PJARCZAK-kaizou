@@ -301,6 +301,18 @@ def format_full_status_record(record):
             f"tick={trace.hw_tick32} outcome={trace.outcome} reason={trace.reason} "
             f"response_len={trace.response_length} hash=0x{trace.payload_hash:02X}"
         )
+    if record.record_type == FULL_RECORD_PRINTER_RX_CORE:
+        rx_bytes, valid, bad_length, header_crc = struct.unpack("<IIII", data)
+        return (f"PRINTER_RX bytes={rx_bytes} valid={valid} "
+                f"bad_length={bad_length} header_crc={header_crc}")
+    if record.record_type == FULL_RECORD_PRINTER_RX_LOSS:
+        resync, publish_drop, dma_error, usart_overrun = struct.unpack("<IIII", data)
+        return (f"PRINTER_RX_LOSS resync={resync} publish_drop={publish_drop} "
+                f"dma_error={dma_error} usart_overrun={usart_overrun}")
+    if record.record_type == FULL_RECORD_PRINTER_RX_DMA:
+        overrun, wraps, max_pending, compat_copy = struct.unpack("<IIII", data)
+        return (f"PRINTER_RX_DMA overrun={overrun} wraps={wraps} "
+                f"max_pending={max_pending} compat_copy={compat_copy}")
     if record.record_type == FULL_RECORD_COUNTERS:
         tx_drop, rx_drop, crc_error, frame_error = struct.unpack("<IIII", data)
         return (

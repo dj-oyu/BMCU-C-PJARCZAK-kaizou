@@ -3,6 +3,29 @@
 #include <string.h>
 #include "hal/time_hw.h"
 
+#ifndef BMCU_PRINTER_RX_DMA
+#define BMCU_PRINTER_RX_DMA 1
+#endif
+
+struct bus_rx_metrics
+{
+    volatile uint32_t rx_bytes;
+    volatile uint32_t rx_frames_valid;
+    volatile uint32_t rx_bad_length;
+    volatile uint32_t rx_header_crc_error;
+    volatile uint32_t rx_resync_bytes;
+    volatile uint32_t rx_publish_drop;
+    volatile uint32_t rx_dma_error;
+    volatile uint32_t rx_usart_overrun;
+    volatile uint32_t rx_dma_overrun;
+    volatile uint32_t rx_dma_wrap;
+    volatile uint32_t rx_dma_max_pending;
+    volatile uint32_t rx_compat_copy;
+};
+
+bool bus_uart1_rx_transport_quiet();
+void bus_uart1_rx_poll();
+
 enum class _bus_data_type : uint8_t
 {
     bambubus = 0x3D,
@@ -31,6 +54,7 @@ private:
     void (*port_send_datas)(uint8_t *data, uint16_t len);
 
 public:
+    bus_rx_metrics rx_metrics = {};
     uint8_t * volatile bus_recv_data_ptr = recv_data_buf[0];
     volatile int recv_data_len = 0;
     volatile int send_data_len = 0;
@@ -46,6 +70,10 @@ public:
     inline __attribute__((always_inline)) bool quiet_for_us(uint32_t microseconds) const
     {
         if (!idle || send_data_len != 0 || recv_data_len != 0) return false;
+        if (_index != 0 || drop_bytes != 0) return false;
+#if BMCU_PRINTER_RX_DMA
+        if (!bus_uart1_rx_transport_quiet()) return false;
+#endif
         return static_cast<uint32_t>(time_ticks32() - last_activity_tick) >=
                microseconds * time_hw_tpus;
     }
@@ -90,12 +118,24 @@ public:
         send_data_len = 0;
         recv_data_len = 0;
         tx_build_sel  = 0;
+        memset((void *)&rx_metrics, 0, sizeof(rx_metrics));
         port_send_datas = _port_send_datas;
+    }
+
+    void reset_rx_parser()
+    {
+        _index = 0;
+        length = 999;
+        data_length_index = 0;
+        data_CRC8_index = 0;
+        irq_package_type = _bus_data_type::none;
+        drop_bytes = 0;
     }
 
     void irq(uint8_t data)
     {
         note_activity();
+        if (rx_metrics.rx_bytes != 0xFFFFFFFFu) ++rx_metrics.rx_bytes;
         if (drop_bytes > 0)
         {
             if (--drop_bytes == 0)
@@ -115,6 +155,10 @@ public:
                 length = data_CRC8_index = 6;
                 _index = 1;
                 irq_package_type = (_bus_data_type)data;
+            }
+            else if (rx_metrics.rx_resync_bytes != 0xFFFFFFFFu)
+            {
+                ++rx_metrics.rx_resync_bytes;
             }
             return;
         }
@@ -158,6 +202,7 @@ public:
 
             if (length <= (int)data_CRC8_index || length > BUF_SZ)
             {
+                if (rx_metrics.rx_bad_length != 0xFFFFFFFFu) ++rx_metrics.rx_bad_length;
                 _index = 0;
                 return;
             }
@@ -167,6 +212,8 @@ public:
         {
             if (data != bus_crc8(buf, (uint32_t)data_CRC8_index))
             {
+                if (rx_metrics.rx_header_crc_error != 0xFFFFFFFFu)
+                    ++rx_metrics.rx_header_crc_error;
                 _index = 0;
                 return;
             }
@@ -198,6 +245,10 @@ public:
         if (idx >= length)
         {
             _index = 0;
+            if (rx_metrics.rx_frames_valid != 0xFFFFFFFFu) ++rx_metrics.rx_frames_valid;
+#if BMCU_PRINTER_RX_DMA
+            if (rx_metrics.rx_compat_copy != 0xFFFFFFFFu) ++rx_metrics.rx_compat_copy;
+#endif
 
             if (recv_data_len == 0)
             {
@@ -206,6 +257,10 @@ public:
                 bus_irq_data_ptr = tmp;
                 bus_package_type = irq_package_type;
                 recv_data_len = length;
+            }
+            else if (rx_metrics.rx_publish_drop != 0xFFFFFFFFu)
+            {
+                ++rx_metrics.rx_publish_drop;
             }
             return;
         }

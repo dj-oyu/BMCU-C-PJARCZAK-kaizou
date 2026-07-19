@@ -274,6 +274,22 @@ All counters saturate at their declared width and are snapshot-readable:
 | `tx_complete` | USART TC observed |
 | `tx_failed` | queued response failed to complete |
 
+## 9.1 Implementation status
+
+The first DMA migration increment is implemented with `BMCU_PRINTER_RX_DMA=1` as the
+source default and `BMCU_PRINTER_RX_DMA=0` as the RXNE rollback build:
+
+- USART1 RX uses DMA1 Channel 5 in a 2,560-byte circular ring;
+- HT/TC events plus stable `CNTR` reads provide the monotonic producer position;
+- TX echo, DMA errors, USART overruns, and producer-over-consumer overruns are handled separately;
+- the authoritative quiescent check includes unconsumed DMA bytes;
+- three full-status records expose the current ingress, loss, and DMA counters;
+- the existing byte framer and two packet buffers remain as a transitional compatibility adapter.
+
+`rx_compat_copy` therefore increases once per completed frame in the DMA build. The next
+migration increment replaces that adapter with the two-span parser/view and removes the
+extra 2,560-byte compatibility storage. Hardware timing and endurance gates remain open.
+
 ## 10. Migration plan
 
 ### Stage A — characterization, no behavior change

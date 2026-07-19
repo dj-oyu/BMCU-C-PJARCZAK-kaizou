@@ -1,5 +1,6 @@
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "_bus_hardware.h"
 
 #include "Motion_control.h"
 #include "ams.h"
@@ -79,7 +80,7 @@ struct PrinterAuthCache
     uint8_t last_payload_hash;
 };
 
-constexpr uint8_t kMaxFullStatusRecords = 8u;
+constexpr uint8_t kMaxFullStatusRecords = 11u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
@@ -497,6 +498,24 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         auth.data[13] = g_printer_auth.last_reason;
         auth.data[14] = g_printer_auth.last_response_length;
         auth.data[15] = g_printer_auth.last_payload_hash;
+
+        FullStatusRecord& rx_core = append_full_record(FULL_RECORD_PRINTER_RX_CORE);
+        put32(&rx_core.data[0], bus_port_to_host.rx_metrics.rx_bytes);
+        put32(&rx_core.data[4], bus_port_to_host.rx_metrics.rx_frames_valid);
+        put32(&rx_core.data[8], bus_port_to_host.rx_metrics.rx_bad_length);
+        put32(&rx_core.data[12], bus_port_to_host.rx_metrics.rx_header_crc_error);
+
+        FullStatusRecord& rx_loss = append_full_record(FULL_RECORD_PRINTER_RX_LOSS);
+        put32(&rx_loss.data[0], bus_port_to_host.rx_metrics.rx_resync_bytes);
+        put32(&rx_loss.data[4], bus_port_to_host.rx_metrics.rx_publish_drop);
+        put32(&rx_loss.data[8], bus_port_to_host.rx_metrics.rx_dma_error);
+        put32(&rx_loss.data[12], bus_port_to_host.rx_metrics.rx_usart_overrun);
+
+        FullStatusRecord& rx_dma = append_full_record(FULL_RECORD_PRINTER_RX_DMA);
+        put32(&rx_dma.data[0], bus_port_to_host.rx_metrics.rx_dma_overrun);
+        put32(&rx_dma.data[4], bus_port_to_host.rx_metrics.rx_dma_wrap);
+        put32(&rx_dma.data[8], bus_port_to_host.rx_metrics.rx_dma_max_pending);
+        put32(&rx_dma.data[12], bus_port_to_host.rx_metrics.rx_compat_copy);
     }
 
     if (section_mask & FULL_SECTION_COUNTERS)

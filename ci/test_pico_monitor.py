@@ -124,6 +124,25 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.printer_auth["last_type"], 0x040e)
         self.assertEqual(self.monitor.printer_auth["count_040e"], 3)
         self.assertEqual(self.monitor.printer_auth["payload_hash"], 0x6b)
+
+    def test_printer_rx_metrics_are_installed_atomically(self):
+        self.hello()
+        records = (
+            (link.FULL_RECORD_PRINTER_RX_CORE, (1, 2, 3, 4)),
+            (link.FULL_RECORD_PRINTER_RX_LOSS, (5, 6, 7, 8)),
+            (link.FULL_RECORD_PRINTER_RX_DMA, (9, 10, 11, 12)),
+        )
+        for index, (record_type, values) in enumerate(records):
+            data = b"".join(value.to_bytes(4, "little") for value in values)
+            payload = ((21).to_bytes(2, "little") + bytes((
+                index, len(records), record_type, 0)) +
+                (100).to_bytes(4, "little") + data)
+            self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2, payload), 250)
+        self.assertEqual(self.monitor.printer_rx["rx_bytes"], 1)
+        self.assertEqual(self.monitor.printer_rx["rx_publish_drop"], 6)
+        self.assertEqual(self.monitor.printer_rx["rx_dma_overrun"], 9)
+        self.assertEqual(self.monitor.printer_rx["rx_compat_copy"], 12)
+
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()
         self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,
