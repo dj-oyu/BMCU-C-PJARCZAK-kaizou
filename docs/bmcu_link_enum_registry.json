@@ -1,0 +1,130 @@
+{
+  "schema": "bmcu.link.enum-registry.v1",
+  "registry_version": "alpha.3",
+  "wire_protocol": 131,
+  "source": "src/bmcu_link_protocol.h",
+  "enums": {
+    "kind": {
+      "1": "hello",
+      "2": "status",
+      "3": "event",
+      "4": "printer_transaction",
+      "5": "sensor_record",
+      "16": "get_status",
+      "17": "set_led_mode",
+      "18": "ping",
+      "23": "get_full_status",
+      "114": "pong",
+      "115": "full_status_record",
+      "127": "ack"
+    },
+    "capability": {
+      "1": "status_events",
+      "2": "led_override",
+      "4": "ping_pong",
+      "8": "raw_hw_tick",
+      "16": "printer_trace",
+      "32": "sensor_record",
+      "64": "full_status"
+    },
+    "full_status_section": {
+      "1": "global",
+      "2": "channels",
+      "4": "printer_bus",
+      "8": "counters",
+      "15": "all"
+    },
+    "full_status_record_type": {
+      "1": "global",
+      "2": "channel",
+      "3": "printer_bus",
+      "4": "counters"
+    },
+    "ack_result": {
+      "0": "ok",
+      "1": "bad_value",
+      "2": "unsupported",
+      "3": "busy",
+      "4": "bad_state",
+      "5": "denied",
+      "6": "expired",
+      "7": "duplicate",
+      "8": "internal"
+    },
+    "severity": {
+      "0": "debug",
+      "1": "info",
+      "2": "notice",
+      "3": "warning",
+      "4": "error",
+      "5": "critical"
+    },
+    "source": {
+      "0": "system",
+      "1": "printer_bus",
+      "2": "motion",
+      "3": "sensor",
+      "4": "management",
+      "5": "safety"
+    },
+    "command_owner": {
+      "0": "none",
+      "1": "printer",
+      "2": "user",
+      "3": "bmcu_local",
+      "4": "safety",
+      "5": "system"
+    },
+    "outcome": {
+      "0": "accepted",
+      "1": "applied",
+      "2": "replied",
+      "3": "ignored",
+      "4": "rejected",
+      "5": "failed"
+    },
+    "reason": {
+      "0": "ok",
+      "1": "target_mismatch",
+      "2": "slot_range",
+      "3": "ams_offline",
+      "4": "invalid_length",
+      "5": "invalid_crc",
+      "6": "unsupported",
+      "7": "no_handler",
+      "8": "tx_busy",
+      "9": "bad_state",
+      "10": "safety_inhibit",
+      "11": "internal",
+      "12": "owner_conflict",
+      "13": "lease_expired"
+    },
+    "record_type": {
+      "1": "boot",
+      "2": "printer_link",
+      "3": "printer_transaction",
+      "4": "state_change",
+      "5": "sensor",
+      "6": "command_result",
+      "7": "safety_decision",
+      "8": "diagnostic_counter"
+    },
+    "sensor_validity": {
+      "0": "unknown",
+      "1": "valid",
+      "2": "stale",
+      "3": "offline",
+      "4": "fault"
+    },
+    "state_field": {
+      "1": "slot",
+      "2": "inserted_mask",
+      "3": "online_mask",
+      "4": "motion",
+      "5": "pressure",
+      "6": "led_mode",
+      "7": "control_error",
+      "8": "motion_fault"
+    }
+  }
+}

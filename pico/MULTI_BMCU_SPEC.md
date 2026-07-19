@@ -1,5 +1,7 @@
 # Pico 2 W multi-BMCU bridge specification
 
+Status: target design; the checked-in Pico implementation currently supports one UART link and only `GET /api/status`.
+
 ## Scope
 
 One Pico 2 W bridges multiple independent BMCU H1 management links to one
@@ -40,8 +42,9 @@ BMCU_LINKS = [
 
 The external identity is `<bridge-id>/<link-id>`; e.g.
 `bmcu-bridge-a6f4/ams-left`.  A BMCU protocol sequence number is only unique
-within that link.  Bambuddy must key histories and deduplication by
-`bridge_id`, `link_id`, `boot_session`, and `sequence`.
+within that link.  Bambuddy must key histories and deduplication by `bridge_id`, `link_id`,
+`pico_boot_session`, `bmcu_boot_session`, and `sequence`, as defined in
+[`PICO_BAMBUDDY_ENVELOPE.md`](../docs/PICO_BAMBUDDY_ENVELOPE.md).
 
 ## Protocol ownership
 
@@ -53,9 +56,9 @@ The initial command set remains read-only (`GET_FULL_STATUS`, `GET_STATUS`,
 `PING`) plus the existing safe LED command.  No broadcast write command is
 permitted.
 
-## HTTP and Bambuddy surface
+## Planned HTTP and Bambuddy surface
 
-The bridge exposes:
+After the multi-link phase, the diagnostic HTTP surface will expose:
 
 ```text
 GET /api/devices
@@ -67,9 +70,10 @@ The UI shows a device selector and one isolated dashboard per link.  The
 summary page may show link health, but does not combine slots, pressure, or
 sensor values from different BMCUs.
 
-Bambuddy registers each link as a separate optional device while resolving the
-same bridge FQDN.  The registration includes the `link_id`, firmware version,
-capabilities, link health, and BMCU protocol version.
+Bambuddy registers each link as a separate optional device through the Pico's
+outbound transport, not by opening a connection to the Pico. Registration uses
+the envelope transport HELLO and includes `link_id`, firmware version,
+capabilities, link health, protocol version, and both boot sessions.
 
 ## Failure isolation
 

@@ -205,7 +205,7 @@ Exit criteria:
 - `BMCU_LINKS`設定からstable `link_id`、UART ID、TX/RX pinを構築する。
 - bridge identityとlink identityを分け、外部identityを
   `<bridge_id>/<link_id>`とする。
-- Bambuddy dedup keyを`bridge_id, link_id, boot_session, sequence`とする。
+- Bambuddy dedup keyを`bridge_id, link_id, pico_boot_session, bmcu_boot_session, sequence`とする。
 - Pico main loopは各UARTへbounded service budgetを与える。一方のnoiseや大量frameで
   他方のUART、Wi-Fi、HTTPをstarveさせない。
 - commandは必ず明示的なlinkへrouteする。LED commandを含めbroadcast writeを禁止する。
@@ -239,10 +239,21 @@ Exit criteria:
 - event unionのBOOT、PRINTER_LINK、PRINTER_TRANSACTION、COMMAND_RESULT、
   SAFETY_DECISION、DIAGNOSTIC_COUNTERをfriendly decodeする。
 - raw numeric enum、raw payload、unknown fieldを必ず保持する。
-- `bridge_id`、`link_id`、Pico firmware、BMCU firmware、protocol version、
-  capability、boot/session ID、receive timestampをenvelopeへ追加する。
+- [`PICO_BAMBUDDY_ENVELOPE.md`](PICO_BAMBUDDY_ENVELOPE.md)を実装の正とし、
+  `device_id`、`link.id`、`received_at_us`、`pico_boot_session`、
+  `bmcu_boot_session`、sequence、firmware、protocol、capability、modeを全envelopeへ入れる。
+- Pico boot時に予測不能な`pico_boot_session`を生成し、valid BMCU HELLOごとに
+  `bmcu_boot_session`を増やす。Bambuddy dedup keyは5要素すべてを使う。
+- monotonic時刻をUART frame decode時にcaptureする。wall clockは任意の参考値だけとし、
+  Bambuddyの到着時刻を正とする。
+- PicoからBambuddyへの認証済みoutbound WebSocketを実装する。WebSocket不可時だけ
+  batched NDJSON POSTを使い、inbound Pico APIをproduction transportに使わない。
+- 固定長・固定上限の30秒FIFOを追加する。切断中はoldest-firstで再送し、Bambuddy ACKを
+  受けるまで破棄しない。overflow時は`transport_drop`と累積`dropped_count`を送る。
+- steady stateのSTATUSを意味的変化時および最大1 Hz heartbeatに抑え、通常2 msg/s/link、
+  20 msg/s・5秒以内のburst上限を実装する。飽和時はnon-critical STATUSを先に落とし、
+  ERROR/CRITICAL EVENTを可能な限り保持する。
 - 同一bridge上の各linkをBambuddyへ別々のoptional deviceとして登録する。
-- Bambuddy transport方式、認証、retry、idempotency、queue limit、backpressureを確定する。
 - current stateとappend-only event streamを分ける。
 - alarmをsource faultとderived faultに分ける。
   - source: BMCUがlatchしたmotion/sensor/control fault
@@ -253,9 +264,11 @@ Exit criteria:
 
 Exit criteria:
 
-- Bambuddy再起動後、1回のsnapshotでcurrent stateを復元できる。
+- Bambuddy再起動後、1回のsnapshotと再送queueでcurrent stateを復元できる。
 - unknown enumを含むmessageをlosslessに保存できる。
-- 同一eventのretryで重複通知しない。
+- Pico/BMCU reboot、Bambuddy reconnect、retryで同一eventを重複通知しない。
+- 切断中のqueue overflowが`transport_drop`として観測でき、「無イベント」と区別できる。
+- 10分のBambuddy切断中もUART service、printer/motor timing、Pico RAMがboundedである。
 - telemetry quality低下をfilament jamと誤分類しない。
 - secretsをrepository、log、diagnostic JSONへ出さない。
 - 別linkの同一sequence、slot、sensor IDがhistoryやalarm上で衝突しない。

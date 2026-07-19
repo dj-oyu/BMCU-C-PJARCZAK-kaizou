@@ -22,10 +22,10 @@ Phase 1 の目的は、BMCU の観測可能性を上げることと、往復通�
 ## 2. 全体構成
 
 ```text
-A1 mini <-- 1.25 Mbps half-duplex --> BMCU <-- UART3 --> Pico 2 W <-- Wi-Fi --> Bambuddy
-                                       |                 |
-                                       |                 +-- mDNS/HTTP または WebSocket
-                                       +-- BMCU Link     +-- オプションデバイス・アダプタ
+A1 mini <-- 1.25 Mbps half-duplex --> BMCU <-- UART3 --> Pico 2 W --Wi-Fi--> Bambuddy
+                                       |                 |                    ^
+                                       |                 +-- diagnostic HTTP  |
+                                       +-- BMCU Link     +-- outbound WebSocket+
 ```
 
 - BMCU は UART1 で A1 mini の既存プロトコルを継続して処理する。
@@ -153,11 +153,12 @@ Bambuddyの実際の拡張APIに合わせる薄いアダプタをRDK-X5側に実
 - 発見: Picoは mDNS で `_bambuddy-device._tcp` を公開する。
 - 識別: `device_id`、機種=`bmcu-monitor`、プロトコル版、BMCUファーム版、
   対応機能を返す。
-- 接続: BambuddyアダプタはPicoへの単一永続WebSocket（推奨）またはHTTP
-  ストリームを開き、BMCUイベントをBambuddyのオプションデバイス状態へ変換する。
-- 制御: Bambuddy UIの `LED mode` 操作だけを `SET_LED_MODE` に変換する。
-- 所有: 履歴、グラフ、通知、認証、ユーザー権限、再接続はRDK-X5/Bambuddyが扱う。
-  Picoは認証済みLANからのBambuddy接続だけを受ける。
+- 接続: PicoがBambuddyへ認証済みの単一永続WebSocketをoutboundで開く。WebSocketが
+  使えない場合だけbatched NDJSON POSTを使う。PicoはBMCUイベントを規定envelopeへ変換する。
+- 制御: 現在のproduction scopeは観測とLED feedbackだけである。Bambuddy UIの `LED mode`
+  操作を有効にするには、別途認証済みcommand contractが必要である。
+- 所有: 履歴、グラフ、通知、認証、ユーザー権限、再接続はRDK-X5/Bambuddyが扱う。Picoは
+  inbound Bambuddy接続を受け付けず、診断用read-only HTTPだけを公開する。
 
 PicoがBambuddyと接続できない時は、BMCUイベントを短期バッファに保持するだけで、
 自動制御判断や状態広告を独自に行わない。

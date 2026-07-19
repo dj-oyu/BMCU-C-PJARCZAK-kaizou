@@ -260,22 +260,13 @@ transaction IDとsample IDで結び、どの層で期待から外れたか判定
 
 ## 10. Pico/Bambuddy契約
 
-Picoは正常frameを型付きenvelopeへ変換する。BMCUの`hw_tick32`とPico受信時刻を両方保持し、HELLOの`tick_hz`で経過時間を換算する。
+Picoは正常frameを型付きenvelopeへ変換する。BMCUの`hw_tick32`とPico単調時刻を両方
+保持し、HELLOの`tick_hz`で経過時間を換算する。正規のenvelope、再送、および転送
+契約は [`PICO_BAMBUDDY_ENVELOPE.md`](PICO_BAMBUDDY_ENVELOPE.md) とする。
 
-```json
-{
-  "schema": "bmcu.management.v2",
-  "device_id": "stable-pico-id",
-  "received_at": "2026-07-14T12:34:56.789+09:00",
-  "link": {"state": "online", "uart_sequence": 1234},
-  "frame": {"kind": "bmcu_decision", "kind_id": 4, "protocol": 2},
-  "data": {"transaction_id": 91}
-}
-```
-
-Bambuddyは `(device_id, boot_session, sequence)` で重複排除し、transaction IDで
-RX/decision/TXを1つの操作として表示する。UARTはローカル信頼境界、認証・認可・
-監査はPico/Bambuddyのネットワーク境界で行う。
+Bambuddyは `(device_id, pico_boot_session, bmcu_boot_session, sequence)` で重複排除し、
+transaction IDでRX/decision/TXを1つの操作として表示する。UARTはローカル信頼境界、
+認証・認可・監査はPico/Bambuddyのネットワーク境界で行う。
 
 ## 11. 実装順序
 
@@ -302,7 +293,7 @@ RX/decision/TXを1つの操作として表示する。UARTはローカル信頼�
 - 各追加messageの最終byte layoutとcapability bit
 - ADC物理チャネルの名称・単位・公開するraw量子化
 - internal motion/auto-load/unload stateの安定enumへの写像
-- Bambuddy forkのoptional device API、認証、WebSocket schema
+- Bambuddy forkでの認証方式とoptional-device ingest URL
 - runout/jam/swap failureの閾値と時間窓
 - S4でBMCUが禁止できる出力範囲とA1 mini pause確認方法
 

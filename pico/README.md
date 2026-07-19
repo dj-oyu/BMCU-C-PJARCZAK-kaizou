@@ -21,18 +21,22 @@ not be used by this program.
 2. Copy `bmcu_link.py` and `main.py` to the Pico filesystem.
 3. Optionally copy `config_example.py` to `config.py` and adjust the UART pin
    assignment.
-4. Reset the Pico.  It prints decoded BMCU frames as one-line JSON to USB
-   serial.
+4. Reset the Pico. With `DEBUG_USB=True`, it prints decoded BMCU frames as
+   one-line JSON to USB serial for commissioning.
 
-`main.py` is deliberately only a UART gateway.  Give `BMCUMonitor` an
-`on_message` callback to publish its typed dictionaries to the actual
-Bambuddy optional-device API.  That API is not specified in this repository,
-so no guessed HTTP endpoint or authentication scheme is embedded here.
+The checked-in implementation is a UART monitor and read-only local HTTP
+status page; it does **not** yet implement the Pico-to-Bambuddy transport.
+The target envelope, identity, retry, and loss contract is
+[`docs/PICO_BAMBUDDY_ENVELOPE.md`](../docs/PICO_BAMBUDDY_ENVELOPE.md).
+Authentication credentials and the deployment-specific Bambuddy ingest URL
+remain configuration, not repository defaults.
 
-The monitor performs `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO` and
-installs the returned records only when the full record set is complete.
-Thereafter it applies `STATUS` and `EVENT` frames incrementally.  It sends a
-`PING` every two seconds and treats six seconds without a valid frame as stale.
+The monitor requests `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO` and
+installs the returned records only when the full record set is complete. The
+current alpha implementation also requests a full snapshot once per second;
+that is a bring-up behavior and is scheduled for removal in Phase 3 of
+[`docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md`](../docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md).
+Steady state will use incremental `STATUS`/`EVENT` updates and PING/PONG.
 
 Only `set_led_mode()` is exposed as a write command.  It does not provide any
 printer, motor, slot, or filament control API.
@@ -51,11 +55,11 @@ Each Pico must use a different hostname. A Bambuddy systemd service can use
 this `.local` address through the host resolver; verify it with
 `resolvectl query -p mdns bmcu-monitor-a.local` on the Bambuddy host.
 
-`DEBUG_USB` is `False` by default. Set it to `True` in `config.py` only while
-commissioning, because USB JSON printing is intentionally excluded from the
-UART receive path. `publish()` is the one integration boundary to replace
-with a bounded Bambuddy WebSocket/HTTP transport after its authenticated API
-is available.
+`DEBUG_USB` is `False` by default. Set it to `True` only while commissioning,
+because USB JSON printing is intentionally excluded from the UART receive
+path. `publish()` is the future integration boundary for the bounded outbound
+Bambuddy WebSocket transport defined by the envelope contract; it is not an
+implemented network transport yet.
 ## Deploy from this workstation
 
 With the Pico held in BOOTSEL mode, run this from the repository root to copy

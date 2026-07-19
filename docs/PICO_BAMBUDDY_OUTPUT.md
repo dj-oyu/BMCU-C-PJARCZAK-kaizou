@@ -172,6 +172,11 @@ Picoが現在展開するrecordは次の2つ。
 production bridgeはBMCU payload外にdevice ID、receive timestamp、session/boot identity、
 transport sequenceを追加する。
 
+production envelope、Pico再起動/BMCU再起動の識別、切断中の再送とdrop通知、転送上限は
+[`PICO_BAMBUDDY_ENVELOPE.md`](PICO_BAMBUDDY_ENVELOPE.md)を正とする。数値enumの名前は
+[`bmcu_link_enum_registry.json`](bmcu_link_enum_registry.json)を使う。未知の値は数値のまま
+保持する。
+
 ## 4. 時刻
 
 BMCUはwall clockとuptimeを送らない。BambuddyはPico/server receive timeを保存し、
