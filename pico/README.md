@@ -15,6 +15,14 @@ Keep the Pico USB powered and do **not** connect BMCU H1-3 to it.  The link is
 115200 baud, 8E1, 3.3 V TTL.  H2 is a programming/printer interface and must
 not be used by this program.
 
+The default `config_example.py` enables two independent hardware links:
+
+- `bmcu-a`: UART0, GP0 TX / GP1 RX
+- `bmcu-b`: UART1, GP4 TX / GP5 RX
+
+Each link owns its decoder, sequence tracking, atomic snapshot assembly, event
+ring, retry state, liveness, and error counters.
+
 ## Install
 
 1. Install a current MicroPython build for Pico W/Pico 2 W.
@@ -33,10 +41,9 @@ remain configuration, not repository defaults.
 
 The monitor requests `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO` and
 installs the returned records only when the full record set is complete. The
-current alpha implementation also requests a full snapshot once per second;
-that is a bring-up behavior and is scheduled for removal in Phase 3 of
-[`docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md`](../docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md).
-Steady state will use incremental `STATUS`/`EVENT` updates and PING/PONG.
+monitor requests another snapshot only after reconnect, sequence gap, incomplete
+snapshot, or an explicit diagnostic request. Steady state uses incremental
+`STATUS`/`EVENT` updates and PING/PONG.
 
 Only `set_led_mode()` is exposed as a write command.  It does not provide any
 printer, motor, slot, or filament control API.
@@ -87,7 +94,13 @@ status snapshots, decoded channel telemetry, decoder error counts, Wi-Fi state, 
 The channel view keeps printer-facing AMS motion separate from the BMCU controller phase and also shows
 cached motor PWM, encoder delta, sensor validity, and motion faults.
 
-The HTTP API is deliberately read-only: `GET /api/status`.  It exposes no
+The HTTP API is deliberately read-only. Link-scoped endpoints are:
+
+- `GET /api/devices`
+- `GET /api/devices/<link-id>/status`
+- `GET /api/devices/<link-id>/events`
+
+`GET /api/status` remains a local-page compatibility aggregate. The API exposes no
 motor, slot, or filament operations, and no LED control endpoint until an
 authenticated Bambuddy/UI contract is defined.
 
