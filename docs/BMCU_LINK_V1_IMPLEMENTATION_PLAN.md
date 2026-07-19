@@ -4,6 +4,14 @@ Status: Draft
 Current phase: alpha.3 real-device validation
 Target: stable wire version `0x01`
 
+Software implementation status (2026-07-19):
+
+- Phase 0 baseline corpus and capture tooling: implemented.
+- Phase 1 management-link calibration liveness: implemented; hardware timing gates open.
+- Phase 3 Pico resync/recovery: implemented and host-tested.
+- Phase 4 dual hardware-UART contexts and scoped HTTP API: implemented and host-tested.
+- See [software validation](BMCU_LINK_SOFTWARE_VALIDATION.md) for evidence and open gates.
+
 関連文書:
 
 - [BMCU Link Protocol alpha.3](BMCU_LINK_PROTOCOL_ALPHA3.md)
