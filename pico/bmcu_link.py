@@ -173,6 +173,19 @@ class BMCUMonitor:
     def ping(self, token):
         return self._send(PING, struct.pack("<I", token & 0xffffffff))
 
+    def ping_if_idle(self, now_ms, interval_ms=2000):
+        """Probe only when no valid frame has demonstrated liveness recently."""
+        if self.last_ping_ms is None:
+            self.last_ping_ms = now_ms
+            return False
+        if self._ticks_diff(now_ms, self.last_ping_ms) < interval_ms:
+            return False
+        if (self.last_valid_ms is not None and
+                self._ticks_diff(now_ms, self.last_valid_ms) < interval_ms):
+            return False
+        self.ping(now_ms)
+        self.last_ping_ms = now_ms
+        return True
     def set_led_mode(self, mode, timeout_s):
         if not 0 <= mode <= 0xff or not 0 <= timeout_s <= 0xffff:
             raise ValueError("invalid LED mode or timeout")

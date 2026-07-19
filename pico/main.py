@@ -129,7 +129,6 @@ web = WebUI(api_state, getattr(config, "WEB_PORT", 80))
 now = time.ticks_ms()
 wifi.start(now)
 web.start()
-last_ping = [now for _ in monitors]
 
 while True:
     now = time.ticks_ms()
@@ -138,8 +137,6 @@ while True:
         monitor.poll(now)
     wifi.poll(now)
     web.poll()
-    for index, monitor in enumerate(monitors):
-        if time.ticks_diff(now, last_ping[index]) >= 2000:
-            monitor.ping(now)
-            last_ping[index] = now
+    for monitor in monitors:
+        monitor.ping_if_idle(now)
     time.sleep_ms(1)
