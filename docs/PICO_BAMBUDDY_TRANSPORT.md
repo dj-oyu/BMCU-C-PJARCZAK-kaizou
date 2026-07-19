@@ -10,8 +10,13 @@ Production telemetry is push-only from the Pico toward Bambuddy:
 ```text
 BMCU --UART STATUS/EVENT--> Pico decoder --> envelope queue
                                               |
-                                              +-- outbound authenticated WSS --> Bambuddy
+                                              +-- authenticated WebSocket --> Bambuddy
 ```
+
+The current Pico adapter deliberately accepts only `ws://` on an explicitly
+trusted LAN. The bearer credential provides application authentication but not
+transport confidentiality. Routed or untrusted deployments require a
+WSS-capable gateway or a future non-blocking TLS adapter.
 
 The Pico initiates and owns one persistent authenticated WebSocket connection.
 Bambuddy must not discover a Pico and poll its local HTTP API. The HTTP server
