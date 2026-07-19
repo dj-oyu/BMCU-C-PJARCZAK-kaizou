@@ -30,6 +30,15 @@ class T(unittest.TestCase):
   r=decode_event_record(payload)
   self.assertEqual((r.hw_tick32,r.record_type,r.severity,r.source),(99,4,2,3))
   self.assertEqual(r.data,b'abcdef')
+ def test_printer_auth_trace(self):
+  data=(0x040d).to_bytes(2,'little')+(2).to_bytes(2,'little')+(3).to_bytes(2,'little')+(17).to_bytes(2,'little')+(1234).to_bytes(4,'little')+bytes([3,6,0,0x5a])
+  r=decode_printer_auth_trace(data)
+  self.assertEqual((r.last_type,r.count_040d,r.count_040e,r.payload_length,r.payload_hash),(0x040d,2,3,17,0x5a))
+ def test_printer_long_transaction(self):
+  data=(0x040e).to_bytes(2,'little')+bytes([CommandOwner.PRINTER,TransactionOutcome.IGNORED,DecisionReason.UNSUPPORTED,17,0,0x6b])
+  event=EventRecord(99,RecordType.PRINTER_LONG_TRANSACTION,RecordSeverity.WARNING,RecordSource.PRINTER_BUS,8,data)
+  r=decode_printer_long_transaction(event)
+  self.assertEqual((r.frame_type,r.request_length,r.response_length,r.payload_hash),(0x040e,17,0,0x6b))
  def test_rejects_bad_record_bounds(self):
   with self.assertRaises(LinkError): decode_full_status_record(b'\x00'*26)
 if __name__=='__main__': unittest.main()

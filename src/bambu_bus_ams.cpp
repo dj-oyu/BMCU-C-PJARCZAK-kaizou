@@ -94,6 +94,16 @@ void bambubus_long_package_analysis(uint8_t *buf, int data_length, bambubus_long
 
 bambubus_long_packge_data printer_data_long;
 
+static uint8_t bounded_payload_hash(const uint8_t* data, uint16_t length)
+{
+    // FNV-1a over a bounded prefix: stable evidence without copying raw printer
+    // payloads or adding unbounded work to the parser path.
+    uint8_t hash = 0xC5u;
+    const uint16_t bounded = length < 32u ? length : 32u;
+    for (uint16_t i = 0u; i < bounded; ++i)
+        hash = static_cast<uint8_t>((hash ^ data[i]) * 0x93u);
+    return hash;
+}
 static uint8_t online_detect_prefix_now = 0x0Cu;
 static bool have_registered = false;
 static uint8_t online_detect_phase = 0u;
@@ -1317,6 +1327,15 @@ bambubus_package_type bambubus_run()
             bmcu_link_printer_transaction(
                 static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
                 static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
+
+            if (len >= 15 && (buf[1] == 0x04u || buf[1] == 0x05u))
+            {
+                bmcu_link_printer_long_transaction(
+                    printer_data_long.type, static_cast<uint8_t>(outcome),
+                    static_cast<uint8_t>(reason), printer_data_long.data_length,
+                    response_length,
+                    bounded_payload_hash(printer_data_long.datas, printer_data_long.data_length));
+            }
 
             if (response_length != 0u) bus_port_to_host.defer_send_us(50u);
         }

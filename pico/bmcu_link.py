@@ -26,6 +26,9 @@ PONG = 0x72
 FULL_STATUS_RECORD = 0x73
 ACK = 0x7f
 
+FULL_RECORD_PRINTER_AUTH = 5
+RECORD_PRINTER_LONG_TRANSACTION = 9
+
 
 def crc16_ccitt_false(data):
     crc = 0xffff
@@ -132,6 +135,7 @@ class BMCUMonitor:
         self.status = None
         self.snapshot = None
         self.channels = [None, None, None, None]
+        self.printer_auth = None
         self._snapshot_parts = None
         self._snapshot_count = 0
         self._snapshot_id = None
@@ -201,6 +205,7 @@ class BMCUMonitor:
         self.status = None
         self.snapshot = None
         self.channels = [None, None, None, None]
+        self.printer_auth = None
         self._snapshot_parts = None
         self._snapshot_id = None
         self._snapshot_count = 0
@@ -280,6 +285,7 @@ class BMCUMonitor:
             self.status = None
             self.snapshot = None
             self.channels = [None, None, None, None]
+            self.printer_auth = None
             self._snapshot_parts = None
             self._snapshot_retries = 0
             self.link_state = "resyncing"
@@ -343,6 +349,13 @@ class BMCUMonitor:
             event.update({"event_name": "sensor", "sensor": payload[0],
                           "slot": payload[1], "validity": payload[2],
                           "value_format": payload[3], "value": _i32(payload, 4)})
+        elif (event["record_type"] == RECORD_PRINTER_LONG_TRANSACTION and
+              event["payload_length"] >= 8):
+            event.update({"event_name": "printer_long_transaction",
+                          "frame_type": _u16(payload, 0), "owner": payload[2],
+                          "outcome": payload[3], "reason": payload[4],
+                          "request_length": payload[5], "response_length": payload[6],
+                          "payload_hash": payload[7]})
         else:
             event["event_name"] = "record_%d" % event["record_type"]
         return event
@@ -395,6 +408,14 @@ class BMCUMonitor:
                 "controller_motion": (record_data[15] & 0x7f) if record_data[15] & 0x80 else None,
             }
             message["channel_data"] = channel
+        if record_type == FULL_RECORD_PRINTER_AUTH:
+            message["printer_auth_data"] = {
+                "last_type": _u16(record_data, 0), "count_040d": _u16(record_data, 2),
+                "count_040e": _u16(record_data, 4), "payload_length": _u16(record_data, 6),
+                "hw_tick32": _u32(record_data, 8), "outcome": record_data[12],
+                "reason": record_data[13], "response_length": record_data[14],
+                "payload_hash": record_data[15],
+            }
         if count == 0 or index >= count:
             message["snapshot_error"] = "invalid_index"
             self._snapshot_parts = None
@@ -422,6 +443,7 @@ class BMCUMonitor:
             self._snapshot_parts = None
             self._snapshot_id = None
             channels = [None, None, None, None]
+            printer_auth = None
             self._snapshot_deadline_ms = None
             self._snapshot_retry_ms = None
             self._snapshot_retries = 0
@@ -430,5 +452,8 @@ class BMCUMonitor:
                 channel = part.get("channel_data")
                 if channel is not None:
                     channels[channel["channel"]] = channel
+                if part.get("printer_auth_data") is not None:
+                    printer_auth = part["printer_auth_data"]
             self.channels = channels
+            self.printer_auth = printer_auth
             message["snapshot_complete"] = True

@@ -39,6 +39,7 @@ enum FullStatusRecordType : uint8_t
 {
     FULL_RECORD_GLOBAL = 1u, FULL_RECORD_CHANNEL = 2u,
     FULL_RECORD_PRINTER_BUS = 3u, FULL_RECORD_COUNTERS = 4u,
+    FULL_RECORD_PRINTER_AUTH = 5u,
 };
 
 enum AckResult : uint8_t
@@ -86,6 +87,7 @@ enum RecordType : uint8_t
     RECORD_BOOT = 1u, RECORD_PRINTER_LINK = 2u, RECORD_PRINTER_TRANSACTION = 3u,
     RECORD_STATE_CHANGE = 4u, RECORD_SENSOR = 5u, RECORD_COMMAND_RESULT = 6u,
     RECORD_SAFETY_DECISION = 7u, RECORD_DIAGNOSTIC_COUNTER = 8u,
+    RECORD_PRINTER_LONG_TRANSACTION = 9u,
 };
 
 enum SensorValidity : uint8_t
@@ -140,6 +142,19 @@ struct LogPrinterTransactionPayload
     uint8_t response_length;
 };
 
+// Appended record type: preserves the alpha.3 PRINTER_TRANSACTION payload while
+// retaining the complete u16 type used by printer long frames.
+struct LogPrinterLongTransactionPayload
+{
+    uint16_t type;
+    CommandOwner owner;
+    TransactionOutcome outcome;
+    DecisionReason reason;
+    uint8_t request_length;
+    uint8_t response_length;
+    uint8_t payload_hash;
+};
+
 struct LogStateChangePayload
 {
     uint8_t field;
@@ -187,6 +202,7 @@ union LogRecordPayload
     LogBootPayload boot;
     LogPrinterLinkPayload printer_link;
     LogPrinterTransactionPayload printer_transaction;
+    LogPrinterLongTransactionPayload printer_long_transaction;
     LogStateChangePayload state_change;
     LogSensorPayload sensor;
     LogCommandResultPayload command_result;
@@ -203,6 +219,8 @@ struct LogRecord
 
 static_assert(sizeof(LogRecordHeader) == 8u, "LogRecordHeader ABI changed");
 static_assert(sizeof(LogRecordPayload) == 8u, "LogRecordPayload ABI changed");
+static_assert(sizeof(LogPrinterLongTransactionPayload) == 8u,
+              "LogPrinterLongTransactionPayload ABI changed");
 static_assert(sizeof(LogRecord) == 16u, "LogRecord ABI changed");
 }
 

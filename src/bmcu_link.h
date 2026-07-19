@@ -26,6 +26,9 @@ void bmcu_link_status_changed(uint32_t reasons);
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
                                    uint16_t response_length);
+void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
+                                        uint16_t payload_length, uint16_t response_length,
+                                        uint8_t payload_hash);
 void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault);
 uint32_t bmcu_link_tx_drop_count(void);
 

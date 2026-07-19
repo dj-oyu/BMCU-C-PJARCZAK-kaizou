@@ -66,7 +66,20 @@ struct PrinterBusCache
     uint8_t last_outcome;
 };
 
-constexpr uint8_t kMaxFullStatusRecords = 7u;
+struct PrinterAuthCache
+{
+    uint16_t last_type;
+    uint16_t count_040d;
+    uint16_t count_040e;
+    uint16_t last_payload_length;
+    uint32_t last_tick;
+    uint8_t last_outcome;
+    uint8_t last_reason;
+    uint8_t last_response_length;
+    uint8_t last_payload_hash;
+};
+
+constexpr uint8_t kMaxFullStatusRecords = 8u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
@@ -106,6 +119,7 @@ uint8_t g_full_active = 0u;
 
 StatusCache g_status_cache = {};
 PrinterBusCache g_printer_bus = {};
+PrinterAuthCache g_printer_auth = {};
 uint8_t g_status_cache_valid = 0u;
 LogRecord g_events[kEventSlots];
 uint8_t g_event_read = 0u;
@@ -264,7 +278,7 @@ void send_hello()
     if (payload == nullptr) return;
     payload[0] = VERSION;
     put16(&payload[1], CAP_STATUS_EVENTS | CAP_LED_OVERRIDE | CAP_PING_PONG |
-                          CAP_RAW_HW_TICK | CAP_FULL_STATUS);
+                          CAP_RAW_HW_TICK | CAP_PRINTER_TRACE | CAP_FULL_STATUS);
     payload[3] = 1u;
     payload[4] = 1u;
     put32(&payload[5], time_hw_tpus * 1000000u);
@@ -472,6 +486,17 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         const uint32_t age = g_printer_bus.valid_rx_count == 0u
             ? 0xFFFFFFFFu : static_cast<uint32_t>(g_full_tick - g_printer_bus.last_valid_tick);
         put32(&record.data[12], age);
+
+        FullStatusRecord& auth = append_full_record(FULL_RECORD_PRINTER_AUTH);
+        put16(&auth.data[0], g_printer_auth.last_type);
+        put16(&auth.data[2], g_printer_auth.count_040d);
+        put16(&auth.data[4], g_printer_auth.count_040e);
+        put16(&auth.data[6], g_printer_auth.last_payload_length);
+        put32(&auth.data[8], g_printer_auth.last_tick);
+        auth.data[12] = g_printer_auth.last_outcome;
+        auth.data[13] = g_printer_auth.last_reason;
+        auth.data[14] = g_printer_auth.last_response_length;
+        auth.data[15] = g_printer_auth.last_payload_hash;
     }
 
     if (section_mask & FULL_SECTION_COUNTERS)
@@ -942,6 +967,46 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
             ? 0xFFu : static_cast<uint8_t>(response_length);
         push_log_record(record);
     }
+}
+
+void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
+                                        uint16_t payload_length, uint16_t response_length,
+                                        uint8_t payload_hash)
+{
+    const uint32_t tick = time_ticks32();
+    g_printer_auth.last_type = type;
+    g_printer_auth.last_payload_length = payload_length;
+    g_printer_auth.last_tick = tick;
+    g_printer_auth.last_outcome = outcome;
+    g_printer_auth.last_reason = reason;
+    g_printer_auth.last_response_length = response_length > 0xFFu
+        ? 0xFFu : static_cast<uint8_t>(response_length);
+    g_printer_auth.last_payload_hash = payload_hash;
+    if (type == 0x040Du && g_printer_auth.count_040d != 0xFFFFu)
+        ++g_printer_auth.count_040d;
+    else if (type == 0x040Eu && g_printer_auth.count_040e != 0xFFFFu)
+        ++g_printer_auth.count_040e;
+
+    const bool notable = type == 0x040Du || type == 0x040Eu ||
+                         outcome == OUTCOME_REJECTED || outcome == OUTCOME_FAILED;
+    if (!notable) return;
+
+    LogRecord record = {};
+    record.header.hw_tick32 = tick;
+    record.header.type = RECORD_PRINTER_LONG_TRANSACTION;
+    record.header.severity = response_length == 0u ? SEVERITY_WARNING : SEVERITY_INFO;
+    record.header.source = SOURCE_PRINTER_BUS;
+    record.header.payload_length = sizeof(LogPrinterLongTransactionPayload);
+    record.payload.printer_long_transaction.type = type;
+    record.payload.printer_long_transaction.owner = OWNER_PRINTER;
+    record.payload.printer_long_transaction.outcome = static_cast<TransactionOutcome>(outcome);
+    record.payload.printer_long_transaction.reason = static_cast<DecisionReason>(reason);
+    record.payload.printer_long_transaction.request_length = payload_length > 0xFFu
+        ? 0xFFu : static_cast<uint8_t>(payload_length);
+    record.payload.printer_long_transaction.response_length = response_length > 0xFFu
+        ? 0xFFu : static_cast<uint8_t>(response_length);
+    record.payload.printer_long_transaction.payload_hash = payload_hash;
+    push_log_record(record);
 }
 
 uint32_t bmcu_link_tx_drop_count(void)

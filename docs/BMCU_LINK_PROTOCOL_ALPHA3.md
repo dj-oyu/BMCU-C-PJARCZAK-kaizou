@@ -205,6 +205,7 @@ Full-status record types:
 | 2 | `CHANNEL` | zero to four |
 | 3 | `PRINTER_BUS` | zero or one |
 | 4 | `COUNTERS` | zero or one |
+| 5 | `PRINTER_AUTH` | zero or one |
 
 #### GLOBAL record_data — 16 bytes
 
@@ -265,6 +266,22 @@ cause synchronous sensor access.
 | 10 | u16 | TX/drop count |
 | 12 | u32 | age of last valid RX in hardware ticks |
 
+#### PRINTER_AUTH record_data — 16 bytes
+
+This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is set.
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u16 | last long-frame type |
+| 2 | u16 | received `0x040D` count, saturating |
+| 4 | u16 | received `0x040E` count, saturating |
+| 6 | u16 | last long-frame payload length |
+| 8 | u32 | last long-frame receive hardware tick |
+| 12 | u8 | last transaction outcome |
+| 13 | u8 | last decision reason |
+| 14 | u8 | last response length, saturated |
+| 15 | u8 | FNV-1a fingerprint of at most the first 32 payload bytes |
+
 #### COUNTERS record_data — 16 bytes
 
 | Offset | Type | Field |
@@ -284,7 +301,7 @@ cause synchronous sensor access.
 - Never block for UART completion; DMA remains responsible for transmission.
 - Do not emit a success ACK. The complete typed record set is the success response.
 
-A full request selects at most seven records: one GLOBAL, four CHANNEL, one PRINTER_BUS, and one COUNTERS.
+A full request selects at most eight records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH, and one COUNTERS.
 At 115200 8E1 this is only a few hundred wire bytes, but staged emission prevents a burst from occupying all
 seven usable TX queue entries.
 
@@ -300,10 +317,14 @@ LogRecord (16 bytes):
   LogRecordHeader | union payload[8]
 ```
 
-The payload union has specialized layouts for boot, printer link, printer transaction, state change, sensor,
-command result, safety decision, and diagnostic counter records. Unused union bytes must be zero. Record type,
-severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric enums defined in
-`src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
+The payload union has specialized layouts for boot, printer link, printer transaction, printer long transaction,
+state change, sensor, command result, safety decision, and diagnostic counter records. Unused union bytes must be
+zero. Record type, severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric
+enums defined in `src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
+
+`PRINTER_LONG_TRANSACTION (9)` preserves the complete long-frame `type:u16` and then carries
+`owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, payload_hash:u8`.
+The existing `PRINTER_TRANSACTION (3)` layout is unchanged for alpha.3 compatibility.
 
 `STATE_CHANGE` field `8` is the per-channel motion-fault latch. Its `slot` is the channel index and its
 value uses the motion-fault enum documented in the CHANNEL full-status record.

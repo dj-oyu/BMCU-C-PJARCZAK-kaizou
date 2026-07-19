@@ -38,7 +38,8 @@
       "1": "global",
       "2": "channel",
       "3": "printer_bus",
-      "4": "counters"
+      "4": "counters",
+      "5": "printer_auth"
     },
     "ack_result": {
       "0": "ok",
@@ -107,7 +108,8 @@
       "5": "sensor",
       "6": "command_result",
       "7": "safety_decision",
-      "8": "diagnostic_counter"
+      "8": "diagnostic_counter",
+      "9": "printer_long_transaction"
     },
     "sensor_validity": {
       "0": "unknown",

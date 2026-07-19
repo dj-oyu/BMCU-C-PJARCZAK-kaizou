@@ -293,6 +293,14 @@ def format_full_status_record(record):
             f"outcome={outcome} valid_rx={valid_rx} invalid_rx={invalid_rx} "
             f"tx={tx} tx_drop={tx_drop} age_ticks={age}"
         )
+    if record.record_type == FULL_RECORD_PRINTER_AUTH:
+        trace = decode_printer_auth_trace(data)
+        return (
+            f"PRINTER_AUTH type=0x{trace.last_type:04X} 040D={trace.count_040d} "
+            f"040E={trace.count_040e} payload_len={trace.payload_length} "
+            f"tick={trace.hw_tick32} outcome={trace.outcome} reason={trace.reason} "
+            f"response_len={trace.response_length} hash=0x{trace.payload_hash:02X}"
+        )
     if record.record_type == FULL_RECORD_COUNTERS:
         tx_drop, rx_drop, crc_error, frame_error = struct.unpack("<IIII", data)
         return (

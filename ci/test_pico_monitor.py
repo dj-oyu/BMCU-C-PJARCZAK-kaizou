@@ -103,6 +103,27 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertTrue(any(item.get("snapshot_error") == "duplicate_index"
                             for item in self.messages))
 
+    def test_printer_long_transaction_event_is_decoded(self):
+        data = (0x040d).to_bytes(2, "little") + bytes((1, 3, 6, 17, 0, 0x5a))
+        payload = (77).to_bytes(4, "little") + bytes((
+            link.RECORD_PRINTER_LONG_TRANSACTION, 3, 1, 8)) + data
+        event = self.monitor._decode_event(payload)
+        self.assertEqual(event["event_name"], "printer_long_transaction")
+        self.assertEqual((event["frame_type"], event["request_length"], event["payload_hash"]),
+                         (0x040d, 17, 0x5a))
+
+    def test_printer_auth_is_installed_with_complete_snapshot(self):
+        self.hello()
+        trace = ((0x040e).to_bytes(2, "little") + (2).to_bytes(2, "little") +
+                 (3).to_bytes(2, "little") + (17).to_bytes(2, "little") +
+                 (1234).to_bytes(4, "little") + bytes((3, 6, 0, 0x6b)))
+        payload = ((7).to_bytes(2, "little") + bytes((
+            0, 1, link.FULL_RECORD_PRINTER_AUTH, 0)) +
+            (1300).to_bytes(4, "little") + trace)
+        self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2, payload), 250)
+        self.assertEqual(self.monitor.printer_auth["last_type"], 0x040e)
+        self.assertEqual(self.monitor.printer_auth["count_040e"], 3)
+        self.assertEqual(self.monitor.printer_auth["payload_hash"], 0x6b)
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()
         self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,

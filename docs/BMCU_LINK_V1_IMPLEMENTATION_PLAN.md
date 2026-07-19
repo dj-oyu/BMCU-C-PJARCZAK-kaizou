@@ -20,6 +20,7 @@ Software implementation status (2026-07-19):
 - [Command Ownership](BMCU_COMMAND_OWNERSHIP.md)
 - [Pico Command Surface](PICO_COMMAND_SURFACE.md)
 - [UART Physical Specification](BMCU_UART_PHYSICAL_SPEC.md)
+- [Printer USART1 DMA RX / CPU parser specification](PRINTER_RX_DMA_PARSER_SPEC.md)
 - [Pico 2 W multi-BMCU bridge specification](../pico/MULTI_BMCU_SPEC.md)
 
 ## 1. 目的
