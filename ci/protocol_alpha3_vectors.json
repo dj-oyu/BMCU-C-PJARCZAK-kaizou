@@ -1,0 +1,15 @@
+{
+  "protocol_version": "0x83",
+  "vectors": [
+    {"name":"hello","kind":"0x01","sequence":1,"payload_hex":"830f00010300ca9a3b","wire_hex":"a55a8301010009830f00010300ca9a3bc761"},
+    {"name":"status","kind":"0x02","sequence":2,"payload_hex":"000102030405060708090a0b0c0d0e0f101112131415161718191a","wire_hex":"a55a830202001b000102030405060708090a0b0c0d0e0f101112131415161718191a929c"},
+    {"name":"event","kind":"0x03","sequence":3,"payload_hex":"000102030405060708090a0b0c0d0e0f","wire_hex":"a55a8303030010000102030405060708090a0b0c0d0e0fe70c"},
+    {"name":"get_status","kind":"0x10","sequence":4097,"payload_hex":"","wire_hex":"a55a8310011000eaf2"},
+    {"name":"set_led_mode","kind":"0x11","sequence":4098,"payload_hex":"023c00","wire_hex":"a55a8311021003023c008eb1"},
+    {"name":"ping","kind":"0x12","sequence":4099,"payload_hex":"78563412","wire_hex":"a55a8312031004785634126ca3"},
+    {"name":"get_full_status","kind":"0x17","sequence":4100,"payload_hex":"0f0f","wire_hex":"a55a83170410020f0f604d"},
+    {"name":"pong","kind":"0x72","sequence":4099,"payload_hex":"78563412efcdab89","wire_hex":"a55a837203100878563412efcdab89d76c"},
+    {"name":"full_status_record","kind":"0x73","sequence":4100,"payload_hex":"0700020402007b000000000102030405060708090a0b0c0d0e0f","wire_hex":"a55a837304101a0700020402007b000000000102030405060708090a0b0c0d0e0f311b"},
+    {"name":"ack","kind":"0x7f","sequence":4098,"payload_hex":"1100","wire_hex":"a55a837f02100211002c03"}
+  ]
+}
