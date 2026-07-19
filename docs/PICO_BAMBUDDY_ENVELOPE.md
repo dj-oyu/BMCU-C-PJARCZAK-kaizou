@@ -8,6 +8,10 @@ authenticated, persistent outbound WebSocket connection. A batched NDJSON POST
 transport is permitted only when WebSocket is unavailable. Both transports carry
 the same envelopes and acknowledgement semantics.
 
+The connection lifecycle and the strict separation from local diagnostic HTTP
+are defined in [`PICO_BAMBUDDY_TRANSPORT.md`](PICO_BAMBUDDY_TRANSPORT.md).
+Bambuddy must not poll or scrape the Pico diagnostic API for production data.
+
 ## 1. Identity, time, and ordering
 
 Every envelope has this shape (additional fields are allowed):

@@ -39,6 +39,15 @@ The target envelope, identity, retry, and loss contract is
 Authentication credentials and the deployment-specific Bambuddy ingest URL
 remain configuration, not repository defaults.
 
+The production route is Pico-initiated push, never Bambuddy polling:
+
+```text
+BMCU UART -> Pico envelope queue -> outbound authenticated WebSocket -> Bambuddy
+```
+
+See [`docs/PICO_BAMBUDDY_TRANSPORT.md`](../docs/PICO_BAMBUDDY_TRANSPORT.md) for
+the connection state, replay, ACK, backpressure, and diagnostic-HTTP boundary.
+
 The monitor requests `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO` and
 installs the returned records only when the full record set is complete. The
 monitor requests another snapshot only after reconnect, sequence gap, incomplete
@@ -61,9 +70,9 @@ reader is run before every network-state service pass.
 Set `MDNS_HOSTNAME` there to a unique, lowercase LAN name such as
 `bmcu-monitor-a`. It is applied before Wi-Fi station mode is enabled, so the
 Pico is reachable as `http://bmcu-monitor-a.local/` as well as by its DHCP IP.
-Each Pico must use a different hostname. A Bambuddy systemd service can use
-this `.local` address through the host resolver; verify it with
-`resolvectl query -p mdns bmcu-monitor-a.local` on the Bambuddy host.
+Each Pico must use a different hostname. This `.local` address is for
+commissioning and browser diagnostics only. It is not a production Bambuddy
+ingestion endpoint and Bambuddy must not poll its HTTP API.
 
 `DEBUG_USB` is `False` by default. Set it to `True` only while commissioning,
 because USB JSON printing is intentionally excluded from the UART receive
@@ -106,6 +115,10 @@ The HTTP API is deliberately read-only. Link-scoped endpoints are:
 `GET /api/status` remains a local-page compatibility aggregate. The API exposes no
 motor, slot, or filament operations, and no LED control endpoint until an
 authenticated Bambuddy/UI contract is defined.
+
+The page's one-second refresh is browser-local polling only. It provides no
+delivery ACK, replay, or transient-event completeness and must not be used by a
+Bambuddy adapter.
 
 The complete Bambuddy-facing field inventory, enum registry, and current
 integration limitations are documented in

@@ -150,7 +150,9 @@ Bambuddyの実際の拡張APIに合わせる薄いアダプタをRDK-X5側に実
 そのAPI仕様がこのリポジトリにないため、以下は実装すべき契約であり、URLや認証方式
 はBambuddyの既存方式に合わせて確定する。
 
-- 発見: Picoは mDNS で `_bambuddy-device._tcp` を公開する。
+- 診断用発見: Picoは mDNS でホスト名を公開できるが、用途はcommissioningと
+  browser診断に限定する。Bambuddyのproduction ingestはmDNSでPicoを発見して
+  HTTP pollingする方式にしない。
 - 識別: `device_id`、機種=`bmcu-monitor`、プロトコル版、BMCUファーム版、
   対応機能を返す。
 - 接続: PicoがBambuddyへ認証済みの単一永続WebSocketをoutboundで開く。WebSocketが
@@ -159,6 +161,9 @@ Bambuddyの実際の拡張APIに合わせる薄いアダプタをRDK-X5側に実
   操作を有効にするには、別途認証済みcommand contractが必要である。
 - 所有: 履歴、グラフ、通知、認証、ユーザー権限、再接続はRDK-X5/Bambuddyが扱う。Picoは
   inbound Bambuddy接続を受け付けず、診断用read-only HTTPだけを公開する。
+
+接続状態、ACK/replay、backpressure、および診断HTTPとの分離は
+[`docs/PICO_BAMBUDDY_TRANSPORT.md`](docs/PICO_BAMBUDDY_TRANSPORT.md)を正とする。
 
 PicoがBambuddyと接続できない時は、BMCUイベントを短期バッファに保持するだけで、
 自動制御判断や状態広告を独自に行わない。
