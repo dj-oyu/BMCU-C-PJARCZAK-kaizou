@@ -3208,6 +3208,7 @@ static inline int M5600_angle_dis(int16_t angle1, int16_t angle2)
 // test kierunku silników
 static void MOTOR_get_dir()
 {
+    bmcu_link_set_calibration_busy(true);
     int  polarity[4] = {0,0,0,0};
     bool test[4]    = {false,false,false,false};
     bool any_detect = false;
@@ -3245,12 +3246,16 @@ static void MOTOR_get_dir()
 
     // jeśli nie ma nic do testowania -> nie rób NIC, nie zapisuj, nie psuj
     if (!(test[0] || test[1] || test[2] || test[3]))
+    {
+        bmcu_link_set_calibration_busy(false);
         return;
+    }
 
     // czekaj max 2s na ruch (200 * 10ms)
     for (int t = 0; t < 200; t++)
     {
         delay(10);
+        bmcu_link_service();
         MC_AS5600.updata_angle();
 
         bool done = true;
@@ -3313,6 +3318,7 @@ static void MOTOR_get_dir()
     {
         (void)timed_out;
     }
+    bmcu_link_set_calibration_busy(false);
 }
 
 // init motorów

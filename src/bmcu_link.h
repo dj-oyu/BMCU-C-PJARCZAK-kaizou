@@ -20,6 +20,7 @@ void bmcu_link_service(void);
 void bmcu_link_rx_isr_byte(uint8_t data);
 void bmcu_link_apply_led_override(void);
 void bmcu_link_set_control_error(int error);
+void bmcu_link_set_calibration_busy(bool busy);
 // Main-loop producers only; ISR code must only enqueue raw RX bytes.
 void bmcu_link_status_changed(uint32_t reasons);
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,

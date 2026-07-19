@@ -5,9 +5,34 @@
 #include "hal/time_hw.h"
 #include "Debug_log.h"
 #include "app_api.h"
+#include "bmcu_link.h"
 #include <math.h>
 
 extern void RGB_update();
+
+namespace
+{
+struct CalibrationBusyGuard
+{
+    CalibrationBusyGuard() { bmcu_link_set_calibration_busy(true); }
+    ~CalibrationBusyGuard() { bmcu_link_set_calibration_busy(false); }
+};
+
+void calibration_wait(uint32_t milliseconds)
+{
+    const uint32_t ticks_per_ms = time_hw_ticks_per_ms();
+    const uint32_t started = time_ticks32();
+    const uint32_t duration = milliseconds * ticks_per_ms;
+    do
+    {
+        ADC_DMA_poll();
+        bmcu_link_service();
+        RGB_update();
+        delay(1);
+    }
+    while (static_cast<uint32_t>(time_ticks32() - started) < duration);
+}
+}
 
 static inline float adc_pull_raw_ch(int ch, const float *v8)
 {
@@ -76,9 +101,9 @@ static void blink_all(uint8_t r, uint8_t g, uint8_t b, int times = 4, int on_ms 
     for (int k = 0; k < times; k++)
     {
         for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, r, g, b);
-        RGB_update(); delay(on_ms);
+        RGB_update(); calibration_wait(on_ms);
         for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
-        RGB_update(); delay(off_ms);
+        RGB_update(); calibration_wait(off_ms);
     }
 }
 
@@ -87,9 +112,9 @@ static void blink_one(int ch, uint8_t r, uint8_t g, uint8_t b, int times = 3, in
     for (int k = 0; k < times; k++)
     {
         MC_PULL_ONLINE_RGB_set(ch, r, g, b);
-        RGB_update(); delay(on_ms);
+        RGB_update(); calibration_wait(on_ms);
         MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
-        RGB_update(); delay(off_ms);
+        RGB_update(); calibration_wait(off_ms);
     }
 }
 
@@ -97,10 +122,10 @@ static void show_diag_step(uint8_t r, uint8_t g, uint8_t b, int on_ms = 360, int
 {
     for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, r, g, b);
     RGB_update();
-    delay(on_ms);
+    calibration_wait(on_ms);
     for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
     RGB_update();
-    delay(off_ms);
+    calibration_wait(off_ms);
 }
 
 static bool capture_first_extreme_wait_release(int ch, float center_v, float &out_best_norm, int8_t &out_pol)
@@ -173,7 +198,7 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
             }
         }
 
-        delay(15);
+        calibration_wait(15u);
     }
 
     out_best_norm = center_v;
@@ -254,7 +279,7 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
             }
         }
 
-        delay(15);
+        calibration_wait(15u);
     }
 
     out_best_norm = center_v;
@@ -291,7 +316,8 @@ void MC_PULL_calibration_clear()
 
 void MC_PULL_calibration_boot()
 {
-    for (int i = 0; i < 6; i++) { ADC_DMA_poll(); delay(20); }
+    CalibrationBusyGuard busy_guard;
+    for (int i = 0; i < 6; i++) calibration_wait(20u);
 
     MC_PULL_detect_channels_inserted();
 
@@ -334,7 +360,7 @@ void MC_PULL_calibration_boot()
         for (int ch = 0; ch < 4; ch++)
             MC_PULL_ONLINE_RGB_set(ch, on ? 0x10 : 0, on ? 0x10 : 0, 0x00);
         RGB_update();
-        delay(15);
+        calibration_wait(15u);
     }
 
     float center_raw[4] = {1.65f, 1.65f, 1.65f, 1.65f};
@@ -389,7 +415,7 @@ void MC_PULL_calibration_boot()
 
         MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
         RGB_update();
-        delay(80);
+        calibration_wait(80u);
     }
 
     const bool ok_cal = Flash_MC_PULL_cal_write_all(MC_PULL_V_OFFSET, MC_PULL_V_MIN, MC_PULL_V_MAX, MC_PULL_POLARITY);
@@ -408,5 +434,5 @@ void MC_PULL_calibration_boot()
     if (ok) blink_all(0x00, 0x10, 0x00, 2, 220, 220);
     else    blink_all(0x10, 0x00, 0x00, 2, 260, 260);
 
-    delay(200);
+    calibration_wait(200u);
 }
