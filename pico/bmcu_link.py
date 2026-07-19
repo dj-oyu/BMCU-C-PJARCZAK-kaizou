@@ -1,0 +1,302 @@
+"""Bounded MicroPython decoder for BMCU Link protocol alpha.3 (0x83)."""
+
+try:
+    import ustruct as struct
+except ImportError:  # Lets the decoder be unit-tested with CPython.
+    import struct
+try:
+    import utime as time
+except ImportError:
+    import time
+
+
+SYNC = b"\xa5\x5a"
+VERSION_ALPHA3 = 0x83
+MAX_PAYLOAD = 57
+
+HELLO = 0x01
+STATUS = 0x02
+EVENT = 0x03
+GET_STATUS = 0x10
+SET_LED_MODE = 0x11
+PING = 0x12
+GET_FULL_STATUS = 0x17
+PONG = 0x72
+FULL_STATUS_RECORD = 0x73
+ACK = 0x7f
+
+
+def crc16_ccitt_false(data):
+    crc = 0xffff
+    for value in data:
+        crc ^= value << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xffff if crc & 0x8000 else (crc << 1) & 0xffff
+    return crc
+
+
+def _u16(data, offset):
+    return data[offset] | (data[offset + 1] << 8)
+
+
+def _u32(data, offset):
+    return (data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) |
+            (data[offset + 3] << 24))
+
+
+def _i16(data, offset):
+    value = _u16(data, offset)
+    return value - 0x10000 if value & 0x8000 else value
+
+def _i32(data, offset):
+    value = _u32(data, offset)
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+class FrameDecoder:
+    """Consumes arbitrary UART chunks and emits only valid bounded frames."""
+
+    def __init__(self):
+        self._buffer = bytearray()
+        self.crc_errors = 0
+        self.frame_errors = 0
+
+    def feed(self, data):
+        self._buffer.extend(data)
+        frames = []
+        while True:
+            start = self._buffer.find(SYNC)
+            if start < 0:
+                # Retain a possible leading sync byte for the next UART read.
+                if self._buffer[-1:] == b"\xa5":
+                    self._buffer = self._buffer[-1:]
+                else:
+                    self._buffer = bytearray()
+                break
+            if start:
+                self._buffer = self._buffer[start:]
+            if len(self._buffer) < 7:
+                break
+            payload_length = self._buffer[6]
+            if payload_length > MAX_PAYLOAD:
+                self.frame_errors += 1
+                self._buffer = self._buffer[1:]
+                continue
+            wire_length = payload_length + 9
+            if len(self._buffer) < wire_length:
+                break
+            body = self._buffer[2:wire_length - 2]
+            expected_crc = _u16(self._buffer, wire_length - 2)
+            if crc16_ccitt_false(body) != expected_crc:
+                self.crc_errors += 1
+                self._buffer = self._buffer[1:]
+                continue
+            frames.append({
+                "version": body[0], "kind": body[1], "sequence": _u16(body, 2),
+                "payload": bytes(body[5:]),
+            })
+            self._buffer = self._buffer[wire_length:]
+        return frames
+
+
+def encode_frame(kind, sequence, payload=b""):
+    if len(payload) > MAX_PAYLOAD:
+        raise ValueError("BMCU Link payload exceeds 57 bytes")
+    body = bytearray((VERSION_ALPHA3, kind, sequence & 0xff, (sequence >> 8) & 0xff, len(payload)))
+    body.extend(payload)
+    crc = crc16_ccitt_false(body)
+    return SYNC + bytes(body) + bytes((crc & 0xff, crc >> 8))
+
+
+class BMCUMonitor:
+    """Protocol state machine; ``on_message`` receives typed dictionaries."""
+
+    def __init__(self, uart, on_message=None):
+        self.uart = uart
+        self.on_message = on_message
+        self.decoder = FrameDecoder()
+        self.next_sequence = 1
+        self.last_valid_ms = None
+        self.last_ping_ms = None
+        self.tick_hz = None
+        self.status = None
+        self.snapshot = None
+        self.channels = [None, None, None, None]
+        self._snapshot_parts = None
+        self._snapshot_count = 0
+        self._snapshot_id = None
+        self.events = []
+        self.sensors = {}
+
+    def _emit(self, message):
+        if self.on_message:
+            self.on_message(message)
+
+    def _send(self, kind, payload=b""):
+        sequence = self.next_sequence
+        self.next_sequence = (sequence + 1) & 0xffff
+        self.uart.write(encode_frame(kind, sequence, payload))
+        return sequence
+
+    def get_status(self):
+        return self._send(GET_STATUS)
+
+    def get_full_status(self):
+        return self._send(GET_FULL_STATUS, b"\x0f\x0f")
+
+    def ping(self, token):
+        return self._send(PING, struct.pack("<I", token & 0xffffffff))
+
+    def set_led_mode(self, mode, timeout_s):
+        if not 0 <= mode <= 0xff or not 0 <= timeout_s <= 0xffff:
+            raise ValueError("invalid LED mode or timeout")
+        return self._send(SET_LED_MODE, bytes((mode, timeout_s & 0xff, timeout_s >> 8)))
+
+    def _request_missing_baseline(self):
+        if self.status is None:
+            self.get_status()
+        if self.snapshot is None and self._snapshot_parts is None:
+            self.get_full_status()
+
+    def poll(self, now_ms):
+        available = self.uart.any()
+        if available:
+            data = self.uart.read(available)
+            if data:
+                for frame in self.decoder.feed(data):
+                    self._handle_frame(frame, now_ms)
+
+    def is_stale(self, now_ms):
+        if self.last_valid_ms is None:
+            return True
+        if hasattr(time, "ticks_diff"):
+            return time.ticks_diff(now_ms, self.last_valid_ms) > 6000
+        return now_ms - self.last_valid_ms > 6000
+
+    def _handle_frame(self, frame, now_ms):
+        if frame["version"] != VERSION_ALPHA3:
+            self._emit({"type": "protocol_error", "reason": "unsupported_version", "frame": frame})
+            return
+        self.last_valid_ms = now_ms
+        kind, payload = frame["kind"], frame["payload"]
+        message = {"type": "frame", "kind": kind, "sequence": frame["sequence"]}
+        if kind == HELLO and len(payload) == 9:
+            self.tick_hz = _u32(payload, 5)
+            message.update({"type": "hello", "protocol": payload[0], "capabilities": _u16(payload, 1),
+                            "firmware": [payload[3], payload[4]], "tick_hz": self.tick_hz})
+            self._emit(message)
+            self._request_missing_baseline()
+            return
+        if kind == STATUS and len(payload) == 27:
+            self.status = self._decode_status(payload)
+            message.update({"type": "status", "data": self.status})
+        elif kind == EVENT and len(payload) == 16:
+            event = self._decode_event(payload)
+            self._apply_event(event)
+            message.update({"type": "event", "data": event})
+        elif kind == PONG and len(payload) == 8:
+            message.update({"type": "pong", "token": _u32(payload, 0), "hw_tick32": _u32(payload, 4)})
+            self._request_missing_baseline()
+        elif kind == ACK and len(payload) == 2:
+            message.update({"type": "ack", "request_kind": payload[0], "result": payload[1]})
+        elif kind == FULL_STATUS_RECORD and len(payload) == 26:
+            self._handle_snapshot(payload, message)
+        else:
+            message.update({"type": "unknown_or_invalid", "payload": payload})
+        self._emit(message)
+
+    @staticmethod
+    def _decode_status(data):
+        return {"hw_tick32": _u32(data, 0), "tx_drop": _u16(data, 4), "rx_drop": _u16(data, 6),
+                "crc_error": _u16(data, 8), "frame_error": _u16(data, 10), "current_slot": data[12],
+                "inserted_mask": data[13], "online_mask": data[14], "motion": list(data[15:19]),
+                "pull_pct": list(data[19:23]), "pressure": _u16(data, 23),
+                "led_mode": data[25], "control_error": data[26]}
+
+    @staticmethod
+    def _decode_event(data):
+        event = {"hw_tick32": _u32(data, 0), "record_type": data[4],
+                 "severity": data[5], "source": data[6],
+                 "payload_length": data[7]}
+        payload = bytes(data[8:16])
+        event["payload"] = payload
+        if event["record_type"] == 4 and event["payload_length"] >= 6:
+            event.update({"event_name": "state_change", "field": payload[0],
+                          "slot": payload[1], "previous_value": _u16(payload, 2),
+                          "value": _u16(payload, 4)})
+        elif event["record_type"] == 5 and event["payload_length"] >= 8:
+            event.update({"event_name": "sensor", "sensor": payload[0],
+                          "slot": payload[1], "validity": payload[2],
+                          "value_format": payload[3], "value": _i32(payload, 4)})
+        else:
+            event["event_name"] = "record_%d" % event["record_type"]
+        return event
+
+    def _apply_event(self, event):
+        self.events.append(event)
+        if len(self.events) > 16:
+            self.events.pop(0)
+        if event.get("event_name") == "sensor":
+            self.sensors[event["sensor"]] = event
+            return
+        if event.get("event_name") != "state_change" or self.status is None:
+            return
+        field, slot, value = event["field"], event["slot"], event["value"]
+        if field == 1:
+            self.status["current_slot"] = value & 0xff
+        elif field == 2:
+            self.status["inserted_mask"] = value & 0xff
+        elif field == 3:
+            self.status["online_mask"] = value & 0xff
+        elif field == 4 and slot < 4:
+            self.status["motion"][slot] = value & 0xff
+        elif field == 5:
+            self.status["pressure"] = value
+        elif field == 6:
+            self.status["led_mode"] = value & 0xff
+        elif field == 7:
+            self.status["control_error"] = value & 0xff
+        elif field == 8 and slot < 4:
+            faults = self.status.setdefault("motion_fault", [0, 0, 0, 0])
+            faults[slot] = value & 0xff
+    def _handle_snapshot(self, data, message):
+        snapshot_id, index, count, record_type = _u16(data, 0), data[2], data[3], data[4]
+        record_data = bytes(data[10:26])
+        message.update({"type": "full_status_record", "snapshot_id": snapshot_id, "record_index": index,
+                        "record_count": count, "record_type": record_type, "hw_tick32": _u32(data, 6),
+                        "record_data": record_data})
+        if record_type == 2 and record_data[0] < 4:
+            flags = _u16(record_data, 6)
+            channel = {
+                "channel": record_data[0], "ams_motion": record_data[1],
+                "inserted": bool(record_data[2]), "online": bool(record_data[3]),
+                "pull_pct": record_data[4], "sensor_validity": record_data[5],
+                "flags": flags, "sensor_online": bool(flags & (1 << 2)),
+                "sensor_good": bool(flags & (1 << 3)),
+                "raw_angle": _u16(record_data, 8),
+                "position_delta": _i16(record_data, 10),
+                "motor_pwm": _i16(record_data, 12),
+                "motion_fault": record_data[14],
+                "controller_motion": (record_data[15] & 0x7f) if record_data[15] & 0x80 else None,
+            }
+            message["channel_data"] = channel
+        if count == 0 or index >= count:
+            message["snapshot_error"] = "invalid_index"
+            self._snapshot_parts = None
+            return
+        if (self._snapshot_parts is None or self._snapshot_id != snapshot_id or
+                self._snapshot_count != count):
+            self._snapshot_parts, self._snapshot_count = {}, count
+            self._snapshot_id = snapshot_id
+        self._snapshot_parts[index] = message.copy()
+        if len(self._snapshot_parts) == count:
+            self.snapshot = [self._snapshot_parts[i] for i in range(count)]
+            self._snapshot_parts = None
+            self._snapshot_id = None
+            channels = [None, None, None, None]
+            for part in self.snapshot:
+                channel = part.get("channel_data")
+                if channel is not None:
+                    channels[channel["channel"]] = channel
+            self.channels = channels
+            message["snapshot_complete"] = True

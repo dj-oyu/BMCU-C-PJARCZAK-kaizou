@@ -1,4 +1,5 @@
 #include "ahub_bus.h"
+#include "bmcu_link.h"
 
 #include <string.h>
 
@@ -336,6 +337,8 @@ void ahubus_slave_get_package_set(uint8_t *buf)
 
             data_struct_ptr += 6;
         }
+
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_SLOT | BMCU_STATUS_CHANGE_MOTION);
         break;
     }
     default:

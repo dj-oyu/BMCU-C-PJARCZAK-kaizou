@@ -9,6 +9,9 @@ extern "C" {
 #endif
 
 //#define Debug_log_on
+#ifdef Debug_log_on
+#error "Debug_log_on conflicts with BMCU Link ownership of USART3/DMA1 Channel2"
+#endif
 #define Debug_log_baudrate 115200
 
 static inline void Delay_Init(void) { }

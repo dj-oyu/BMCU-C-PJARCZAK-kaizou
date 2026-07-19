@@ -1,6 +1,7 @@
 #pragma once
 #include "crc_bus.h"
 #include <string.h>
+#include "hal/time_hw.h"
 
 enum class _bus_data_type : uint8_t
 {
@@ -35,6 +36,38 @@ public:
     volatile int send_data_len = 0;
     volatile _bus_data_type bus_package_type = _bus_data_type::none;
     volatile bool idle = true;
+    volatile uint32_t last_activity_tick = 0u;
+
+    inline __attribute__((always_inline)) void note_activity()
+    {
+        last_activity_tick = time_ticks32();
+    }
+
+    inline __attribute__((always_inline)) bool quiet_for_us(uint32_t microseconds) const
+    {
+        if (!idle || send_data_len != 0 || recv_data_len != 0) return false;
+        return static_cast<uint32_t>(time_ticks32() - last_activity_tick) >=
+               microseconds * time_hw_tpus;
+    }
+
+private:
+    uint32_t send_not_before_tick = 0u;
+    bool send_deferred = false;
+
+    inline __attribute__((always_inline)) bool send_is_ready()
+    {
+        if (!send_deferred) return true;
+        if (time_diff32(time_ticks32(), send_not_before_tick) < 0) return false;
+        send_deferred = false;
+        return true;
+    }
+
+public:
+    inline __attribute__((always_inline)) void defer_send_us(uint32_t microseconds)
+    {
+        send_not_before_tick = time_ticks32() + microseconds * time_hw_tpus;
+        send_deferred = true;
+    }
 
     inline __attribute__((always_inline)) uint8_t* tx_build_buf()
     {
@@ -52,6 +85,8 @@ public:
         drop_bytes = 0;
         bus_recv_data_ptr = recv_data_buf[1];
         idle = true;
+        last_activity_tick = time_ticks32();
+        send_deferred = false;
         send_data_len = 0;
         recv_data_len = 0;
         tx_build_sel  = 0;
@@ -60,6 +95,7 @@ public:
 
     void irq(uint8_t data)
     {
+        note_activity();
         if (drop_bytes > 0)
         {
             if (--drop_bytes == 0)
@@ -182,7 +218,7 @@ public:
         const int len = send_data_len;
         if (len > 0 && len <= 1280)
         {
-            if (!idle) return;
+            if (!idle || !send_is_ready()) return;
 
             uint8_t *tx = tx_build_buf();
             tx_build_sel ^= 1;

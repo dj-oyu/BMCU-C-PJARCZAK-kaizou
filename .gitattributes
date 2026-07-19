@@ -1,0 +1,20 @@
+# Keep every text file LF in both the Git index and working tree.
+* text=auto eol=lf
+
+# Explicit binary formats must never be newline-normalized.
+*.bin -text
+*.elf -text
+*.hex -text
+*.pdf -text
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.webp -text
+*.ico -text
+*.zip -text
+*.gz -text
+*.7z -text
+*.woff -text
+*.woff2 -text
+*.ttf -text

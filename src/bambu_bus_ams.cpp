@@ -6,6 +6,9 @@
 #include "app_api.h"
 #include "_bus_hardware.h"
 #include "crc_bus.h"
+#include "bmcu_link.h"
+#include "bmcu_link_protocol.h"
+#include "Motion_control.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -178,12 +181,31 @@ uint8_t get_filament_left_char(const _ams *ams)
 static uint32_t time_sendout_onuse_ticks[4] = {};
 static uint8_t last_before_on_use_motion_flag = 0x00;
 static uint8_t count_on_use = 0u;
+
+static inline uint8_t bmcu_pressure_class(uint16_t pressure)
+{
+    if (pressure == 0xF06Fu) return 2u;
+    if (pressure == 0xFFFFu || pressure == 0xFF74u) return 0u;
+    return 1u;
+}
+
+class BmcuStatusNotifyGuard
+{
+public:
+    ~BmcuStatusNotifyGuard()
+    {
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_SLOT |
+                                 BMCU_STATUS_CHANGE_MOTION |
+                                 BMCU_STATUS_CHANGE_PRESSURE);
+    }
+};
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     if (ams_num != fixed_ams_num) return false;
 
     _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
+    BmcuStatusNotifyGuard status_guard;
 
     if (read_num < 4)
     {
@@ -578,7 +600,10 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
     package_send->filament_channel_2 = ch;
 
     if (ch < 4u)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -789,7 +814,10 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     package_send->filament_channel = ch;
 
     if (ch < 4)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -1259,7 +1287,38 @@ bambubus_package_type bambubus_run()
                 break;
             }
 
-            if (bus_port_to_host.send_data_len != 0) delay_us(50u);
+            const uint16_t response_length = bus_port_to_host.send_data_len > 0
+                ? static_cast<uint16_t>(bus_port_to_host.send_data_len) : 0u;
+            uint8_t command = len > 4 ? buf[4] : 0u;
+            if (len > 12 && (buf[1] == 0x04u || buf[1] == 0x05u)) command = buf[11];
+
+            bmcu_link_protocol::TransactionOutcome outcome;
+            bmcu_link_protocol::DecisionReason reason;
+            if (stu == bambubus_package_type::none)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
+                reason = bmcu_link_protocol::REASON_NO_HANDLER;
+            }
+            else if (stu == bambubus_package_type::ETC)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_IGNORED;
+                reason = bmcu_link_protocol::REASON_UNSUPPORTED;
+            }
+            else if (response_length != 0u)
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REPLIED;
+                reason = bmcu_link_protocol::REASON_OK;
+            }
+            else
+            {
+                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
+                reason = bmcu_link_protocol::REASON_TX_BUSY;
+            }
+            bmcu_link_printer_transaction(
+                static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
+                static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
+
+            if (response_length != 0u) bus_port_to_host.defer_send_us(50u);
         }
 
         {

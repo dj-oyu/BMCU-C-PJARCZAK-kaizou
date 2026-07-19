@@ -1,0 +1,10 @@
+.pio/
+tmp/
+__pycache__/
+*.py[cod]
+.vscode/
+.venv/
+firmware-build/
+firmwares/
+dist/
+pico/secrets.py
