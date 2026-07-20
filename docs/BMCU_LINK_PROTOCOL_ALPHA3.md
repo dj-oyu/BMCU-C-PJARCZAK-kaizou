@@ -330,12 +330,13 @@ This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is 
 | 0 | u32 | invalid response lengths rejected before DMA start |
 | 4 | u32 | DMA1 Channel 4 transfer errors |
 | 8 | u32 | USART1 TX operations aborted after the 25 ms completion deadline |
-| 12 | u32 | repeated identical printer-transaction EVENTs suppressed within the 5 s reporting window |
+| 12 | u32 | intentional no-response decisions, such as an already-completed online-detect registration |
 
 All printer TX counters are saturating and reset at firmware initialization. A TX DMA error or timeout disables
 the DMA request and channel, clears the DMA/USART completion state, returns RS-485 DE to receive, and releases
-the bus for a later printer retry. Repeated identical rejected/failed transaction EVENTs are rate-limited to one per 5 s;
-the transaction and suppression counters still retain the complete occurrence totals.
+the bus for a later printer retry. Repeated identical rejected/failed transaction EVENTs are rate-limited to one per 5 s.
+Intentional no-response decisions are IGNORED, do not generate warning EVENTs, and are counted separately from
+	x_response_missing.
 
 #### COUNTERS record_data — 16 bytes
 
@@ -377,8 +378,8 @@ The payload union has specialized layouts for boot, printer link, printer transa
 state change, sensor, command result, safety decision, and diagnostic counter records. Unused union bytes must be
 zero. Record type, severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric
 enums defined in `src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
-Additive decision reason `14=NO_RESPONSE` distinguishes response construction failure from a queued-response
-conflict; `8=TX_BUSY` is used only when a prior response is queued. Asynchronous DMA errors and timeouts are
+Additive decision reasons `14=NO_RESPONSE` and `15=NO_RESPONSE_EXPECTED` distinguish response construction
+failure and intentional protocol silence from a queued-response conflict; `8=TX_BUSY` is used only when a prior response is queued. Asynchronous DMA errors and timeouts are
 reported by the PRINTER_TX_FAULT counters rather than attributed to a transaction until transaction-ID
 correlation reaches TX completion.
 

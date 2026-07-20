@@ -220,7 +220,7 @@ registryで行う。BMCU側のhot pathでは構造体への整数代入とキュ
 outcomeは `ACCEPTED / APPLIED / REPLIED / IGNORED / REJECTED / FAILED`。
 reasonは少なくとも `OK / TARGET_MISMATCH / SLOT_RANGE / AMS_OFFLINE /
 INVALID_LENGTH / INVALID_CRC / UNSUPPORTED / NO_HANDLER / TX_BUSY / BAD_STATE /
-SAFETY_INHIBIT / INTERNAL / NO_RESPONSE` を持つ。`TX_BUSY`は先行応答がまだqueueに残る場合だけに用い、応答必須handlerが応答を生成しなかった場合は`FAILED / NO_RESPONSE`とする。非同期のDMA TE/timeoutはtransaction IDでTX完了まで相関できるまではcommand reasonへ帰属させず、PRINTER_TX_FAULT counterで報告する。
+SAFETY_INHIBIT / INTERNAL / NO_RESPONSE / NO_RESPONSE_EXPECTED` を持つ。`TX_BUSY`は先行応答がまだqueueに残る場合だけに用い、応答必須handlerが応答を生成しなかった場合は`FAILED / NO_RESPONSE`とする。handlerがonline detect登録済みなどの正常な無応答を明示した場合は`IGNORED / NO_RESPONSE_EXPECTED`として別counterへ記録する。非同期のDMA TE/timeoutはtransaction IDでTX完了まで相関できるまではcommand reasonへ帰属させず、PRINTER_TX_FAULT counterで報告する。
 
 ACK resultの既存値 `0=OK, 1=BAD_VALUE, 2=UNSUPPORTED` は固定し、`BUSY、BAD_STATE、
 DENIED、EXPIRED、DUPLICATE、INTERNAL` を後方互換で追加する。

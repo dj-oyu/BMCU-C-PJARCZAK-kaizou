@@ -462,7 +462,7 @@ class BMCUMonitor:
                 "tx_invalid_length": _u32(record_data, 0),
                 "tx_dma_error": _u32(record_data, 4),
                 "tx_timeout": _u32(record_data, 8),
-                "tx_event_suppressed": _u32(record_data, 12),
+                "tx_no_response_expected": _u32(record_data, 12),
             }
         if count == 0 or index >= count:
             message["snapshot_error"] = "invalid_index"

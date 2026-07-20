@@ -277,7 +277,7 @@ All counters saturate at their declared width and are snapshot-readable:
 | `tx_invalid_length` | response rejected before DMA start because its length was invalid |
 | `tx_dma_error` | DMA1 Channel 4 transfer-error flag observed |
 | `tx_timeout` | TX aborted because USART TC was not observed within 25 ms |
-| `tx_event_suppressed` | identical rejected/failed transaction events omitted inside the 5 s reporting window |
+| `tx_no_response_expected` | handler explicitly selected normal protocol silence; not a TX failure |
 
 ## 9.1 Implementation status
 

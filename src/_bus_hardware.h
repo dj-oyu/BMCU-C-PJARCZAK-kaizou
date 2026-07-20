@@ -27,6 +27,7 @@ enum class bus_tx_fault : uint8_t
 {
     response_busy,
     response_missing,
+    no_response_expected,
     invalid_length,
     dma_error,
     timeout,
@@ -38,6 +39,7 @@ struct bus_tx_metrics
     volatile uint32_t tx_completed;
     volatile uint32_t tx_response_busy;
     volatile uint32_t tx_response_missing;
+    volatile uint32_t tx_no_response_expected;
     volatile uint32_t tx_invalid_length;
     volatile uint32_t tx_dma_error;
     volatile uint32_t tx_timeout;
@@ -101,6 +103,7 @@ public:
         {
         case bus_tx_fault::response_busy: counter = &tx_metrics.tx_response_busy; break;
         case bus_tx_fault::response_missing: counter = &tx_metrics.tx_response_missing; break;
+        case bus_tx_fault::no_response_expected: counter = &tx_metrics.tx_no_response_expected; break;
         case bus_tx_fault::invalid_length: counter = &tx_metrics.tx_invalid_length; break;
         case bus_tx_fault::dma_error: counter = &tx_metrics.tx_dma_error; break;
         case bus_tx_fault::timeout: counter = &tx_metrics.tx_timeout; break;

@@ -10,6 +10,7 @@ enum class HandlerDisposition : uint8_t
 {
     no_handler,
     unsupported,
+    no_response_expected,
     response_expected,
 };
 
@@ -30,6 +31,8 @@ inline TransactionResult classify_transaction(HandlerDisposition disposition,
         return {OUTCOME_IGNORED, REASON_UNSUPPORTED};
     if (response_pending_before)
         return {OUTCOME_REJECTED, REASON_TX_BUSY};
+    if (disposition == HandlerDisposition::no_response_expected)
+        return {OUTCOME_IGNORED, REASON_NO_RESPONSE_EXPECTED};
     if (response_length != 0u)
         return {OUTCOME_REPLIED, REASON_OK};
     return {OUTCOME_FAILED, REASON_NO_RESPONSE};

@@ -12,14 +12,17 @@ int main()
     result = classify_transaction(HandlerDisposition::unsupported, false, 0u);
     if (result.outcome != OUTCOME_IGNORED || result.reason != REASON_UNSUPPORTED) return 2;
 
+    result = classify_transaction(HandlerDisposition::no_response_expected, false, 0u);
+    if (result.outcome != OUTCOME_IGNORED || result.reason != REASON_NO_RESPONSE_EXPECTED) return 3;
+
     result = classify_transaction(HandlerDisposition::response_expected, true, 31u);
-    if (result.outcome != OUTCOME_REJECTED || result.reason != REASON_TX_BUSY) return 3;
+    if (result.outcome != OUTCOME_REJECTED || result.reason != REASON_TX_BUSY) return 4;
 
     result = classify_transaction(HandlerDisposition::response_expected, false, 31u);
-    if (result.outcome != OUTCOME_REPLIED || result.reason != REASON_OK) return 4;
+    if (result.outcome != OUTCOME_REPLIED || result.reason != REASON_OK) return 5;
 
     result = classify_transaction(HandlerDisposition::response_expected, false, 0u);
-    if (result.outcome != OUTCOME_FAILED || result.reason != REASON_NO_RESPONSE) return 5;
+    if (result.outcome != OUTCOME_FAILED || result.reason != REASON_NO_RESPONSE) return 6;
 
     return 0;
 }

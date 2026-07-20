@@ -538,7 +538,7 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         put32(&tx_fault.data[0], bus_port_to_host.tx_metrics.tx_invalid_length);
         put32(&tx_fault.data[4], bus_port_to_host.tx_metrics.tx_dma_error);
         put32(&tx_fault.data[8], bus_port_to_host.tx_metrics.tx_timeout);
-        put32(&tx_fault.data[12], g_printer_transaction_event_suppressed);
+        put32(&tx_fault.data[12], bus_port_to_host.tx_metrics.tx_no_response_expected);
     }
 
     if (section_mask & FULL_SECTION_COUNTERS)

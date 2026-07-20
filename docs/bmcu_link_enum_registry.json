@@ -104,7 +104,8 @@
       "11": "internal",
       "12": "owner_conflict",
       "13": "lease_expired",
-      "14": "no_response"
+      "14": "no_response",
+      "15": "no_response_expected"
     },
     "record_type": {
       "1": "boot",

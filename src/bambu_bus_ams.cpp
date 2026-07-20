@@ -869,23 +869,23 @@ static inline void online_detect_build_packet(const uint8_t ams_num, const uint8
     package_add_crc(online_detect_res, 29);
 }
 
-void get_package_online_detect(unsigned char *buf, int length)
+bool get_package_online_detect(unsigned char *buf, int length)
 {
     (void)length;
-    if (bus_port_to_host.send_data_len != 0) return;
+    if (bus_port_to_host.send_data_len != 0) return true;
 
     const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    if (ams_num >= 4u) return;
+    if (ams_num >= 4u) return true;
 
     if (ams[bambubus_ams_map[ams_num]].online != true)
     {
         online_detect_reset();
-        return;
+        return true;
     }
 
     if (buf[5] == 0x00)
     {
-        if (have_registered) return;
+        if (have_registered) return true;
 
         if (online_detect_phase == 0u)
         {
@@ -903,17 +903,17 @@ void get_package_online_detect(unsigned char *buf, int length)
         uint8_t *out = bus_port_to_host.tx_build_buf();
         memcpy(out, online_detect_res, 29);
         bus_port_to_host.send_data_len = 29;
-        return;
+        return false;
     }
 
-    if (buf[5] != 0x01) return;
-    if (buf[6] != ams_num) return;
+    if (buf[5] != 0x01) return true;
+    if (buf[6] != ams_num) return true;
 
     online_detect_prefix_now = 0x0Au;
     online_detect_build_packet(ams_num, 0x01);
 
     if (memcmp(online_detect_res + 7, buf + 7, 17) != 0)
-        return;
+        return true;
 
     have_registered = true;
     online_detect_phase = 3u;
@@ -921,6 +921,7 @@ void get_package_online_detect(unsigned char *buf, int length)
     uint8_t *out = bus_port_to_host.tx_build_buf();
     memcpy(out, online_detect_res, 29);
     bus_port_to_host.send_data_len = 29;
+    return false;
 }
 
 void get_package_long_packge_MC_online(unsigned char *buf, int length)
@@ -1246,6 +1247,7 @@ bambubus_package_type bambubus_run()
             stu = get_packge_type(buf, len);
             const bool response_pending_before = bus_port_to_host.send_data_len != 0;
             bool handler_dispatched = false;
+            bool no_response_expected = false;
 
             switch (stu)
             {
@@ -1261,7 +1263,7 @@ bambubus_package_type bambubus_run()
 
             case bambubus_package_type::online_detect:
                 handler_dispatched = true;
-                get_package_online_detect(buf, len);
+                no_response_expected = get_package_online_detect(buf, len);
                 break;
 
             case bambubus_package_type::MC_online:
@@ -1319,7 +1321,9 @@ bambubus_package_type bambubus_run()
             if (stu == bambubus_package_type::none)
                 disposition = printer_bus_result::HandlerDisposition::no_handler;
             else if (handler_dispatched)
-                disposition = printer_bus_result::HandlerDisposition::response_expected;
+                disposition = no_response_expected
+                    ? printer_bus_result::HandlerDisposition::no_response_expected
+                    : printer_bus_result::HandlerDisposition::response_expected;
 
             const printer_bus_result::TransactionResult result =
                 printer_bus_result::classify_transaction(
@@ -1330,6 +1334,8 @@ bambubus_package_type bambubus_run()
                 bus_port_to_host.report_tx_fault(bus_tx_fault::response_busy);
             else if (reason == bmcu_link_protocol::REASON_NO_RESPONSE)
                 bus_port_to_host.report_tx_fault(bus_tx_fault::response_missing);
+            else if (reason == bmcu_link_protocol::REASON_NO_RESPONSE_EXPECTED)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::no_response_expected);
             bmcu_link_printer_transaction(
                 static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
                 static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);

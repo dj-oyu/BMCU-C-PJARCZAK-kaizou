@@ -127,9 +127,9 @@ class/command/outcome、RX/TX counter、last valid RX ageがあり、COUNTERSに
 management TX/RX drop、CRC/frame errorがある。
 
 `bmcu.printer_tx`のfieldは`tx_started`, `tx_completed`, `tx_response_busy`,
-`tx_response_missing`, `tx_invalid_length`, `tx_dma_error`, `tx_timeout`, `tx_event_suppressed`。前2つの差は現在進行中
+`tx_response_missing`, `tx_invalid_length`, `tx_dma_error`, `tx_timeout`, `tx_no_response_expected`。前2つの差は現在進行中
 または中断された送信を含み得る。物理DMA障害の判定には`tx_dma_error`/`tx_timeout`を使い、
-`tx_response_busy`をDMA障害と解釈してはならない。counterはBMCU起動時からの飽和值である。
+`tx_response_busy`をDMA障害と解釈してはならない。`tx_no_response_expected`はonline detect登録済みなどの正常な無応答、`tx_response_missing`だけが応答必須handlerの異常である。counterはBMCU起動時からの飽和值である。
 
 ### 2.5 Event・sensor
 

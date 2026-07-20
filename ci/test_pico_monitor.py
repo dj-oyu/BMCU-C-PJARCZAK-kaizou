@@ -156,7 +156,7 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.printer_tx["tx_response_missing"], 16)
         self.assertEqual(self.monitor.printer_tx["tx_dma_error"], 18)
         self.assertEqual(self.monitor.printer_tx["tx_timeout"], 19)
-        self.assertEqual(self.monitor.printer_tx["tx_event_suppressed"], 20)
+        self.assertEqual(self.monitor.printer_tx["tx_no_response_expected"], 20)
 
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()
