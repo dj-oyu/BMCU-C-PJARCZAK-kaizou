@@ -1,6 +1,8 @@
 """Pico W and Pico 2 W entry point for the BMCU H1 monitor link."""
 
 import time
+import gc
+import machine
 try:
     import ujson as json
 except ImportError:
@@ -11,6 +13,7 @@ from bambuddy_config import BambuddyConfig
 from bambuddy_transport import BambuddyOutbox
 from bambuddy_ws import BambuddyWebSocketClient
 from bmcu_link import BMCUMonitor
+from runtime_log import PicoRuntimeLog, guarded_call
 from wifi import WiFiStation
 from web_ui import WebUI
 
@@ -65,6 +68,10 @@ bambuddy_outbox = BambuddyOutbox(bridge_id)
 bambuddy_client = None
 bambuddy_revision = -1
 monotonic_us = MonotonicMicros()
+runtime_log = PicoRuntimeLog(time.ticks_ms)
+runtime_log.info("boot", "Pico application started", {
+    "reset_cause": machine.reset_cause(),
+})
 
 
 def publish(message):
@@ -74,6 +81,17 @@ def publish(message):
             message, time.ticks_ms(), monotonic_us.now())
     if getattr(config, "DEBUG_USB", False):
         print(json.dumps(json_safe(message)))
+
+
+def publish_wifi(message):
+    if message.get("type") == "wifi_state":
+        details = {"state": message.get("state")}
+        if message.get("ip"):
+            details["ip"] = message["ip"]
+        if message.get("error"):
+            details["error"] = str(message["error"])[:160]
+        runtime_log.info("wifi", "state changed", details)
+    publish(message)
 
 
 def reconcile_bambuddy():
@@ -108,7 +126,7 @@ for link in link_configs:
     monitors.append(BMCUMonitor(uart, publish, link_id=link_id))
 
 monitor_by_id = {monitor.link_id: monitor for monitor in monitors}
-wifi = WiFiStation(secrets, publish)
+wifi = WiFiStation(secrets, publish_wifi)
 
 
 def device_summary(monitor):
@@ -135,6 +153,18 @@ def commissioning_state():
     return result
 
 
+def pico_state(log_limit=None, include_details=True):
+    gc.collect()
+    result = runtime_log.snapshot(log_limit, include_details)
+    result.update({
+        "uptime_ms": time.ticks_ms(),
+        "heap_free": gc.mem_free(),
+        "heap_alloc": gc.mem_alloc(),
+        "reset_cause": machine.reset_cause(),
+    })
+    return result
+
+
 def web_state():
     # Legacy aggregate kept for the local page; every device also has a scoped API.
     monitor = monitors[0]
@@ -158,6 +188,7 @@ def web_state():
         },
         "bridge_id": bridge_id,
         "devices": [device_summary(item) for item in monitors],
+        "pico": pico_state(8, False),
     }
 
 
@@ -186,6 +217,8 @@ def api_state(path="/api/status"):
     if path == "/api/devices":
         return {"bridge_id": bridge_id,
                 "devices": [device_summary(item) for item in monitors]}
+    if path == "/api/pico/logs":
+        return pico_state(12, True)
     pieces = path.split("/")
     if len(pieces) == 5 and pieces[:3] == ["", "api", "devices"]:
         monitor = monitor_by_id.get(pieces[3])
@@ -204,22 +237,58 @@ web = WebUI(
     getattr(config, "WEB_PORT", 80),
     config_provider=commissioning_state,
     config_updater=bambuddy_settings.update,
+    error_handler=lambda component, error: runtime_log.exception(
+        "web." + component, error),
 )
 now = time.ticks_ms()
 wifi.start(now)
 web.start()
 reconcile_bambuddy()
 
-while True:
-    now = time.ticks_ms()
+
+def recover_web():
+    web._close_client()
+
+
+last_transport_state = None
+last_transport_log_ms = None
+last_transport_error = None
+
+
+def service_once(now_ms):
+    global last_transport_state, last_transport_log_ms, last_transport_error
     # Keep BMCU UART service ahead of Wi-Fi, WebSocket, and HTTP work.
     for monitor in monitors:
-        monitor.poll(now)
-    wifi.poll(now)
-    reconcile_bambuddy()
+        guarded_call(runtime_log, "bmcu." + monitor.link_id + ".poll",
+                     lambda monitor=monitor: monitor.poll(now_ms))
+    guarded_call(runtime_log, "wifi.poll", lambda: wifi.poll(now_ms))
+    guarded_call(runtime_log, "bambuddy.reconcile", reconcile_bambuddy)
     if bambuddy_client is not None:
-        bambuddy_client.poll(now, wifi.state == "online")
-    web.poll()
+        guarded_call(
+            runtime_log, "bambuddy.poll",
+            lambda: bambuddy_client.poll(now_ms, wifi.state == "online"))
+        current_transport_state = bambuddy_client.state
+        if current_transport_state != last_transport_state:
+            current_error = bambuddy_client.last_error
+            elapsed = (None if last_transport_log_ms is None else
+                       time.ticks_diff(now_ms, last_transport_log_ms))
+            if (last_transport_log_ms is None or
+                    current_error != last_transport_error or
+                    elapsed < 0 or elapsed >= 10000):
+                runtime_log.info("bambuddy", "state changed", {
+                    "state": current_transport_state,
+                    "error": current_error,
+                })
+                last_transport_log_ms = now_ms
+                last_transport_error = current_error
+            last_transport_state = current_transport_state
+    guarded_call(runtime_log, "web.poll", web.poll, recover_web)
     for monitor in monitors:
-        monitor.ping_if_idle(now)
+        guarded_call(runtime_log, "bmcu." + monitor.link_id + ".ping",
+                     lambda monitor=monitor: monitor.ping_if_idle(now_ms))
+
+
+while True:
+    now = time.ticks_ms()
+    guarded_call(runtime_log, "main.loop", lambda: service_once(now))
     time.sleep_ms(1)

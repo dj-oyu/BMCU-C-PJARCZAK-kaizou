@@ -135,6 +135,14 @@ the CSRF-protected Bambuddy commissioning configuration at
 - `GET /api/devices`
 - `GET /api/devices/<link-id>/status`
 - `GET /api/devices/<link-id>/events`
+- `GET /api/pico/logs`
+
+`GET /api/pico/logs` exposes a bounded Pico-runtime ring buffer, uptime, heap
+usage, reset cause, and exception count without duplicating BMCU frames.
+Subsystem exceptions are isolated so one failed UART, Wi-Fi, WebSocket, or HTTP
+poll does not terminate the whole application. The latest exception traceback
+is also saved as `pico_crash.json` on the Pico and loaded after the next boot;
+repeated identical failures are rate-limited to protect flash endurance.
 
 `GET /api/status` remains a local-page compatibility aggregate. The API exposes no
 motor, slot, or filament operations, and no LED control endpoint until an
