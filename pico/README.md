@@ -48,10 +48,11 @@ BMCU UART -> Pico envelope queue -> outbound authenticated WebSocket -> Bambuddy
 See [`docs/PICO_BAMBUDDY_TRANSPORT.md`](../docs/PICO_BAMBUDDY_TRANSPORT.md) for
 the connection state, replay, ACK, backpressure, and diagnostic-HTTP boundary.
 
-The monitor requests `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO` and
-installs the returned records only when the full record set is complete. The
-monitor requests another snapshot only after reconnect, sequence gap, incomplete
-snapshot, or an explicit diagnostic request. Steady state uses incremental
+The monitor requests `GET_FULL_STATUS(0x0f, 0x0f)` after a valid `HELLO`, or
+after the first `STATUS` when Pico restarted after BMCU and therefore missed the
+one-shot `HELLO`. It installs the returned records only when the full record set
+is complete. The monitor requests another snapshot only after reconnect,
+sequence gap, incomplete snapshot, or an explicit diagnostic request. Steady state uses incremental
 `STATUS`/`EVENT` updates and PING/PONG.
 PING is idle-aware: it is sent only after a link has produced no valid frame for
 two seconds. Active `STATUS`/`EVENT` traffic therefore suppresses probe frames.

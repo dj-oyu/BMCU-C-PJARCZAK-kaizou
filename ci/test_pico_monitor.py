@@ -59,6 +59,14 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.link_state, "resyncing")
         self.assertEqual(self.messages[0]["link_id"], "bmcu-b")
 
+    def test_status_without_hello_requests_one_full_baseline(self):
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, 15, payload), 200)
+        kinds = [link.FrameDecoder().feed(wire)[0]["kind"] for wire in self.uart.writes]
+        self.assertEqual(kinds, [link.GET_FULL_STATUS])
+        self.monitor._handle_frame(frame(link.STATUS, 16, payload), 210)
+        self.assertEqual(len(self.uart.writes), 1)
+
     def test_sequence_gap_discards_old_baseline_and_resyncs(self):
         self.hello()
         self.monitor.status = {"old": True}

@@ -205,7 +205,8 @@ class BMCUMonitor:
     def _request_missing_baseline(self):
         if self.status is None:
             self.get_status()
-        if self.snapshot is None and self._snapshot_parts is None:
+        if (self.snapshot is None and self._snapshot_parts is None and
+                self._snapshot_deadline_ms is None and self._snapshot_retry_ms is None):
             self.get_full_status()
 
     def _invalidate_baseline(self, now_ms, reason):
@@ -319,6 +320,7 @@ class BMCUMonitor:
             self.status = self._decode_status(payload)
             message.update({"type": "status", "data": self.status})
             self._extend_hw_tick(self.status["hw_tick32"], message)
+            self._request_missing_baseline()
         elif kind == EVENT and len(payload) == 16:
             event = self._decode_event(payload)
             self._apply_event(event)
