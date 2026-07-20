@@ -99,6 +99,7 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(hello["frame"]["kind"], "hello")
         self.assertEqual(hello["data"]["links"][0]["link_id"], "bmcu-a")
         self.assertEqual(hello["data"]["links"][0]["bmcu_boot_session"], 3)
+        self.assertEqual(hello["data"]["scope"], "bmcu_link:telemetry")
 
     def test_unpersisted_transport_hello_is_reused_on_reconnect(self):
         client = self.client()
@@ -135,6 +136,7 @@ class WebSocketTests(unittest.TestCase):
         client.sock = fake
         client.state = "online"
         client._hello_sent = True
+        client._hello_acked = True
         client.poll(1, True)
         client.poll(2, True)
         message = json.loads(decode_client_frame(bytes(fake.sent)))
@@ -149,6 +151,7 @@ class WebSocketTests(unittest.TestCase):
         client.sock = fake
         client.state = "online"
         client._hello_sent = True
+        client._hello_acked = True
         client.poll(0, True)
         client.poll(30000, True)
         client.poll(30001, True)
@@ -190,6 +193,30 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(len(outbox.queue), 0)
         self.assertEqual(outbox.queue.quarantined[0]["identity"][0], "b")
 
+    def test_accepted_only_ack_releases_the_complete_inflight_batch(self):
+        outbox = self.outbox()
+        outbox.publish({"type": "status", "link_id": "a"}, 1, 1000)
+        outbox.publish({"type": "event", "link_id": "b"}, 2, 2000)
+        client = self.client(outbox)
+        client._inflight = outbox.queue.batch()
+        client._handle_message(json.dumps({
+            "type": "ack", "accepted": 2, "deduplicated": 0,
+            "persisted": [], "rejected": [],
+        }).encode())
+        self.assertEqual(len(outbox.queue), 0)
+        self.assertIsNone(client._inflight)
+
+    def test_accepted_only_ack_marks_transport_hello_persisted(self):
+        client = self.client()
+        first = client._hello()
+        client._hello_sent = True
+        client._handle_message(json.dumps({
+            "type": "ack", "accepted": 1, "deduplicated": 0,
+            "persisted": [], "rejected": [],
+        }).encode())
+        client._close()
+        self.assertGreater(client._hello()["link"]["transport_sequence"],
+                           first["link"]["transport_sequence"])
     def test_ack_timeout_enters_bounded_backoff_without_dropping_fifo(self):
         outbox = self.outbox()
         outbox.publish({"type": "event", "link_id": "a"}, 1, 1000)
@@ -198,6 +225,7 @@ class WebSocketTests(unittest.TestCase):
         client.sock = fake
         client.state = "online"
         client._hello_sent = True
+        client._hello_acked = True
         client._inflight = outbox.queue.batch()
         client._inflight_at = 0
         client.poll(10000, True)

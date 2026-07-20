@@ -46,7 +46,8 @@ Bambuddy:
 - owns history, UI, notification, authorization, and retention; and
 - sends only commands covered by a separately approved command contract.
 
-Credentials are least-privilege. Telemetry uses `telemetry:write`; LED feedback
+When Bambuddy authentication is enabled, credentials are least-privilege.
+Telemetry uses `bmcu_link:telemetry`; LED feedback
 uses `presentation:write`; soft reset uses `device:reset`; future mechanical
 operations require `motion:control` and remain disabled. The telemetry token
 never authorizes a control operation.

@@ -240,13 +240,22 @@ class BambuddyOutbox:
         envelope = self.builder.build(message, received_at_us, len(self.queue))
         dropped = self.queue.enqueue(envelope, now_ms)
         if dropped and envelope["frame"]["kind"] != "transport_drop":
-            notice = self.builder.build({
-                "type": "transport_drop",
-                "link_id": envelope["link"]["id"],
-                "reason": "queue_overflow",
-                "dropped_count": self.queue.dropped_count,
-            }, received_at_us, len(self.queue))
-            self.queue.enqueue(notice, now_ms, critical=True)
+            notice = None
+            for record in self.queue.records:
+                candidate = record["envelope"]
+                if (candidate["frame"]["kind"] == "transport_drop" and
+                        candidate["link"]["id"] == envelope["link"]["id"]):
+                    notice = candidate
+                    break
+            if notice is None:
+                notice = self.builder.build({
+                    "type": "transport_drop",
+                    "link_id": envelope["link"]["id"],
+                    "reason": "queue_overflow",
+                    "dropped_count": self.queue.dropped_count,
+                }, received_at_us, len(self.queue))
+                self.queue.enqueue(notice, now_ms, critical=True)
+            notice["received_at_us"] = received_at_us
             notice["data"]["dropped_count"] = self.queue.dropped_count
         return envelope
 

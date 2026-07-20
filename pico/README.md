@@ -68,7 +68,8 @@ Copy `secrets_example.py` to `secrets.py` **on the Pico filesystem** and set
 never be committed. Wi-Fi connection and retry are non-blocking; the UART
 reader is run before every network-state service pass. Open
 `http://<MDNS_HOSTNAME>.local/settings` to provision the trusted-LAN
-`ws://` URL and the `telemetry:write` credential. The token is stored on the
+`ws://` URL and, when Bambuddy authentication is enabled, a
+`bmcu_link:telemetry` credential. The token is stored on the
 Pico but is never returned by the settings API.
 
 Set `MDNS_HOSTNAME` there to a unique, lowercase LAN name such as

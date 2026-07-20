@@ -112,8 +112,9 @@ not as filament faults.
 
 ## 4. Security and control scope
 
-The WebSocket/POST endpoint requires a device-scoped `telemetry:write`
-credential before it accepts telemetry.
+When Bambuddy authentication is enabled, the WebSocket/POST endpoint requires a
+device-scoped `bmcu_link:telemetry` credential before it accepts telemetry.
+Trusted-LAN deployments with Bambuddy authentication disabled may omit the token.
 Trusted private LAN deployments may use `ws://`; routed or untrusted
 deployments require TLS termination. Phase 5 is telemetry-only. All CONTROL
 operations remain disabled until their separate scope, authentication, replay,

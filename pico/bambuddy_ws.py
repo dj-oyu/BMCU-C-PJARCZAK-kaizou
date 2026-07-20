@@ -152,7 +152,7 @@ class ServerFrameParser:
             if len(self.buffer) < offset + length:
                 break
             payload = bytes(self.buffer[offset:offset + length])
-            del self.buffer[:offset + length]
+            self.buffer = bytearray(self.buffer[offset + length:])
             frames.append((first & 0x0F, payload))
         if len(self.buffer) > self.max_payload + 10:
             raise ValueError("WebSocket receive buffer too large")
@@ -194,6 +194,8 @@ class BambuddyWebSocketClient:
         self._send_buffer = b""
         self._parser = ServerFrameParser()
         self._hello_sent = False
+        self._hello_acked = False
+        self._hello_at = 0
         self._inflight = None
         self._inflight_at = 0
         self._backoff_index = 0
@@ -255,6 +257,8 @@ class BambuddyWebSocketClient:
         self.sock = None
         self._send_buffer = b""
         self._hello_sent = False
+        self._hello_acked = False
+        self._hello_at = 0
         if self._hello_persisted:
             self._hello_envelope = None
             self._hello_persisted = False
@@ -334,7 +338,7 @@ class BambuddyWebSocketClient:
                 "firmware": self.firmware,
                 "capabilities": self.capabilities,
                 "links": self.outbox.builder.link_sessions(),
-                "scope": "telemetry:write",
+                "scope": "bmcu_link:telemetry",
                 "drop_count": self.outbox.queue.dropped_count,
             }, self.clock_us(), len(self.outbox.queue))
         return self._hello_envelope
@@ -363,6 +367,26 @@ class BambuddyWebSocketClient:
         enriched["rejected"] = rejected
         return enriched
 
+    def _accepted_watermarks(self, message):
+        """Adapt Bambuddy accepted-only ACKs into durable per-link watermarks."""
+        if (self._inflight is None or message.get("persisted") or message.get("rejected")):
+            return message
+        accepted = message.get("accepted")
+        if not isinstance(accepted, int) or accepted < len(self._inflight):
+            return message
+        watermarks = {}
+        for envelope in self._inflight:
+            link = envelope["link"]
+            key = (link["id"], link["pico_boot_session"])
+            sequence = link["transport_sequence"]
+            watermarks[key] = max(sequence, watermarks.get(key, -1))
+        adapted = dict(message)
+        adapted["persisted"] = [{
+            "link_id": key[0],
+            "pico_boot_session": key[1],
+            "transport_sequence": sequence,
+        } for key, sequence in watermarks.items()]
+        return adapted
     def _handle_message(self, payload):
         message = json.loads(payload.decode())
         if message.get("type") == "error":
@@ -373,6 +397,11 @@ class BambuddyWebSocketClient:
             return
         if message.get("type") != "ack":
             return
+        hello_ack = (self._hello_envelope is not None and self._hello_sent and
+                     not self._hello_acked)
+        if (hello_ack and message.get("accepted", 0) > 0 and
+                not message.get("rejected")):
+            self._hello_persisted = True
         if self._hello_envelope is not None:
             hello_link = self._hello_envelope["link"]
             for item in message.get("persisted", []):
@@ -382,6 +411,11 @@ class BambuddyWebSocketClient:
                         item.get("transport_sequence", -1) >=
                         hello_link["transport_sequence"]):
                     self._hello_persisted = True
+        if hello_ack:
+            self._hello_acked = True
+            self._hello_at = 0
+            return
+        message = self._accepted_watermarks(message)
         result = self.outbox.apply_ack(self._enrich_ack(message))
         if result["persisted"] == 0 and result["rejected"] == 0:
             self._resend_not_before = ticks_add(self._inflight_at, 1000)
@@ -436,6 +470,11 @@ class BambuddyWebSocketClient:
         if not self._hello_sent:
             self._queue_json(self._hello())
             self._hello_sent = True
+            self._hello_at = now_ms
+            return
+        if not self._hello_acked:
+            if ticks_diff(now_ms, self._hello_at) >= self.ack_timeout_ms:
+                raise OSError("Bambuddy HELLO ACK timeout")
             return
         if self._inflight is not None:
             if ticks_diff(now_ms, self._inflight_at) >= self.ack_timeout_ms:

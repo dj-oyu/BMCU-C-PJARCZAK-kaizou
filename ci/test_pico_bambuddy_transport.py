@@ -92,6 +92,19 @@ class BambuddyTransportTests(unittest.TestCase):
         self.assertIn("transport_drop", kinds)
         self.assertEqual(outbox.queue.dropped_count, 1)
 
+    def test_overflow_coalesces_transport_drop_notice(self):
+        outbox = transport.BambuddyOutbox(
+            "bridge", boot_session="boot", queue_limit=3)
+        for sequence in range(8):
+            outbox.publish({
+                "type": "event", "link_id": "a", "sequence": sequence,
+            }, sequence, sequence * 1000)
+        batch = outbox.queue.batch()
+        notices = [item for item in batch
+                   if item["frame"]["kind"] == "transport_drop"]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["data"]["dropped_count"],
+                         outbox.queue.dropped_count)
     def test_batch_expires_stale_records_before_replay(self):
         queue = transport.TelemetryQueue(limit=4, max_age_ms=10)
         builder = self.builder()

@@ -71,6 +71,19 @@ class BambuddyConfigTests(unittest.TestCase):
             self.assertEqual(reloaded.token, "private-token")
             self.assertTrue(reloaded.enabled)
 
+    def test_auth_disabled_allows_enabled_transport_without_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = config_module.BambuddyConfig(
+                path=str(Path(directory) / "bambuddy.json"),
+                random_bytes=FixedRandom())
+            result = settings.update({
+                "csrf": settings.public()["csrf"],
+                "enabled": True,
+                "url": "ws://bambuddy.local:8000/api/v1/bmcu-link/ws",
+            })
+            self.assertTrue(result["enabled"])
+            self.assertFalse(result["token_set"])
+            self.assertEqual(result["scope"], ["bmcu_link:telemetry"])
     def test_invalid_persisted_config_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bambuddy.json"

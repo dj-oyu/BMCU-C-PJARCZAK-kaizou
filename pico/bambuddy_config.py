@@ -64,8 +64,8 @@ class BambuddyConfig:
             if "token=" in url.lower():
                 raise ValueError("put token in the separate token field")
             parse_ws_url(url)
-        if values["enabled"] and (not url or not token):
-            raise ValueError("url and token are required when enabled")
+        if values["enabled"] and not url:
+            raise ValueError("url is required when enabled")
 
     def _save(self):
         temporary = self.path + ".tmp"
@@ -100,7 +100,7 @@ class BambuddyConfig:
             "enabled": self.enabled,
             "url": self.url,
             "token_set": bool(self.token),
-            "scope": ["telemetry:write"],
+            "scope": ["bmcu_link:telemetry"],
             "csrf": self._csrf,
             "revision": self.revision,
         }
