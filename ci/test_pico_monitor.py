@@ -131,6 +131,8 @@ class PicoMonitorTests(unittest.TestCase):
             (link.FULL_RECORD_PRINTER_RX_CORE, (1, 2, 3, 4)),
             (link.FULL_RECORD_PRINTER_RX_LOSS, (5, 6, 7, 8)),
             (link.FULL_RECORD_PRINTER_RX_DMA, (9, 10, 11, 12)),
+            (link.FULL_RECORD_PRINTER_TX_CORE, (13, 14, 15, 16)),
+            (link.FULL_RECORD_PRINTER_TX_FAULT, (17, 18, 19, 20)),
         )
         for index, (record_type, values) in enumerate(records):
             data = b"".join(value.to_bytes(4, "little") for value in values)
@@ -142,6 +144,11 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.printer_rx["rx_publish_drop"], 6)
         self.assertEqual(self.monitor.printer_rx["rx_dma_overrun"], 9)
         self.assertEqual(self.monitor.printer_rx["rx_compat_copy"], 12)
+        self.assertEqual(self.monitor.printer_tx["tx_started"], 13)
+        self.assertEqual(self.monitor.printer_tx["tx_response_missing"], 16)
+        self.assertEqual(self.monitor.printer_tx["tx_dma_error"], 18)
+        self.assertEqual(self.monitor.printer_tx["tx_timeout"], 19)
+        self.assertEqual(self.monitor.printer_tx["tx_event_suppressed"], 20)
 
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()

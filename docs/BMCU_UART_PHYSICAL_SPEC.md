@@ -138,6 +138,13 @@ PA9/PA10 remain owned by the printer protocol during normal operation. H2 is
 not a fallback command channel. Firmware must not automatically switch H2 into
 a BMCU Link mode based on a probe or timeout.
 
+USART1 RX uses DMA1 Channel 5 in circular mode when `BMCU_PRINTER_RX_DMA=1`;
+TX uses DMA1 Channel 4 in normal mode in both RX builds. The main loop polls the
+TX transfer-error flag and a 25 ms completion deadline. Either fault disables
+the USART DMA request and channel, clears DMA/USART completion state, drives
+PA12/RS-485 DE back to receive, and increments the corresponding snapshot
+counter. USART TC is the only successful TX completion signal.
+
 ## 7. Connection detection
 
 Detect the peer by protocol handshake, not by scanning or dynamically

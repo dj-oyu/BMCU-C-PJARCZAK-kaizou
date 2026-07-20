@@ -8,6 +8,7 @@
 #include "crc_bus.h"
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "printer_bus_result.h"
 #include "Motion_control.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
@@ -1243,38 +1244,48 @@ bambubus_package_type bambubus_run()
             const int len = rx_len;
 
             stu = get_packge_type(buf, len);
+            const bool response_pending_before = bus_port_to_host.send_data_len != 0;
+            bool handler_dispatched = false;
 
             switch (stu)
             {
             case bambubus_package_type::filament_motion_short:
+                handler_dispatched = true;
                 get_package_motion((bambubus_printer_motion_package_struct *)buf);
                 break;
 
             case bambubus_package_type::filament_motion_long:
+                handler_dispatched = true;
                 get_package_stu_motion((bambubus_printer_stu_motion_package_struct *)buf);
                 break;
 
             case bambubus_package_type::online_detect:
+                handler_dispatched = true;
                 get_package_online_detect(buf, len);
                 break;
 
             case bambubus_package_type::MC_online:
+                handler_dispatched = true;
                 get_package_long_packge_MC_online(buf, len);
                 break;
 
             case bambubus_package_type::read_filament_info:
+                handler_dispatched = true;
                 get_package_long_packge_filament(buf, len);
                 break;
 
             case bambubus_package_type::version:
+                handler_dispatched = true;
                 get_package_long_packge_version(buf, len);
                 break;
 
             case bambubus_package_type::serial_number:
+                handler_dispatched = true;
                 get_package_long_packge_serial_number(buf, len);
                 break;
 
             case bambubus_package_type::set_filament_info:
+                handler_dispatched = true;
             {
                 const uint8_t b = buf[5];
                 const uint8_t ams_num = (b >> 4) & 0x0F;
@@ -1288,6 +1299,7 @@ bambubus_package_type bambubus_run()
             }
 
             case bambubus_package_type::set_filament_info_type2:
+                handler_dispatched = true;
                 get_package_set_filament_type2(buf, len);
                 if (printer_data_long.datas[0] == (uint8_t)BAMBU_BUS_AMS_NUM && printer_data_long.datas[1] < 4)
                     ams_datas_set_need_to_save_filament(printer_data_long.datas[1]);
@@ -1302,28 +1314,22 @@ bambubus_package_type bambubus_run()
             uint8_t command = len > 4 ? buf[4] : 0u;
             if (len > 12 && (buf[1] == 0x04u || buf[1] == 0x05u)) command = buf[11];
 
-            bmcu_link_protocol::TransactionOutcome outcome;
-            bmcu_link_protocol::DecisionReason reason;
+            printer_bus_result::HandlerDisposition disposition =
+                printer_bus_result::HandlerDisposition::unsupported;
             if (stu == bambubus_package_type::none)
-            {
-                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
-                reason = bmcu_link_protocol::REASON_NO_HANDLER;
-            }
-            else if (stu == bambubus_package_type::ETC)
-            {
-                outcome = bmcu_link_protocol::OUTCOME_IGNORED;
-                reason = bmcu_link_protocol::REASON_UNSUPPORTED;
-            }
-            else if (response_length != 0u)
-            {
-                outcome = bmcu_link_protocol::OUTCOME_REPLIED;
-                reason = bmcu_link_protocol::REASON_OK;
-            }
-            else
-            {
-                outcome = bmcu_link_protocol::OUTCOME_REJECTED;
-                reason = bmcu_link_protocol::REASON_TX_BUSY;
-            }
+                disposition = printer_bus_result::HandlerDisposition::no_handler;
+            else if (handler_dispatched)
+                disposition = printer_bus_result::HandlerDisposition::response_expected;
+
+            const printer_bus_result::TransactionResult result =
+                printer_bus_result::classify_transaction(
+                    disposition, response_pending_before, response_length);
+            const bmcu_link_protocol::TransactionOutcome outcome = result.outcome;
+            const bmcu_link_protocol::DecisionReason reason = result.reason;
+            if (reason == bmcu_link_protocol::REASON_TX_BUSY)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::response_busy);
+            else if (reason == bmcu_link_protocol::REASON_NO_RESPONSE)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::response_missing);
             bmcu_link_printer_transaction(
                 static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
                 static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
@@ -1342,8 +1348,7 @@ bambubus_package_type bambubus_run()
 
         {
             const uint32_t s = irq_save_wch();
-            bus_port_to_host.recv_data_len = 0;
-            bus_port_to_host.bus_package_type = _bus_data_type::none;
+            bus_port_to_host.release_recv_frame();
             irq_restore_wch(s);
         }
     }

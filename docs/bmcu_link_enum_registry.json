@@ -42,7 +42,9 @@
       "5": "printer_auth",
       "6": "printer_rx_core",
       "7": "printer_rx_loss",
-      "8": "printer_rx_dma"
+      "8": "printer_rx_dma",
+      "9": "printer_tx_core",
+      "10": "printer_tx_fault"
     },
     "ack_result": {
       "0": "ok",
@@ -101,7 +103,8 @@
       "10": "safety_inhibit",
       "11": "internal",
       "12": "owner_conflict",
-      "13": "lease_expired"
+      "13": "lease_expired",
+      "14": "no_response"
     },
     "record_type": {
       "1": "boot",

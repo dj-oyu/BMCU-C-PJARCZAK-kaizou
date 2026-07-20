@@ -30,6 +30,8 @@ FULL_RECORD_PRINTER_AUTH = 5
 FULL_RECORD_PRINTER_RX_CORE = 6
 FULL_RECORD_PRINTER_RX_LOSS = 7
 FULL_RECORD_PRINTER_RX_DMA = 8
+FULL_RECORD_PRINTER_TX_CORE = 9
+FULL_RECORD_PRINTER_TX_FAULT = 10
 RECORD_PRINTER_LONG_TRANSACTION = 9
 
 
@@ -140,6 +142,7 @@ class BMCUMonitor:
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
+        self.printer_tx = None
         self._snapshot_parts = None
         self._snapshot_count = 0
         self._snapshot_id = None
@@ -211,6 +214,7 @@ class BMCUMonitor:
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
+        self.printer_tx = None
         self._snapshot_parts = None
         self._snapshot_id = None
         self._snapshot_count = 0
@@ -292,6 +296,7 @@ class BMCUMonitor:
             self.channels = [None, None, None, None]
             self.printer_auth = None
             self.printer_rx = None
+            self.printer_tx = None
             self._snapshot_parts = None
             self._snapshot_retries = 0
             self.link_state = "resyncing"
@@ -443,6 +448,20 @@ class BMCUMonitor:
                 "rx_dma_max_pending": _u32(record_data, 8),
                 "rx_compat_copy": _u32(record_data, 12),
             }
+        if record_type == FULL_RECORD_PRINTER_TX_CORE:
+            message["printer_tx_data"] = {
+                "tx_started": _u32(record_data, 0),
+                "tx_completed": _u32(record_data, 4),
+                "tx_response_busy": _u32(record_data, 8),
+                "tx_response_missing": _u32(record_data, 12),
+            }
+        if record_type == FULL_RECORD_PRINTER_TX_FAULT:
+            message["printer_tx_data"] = {
+                "tx_invalid_length": _u32(record_data, 0),
+                "tx_dma_error": _u32(record_data, 4),
+                "tx_timeout": _u32(record_data, 8),
+                "tx_event_suppressed": _u32(record_data, 12),
+            }
         if count == 0 or index >= count:
             message["snapshot_error"] = "invalid_index"
             self._snapshot_parts = None
@@ -472,6 +491,7 @@ class BMCUMonitor:
             channels = [None, None, None, None]
             printer_auth = None
             printer_rx = {}
+            printer_tx = {}
             self._snapshot_deadline_ms = None
             self._snapshot_retry_ms = None
             self._snapshot_retries = 0
@@ -485,7 +505,11 @@ class BMCUMonitor:
                 rx_data = part.get("printer_rx_data")
                 if rx_data is not None:
                     printer_rx.update(rx_data)
+                tx_data = part.get("printer_tx_data")
+                if tx_data is not None:
+                    printer_tx.update(tx_data)
             self.channels = channels
             self.printer_auth = printer_auth
             self.printer_rx = printer_rx or None
+            self.printer_tx = printer_tx or None
             message["snapshot_complete"] = True

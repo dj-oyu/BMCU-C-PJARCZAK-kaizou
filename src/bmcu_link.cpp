@@ -67,6 +67,15 @@ struct PrinterBusCache
     uint8_t last_outcome;
 };
 
+struct PrinterTransactionEventCache
+{
+    uint32_t last_emit_tick;
+    uint8_t command;
+    uint8_t outcome;
+    uint8_t reason;
+    uint8_t valid;
+};
+
 struct PrinterAuthCache
 {
     uint16_t last_type;
@@ -80,7 +89,7 @@ struct PrinterAuthCache
     uint8_t last_payload_hash;
 };
 
-constexpr uint8_t kMaxFullStatusRecords = 11u;
+constexpr uint8_t kMaxFullStatusRecords = 13u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
@@ -120,6 +129,8 @@ uint8_t g_full_active = 0u;
 
 StatusCache g_status_cache = {};
 PrinterBusCache g_printer_bus = {};
+PrinterTransactionEventCache g_printer_transaction_event = {};
+uint32_t g_printer_transaction_event_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
 uint8_t g_status_cache_valid = 0u;
 LogRecord g_events[kEventSlots];
@@ -516,6 +527,18 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         put32(&rx_dma.data[4], bus_port_to_host.rx_metrics.rx_dma_wrap);
         put32(&rx_dma.data[8], bus_port_to_host.rx_metrics.rx_dma_max_pending);
         put32(&rx_dma.data[12], bus_port_to_host.rx_metrics.rx_compat_copy);
+
+        FullStatusRecord& tx_core = append_full_record(FULL_RECORD_PRINTER_TX_CORE);
+        put32(&tx_core.data[0], bus_port_to_host.tx_metrics.tx_started);
+        put32(&tx_core.data[4], bus_port_to_host.tx_metrics.tx_completed);
+        put32(&tx_core.data[8], bus_port_to_host.tx_metrics.tx_response_busy);
+        put32(&tx_core.data[12], bus_port_to_host.tx_metrics.tx_response_missing);
+
+        FullStatusRecord& tx_fault = append_full_record(FULL_RECORD_PRINTER_TX_FAULT);
+        put32(&tx_fault.data[0], bus_port_to_host.tx_metrics.tx_invalid_length);
+        put32(&tx_fault.data[4], bus_port_to_host.tx_metrics.tx_dma_error);
+        put32(&tx_fault.data[8], bus_port_to_host.tx_metrics.tx_timeout);
+        put32(&tx_fault.data[12], g_printer_transaction_event_suppressed);
     }
 
     if (section_mask & FULL_SECTION_COUNTERS)
@@ -970,6 +993,24 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 
     if (rejected)
     {
+        const bool same_event = g_printer_transaction_event.valid != 0u &&
+            g_printer_transaction_event.command == command &&
+            g_printer_transaction_event.outcome == outcome &&
+            g_printer_transaction_event.reason == reason;
+        const uint32_t repeat_interval = time_hw_tpms * 5000u;
+        if (same_event && repeat_interval != 0u &&
+            static_cast<uint32_t>(tick - g_printer_transaction_event.last_emit_tick) < repeat_interval)
+        {
+            if (g_printer_transaction_event_suppressed != 0xFFFFFFFFu)
+                ++g_printer_transaction_event_suppressed;
+            return;
+        }
+        g_printer_transaction_event.last_emit_tick = tick;
+        g_printer_transaction_event.command = command;
+        g_printer_transaction_event.outcome = outcome;
+        g_printer_transaction_event.reason = reason;
+        g_printer_transaction_event.valid = 1u;
+
         LogRecord record = {};
         record.header.hw_tick32 = tick;
         record.header.type = RECORD_PRINTER_TRANSACTION;

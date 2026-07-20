@@ -23,8 +23,30 @@ struct bus_rx_metrics
     volatile uint32_t rx_compat_copy;
 };
 
+enum class bus_tx_fault : uint8_t
+{
+    response_busy,
+    response_missing,
+    invalid_length,
+    dma_error,
+    timeout,
+};
+
+struct bus_tx_metrics
+{
+    volatile uint32_t tx_started;
+    volatile uint32_t tx_completed;
+    volatile uint32_t tx_response_busy;
+    volatile uint32_t tx_response_missing;
+    volatile uint32_t tx_invalid_length;
+    volatile uint32_t tx_dma_error;
+    volatile uint32_t tx_timeout;
+};
+
 bool bus_uart1_rx_transport_quiet();
 void bus_uart1_rx_poll();
+void bus_uart1_rx_release_frame();
+void bus_uart1_tx_poll();
 
 enum class _bus_data_type : uint8_t
 {
@@ -42,7 +64,11 @@ public:
 
 private:
     uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));
+#if BMCU_PRINTER_RX_DMA
+    uint8_t recv_data_buf[1][1280] __attribute__((aligned(4)));
+#else
     uint8_t recv_data_buf[2][1280] __attribute__((aligned(4)));
+#endif
     uint8_t tx_build_sel = 0;
     int _index = 0;
     int length = 999;
@@ -55,6 +81,7 @@ private:
 
 public:
     bus_rx_metrics rx_metrics = {};
+    bus_tx_metrics tx_metrics = {};
     uint8_t * volatile bus_recv_data_ptr = recv_data_buf[0];
     volatile int recv_data_len = 0;
     volatile int send_data_len = 0;
@@ -65,6 +92,20 @@ public:
     inline __attribute__((always_inline)) void note_activity()
     {
         last_activity_tick = time_ticks32();
+    }
+
+    inline __attribute__((always_inline)) void report_tx_fault(bus_tx_fault fault)
+    {
+        volatile uint32_t *counter = nullptr;
+        switch (fault)
+        {
+        case bus_tx_fault::response_busy: counter = &tx_metrics.tx_response_busy; break;
+        case bus_tx_fault::response_missing: counter = &tx_metrics.tx_response_missing; break;
+        case bus_tx_fault::invalid_length: counter = &tx_metrics.tx_invalid_length; break;
+        case bus_tx_fault::dma_error: counter = &tx_metrics.tx_dma_error; break;
+        case bus_tx_fault::timeout: counter = &tx_metrics.tx_timeout; break;
+        }
+        if (counter != nullptr && *counter != 0xFFFFFFFFu) ++*counter;
     }
 
     inline __attribute__((always_inline)) bool quiet_for_us(uint32_t microseconds) const
@@ -111,7 +152,11 @@ public:
         irq_package_type = _bus_data_type::none;
         bus_irq_data_ptr = recv_data_buf[0];
         drop_bytes = 0;
+#if BMCU_PRINTER_RX_DMA
+        bus_recv_data_ptr = recv_data_buf[0];
+#else
         bus_recv_data_ptr = recv_data_buf[1];
+#endif
         idle = true;
         last_activity_tick = time_ticks32();
         send_deferred = false;
@@ -119,6 +164,7 @@ public:
         recv_data_len = 0;
         tx_build_sel  = 0;
         memset((void *)&rx_metrics, 0, sizeof(rx_metrics));
+        memset((void *)&tx_metrics, 0, sizeof(tx_metrics));
         port_send_datas = _port_send_datas;
     }
 
@@ -130,6 +176,24 @@ public:
         data_CRC8_index = 0;
         irq_package_type = _bus_data_type::none;
         drop_bytes = 0;
+    }
+
+    uint8_t *rx_compat_buf() { return recv_data_buf[0]; }
+
+    void publish_recv_frame(uint8_t *data, int len, _bus_data_type type)
+    {
+        bus_recv_data_ptr = data;
+        bus_package_type = type;
+        recv_data_len = len;
+    }
+
+    void release_recv_frame()
+    {
+#if BMCU_PRINTER_RX_DMA
+        bus_uart1_rx_release_frame();
+#endif
+        recv_data_len = 0;
+        bus_package_type = _bus_data_type::none;
     }
 
     void irq(uint8_t data)
@@ -271,7 +335,13 @@ public:
     void send_package()
     {
         const int len = send_data_len;
-        if (len > 0 && len <= 1280)
+        if (len == 0) return;
+        if (len < 0 || len > 1280)
+        {
+            report_tx_fault(bus_tx_fault::invalid_length);
+            send_data_len = 0;
+            return;
+        }
         {
             if (!idle || !send_is_ready()) return;
 

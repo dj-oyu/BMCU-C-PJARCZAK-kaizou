@@ -220,7 +220,7 @@ registryで行う。BMCU側のhot pathでは構造体への整数代入とキュ
 outcomeは `ACCEPTED / APPLIED / REPLIED / IGNORED / REJECTED / FAILED`。
 reasonは少なくとも `OK / TARGET_MISMATCH / SLOT_RANGE / AMS_OFFLINE /
 INVALID_LENGTH / INVALID_CRC / UNSUPPORTED / NO_HANDLER / TX_BUSY / BAD_STATE /
-SAFETY_INHIBIT / INTERNAL` を持つ。
+SAFETY_INHIBIT / INTERNAL / NO_RESPONSE` を持つ。`TX_BUSY`は先行応答がまだqueueに残る場合だけに用い、応答必須handlerが応答を生成しなかった場合は`FAILED / NO_RESPONSE`とする。非同期のDMA TE/timeoutはtransaction IDでTX完了まで相関できるまではcommand reasonへ帰属させず、PRINTER_TX_FAULT counterで報告する。
 
 ACK resultの既存値 `0=OK, 1=BAD_VALUE, 2=UNSUPPORTED` は固定し、`BUSY、BAD_STATE、
 DENIED、EXPIRED、DUPLICATE、INTERNAL` を後方互換で追加する。
@@ -243,6 +243,8 @@ Printer traceはISRで構築しない。既存parser/handlerの入口と出口�
 - heartbeatは毎回event化せずcounterとlink transitionを送る
 - trace burst時は低優先STATUSを先にdropする
 - trace自体が多すぎる場合はsample modeを使うが、motion commandと異常は省略しない
+- 反復障害は飽和counterを正本とし、同一EVENTの連続生成でmanagement linkを圧迫しない
+- printer TXのTE/timeoutは共通復旧経路でDMA停止、flag clear、DE受信復帰を行い、full snapshot counterへ記録する
 - queue drop数とtransaction/event sequence gapを必ず公開する
 
 現行TX queueは8 slotである。容量拡大より先にpriority/reserved slotと実測を行う。

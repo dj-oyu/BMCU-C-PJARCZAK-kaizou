@@ -108,21 +108,28 @@ Controller motion enum: `0 send`, `1 redetect`, `2 pull`, `3 stop`,
 ### 2.4 Full snapshot `bmcu.snapshot`
 
 最新の原子的に完成した`GET_FULL_STATUS` record set。full requestはGLOBAL 1、CHANNEL 4、
-PRINTER_BUS 1、COUNTERS 1の最大7 recordを返す。
+PRINTER_BUS 1、PRINTER_AUTH 1、PRINTER_RX 3、PRINTER_TX 2、COUNTERS 1の最大13 recordを返す。
 
 | field | 型 | 意味 |
 | --- | --- | --- |
 | `snapshot_id` | u16 | record set共通identity |
 | `record_index`, `record_count` | u8 | assembly位置と期待件数 |
-| `record_type` | u8 | `1 global`, `2 channel`, `3 printer bus`, `4 counters` |
+| `record_type` | u8 | `1 global`, `2 channel`, `3 printer bus`, `4 counters`, `5 printer auth`, `6..8 printer RX`, `9..10 printer TX` |
 | `hw_tick32` | u32 | snapshot全体で共通のcapture tick |
 | `record_data` | hex string | 16-byte unionのraw値 |
 | `channel_data` | object, CHANNELのみ | §2.3のfriendly decode |
 
-Picoがnamed JSONへ展開するのは現在CHANNELだけである。GLOBAL、PRINTER_BUS、COUNTERSを
-Bambuddyが使う場合はcanonical wire offsetで`record_data`を読む。PRINTER_BUSにはprinter
-online、last RX class/command/outcome、RX/TX counter、last valid RX ageがあり、COUNTERSには
-u32幅のmanagement TX/RX drop、CRC/frame errorがある。
+PicoはCHANNELを`bmcu.channels`、PRINTER_AUTHを`bmcu.printer_auth`、3個のPRINTER_RX
+recordを`bmcu.printer_rx`、2個のPRINTER_TX recordを`bmcu.printer_tx`へ、完全なrecord setを
+受信した時だけ原子的に展開する。GLOBAL、PRINTER_BUS、COUNTERSをBambuddyが使う場合は
+canonical wire offsetで`record_data`を読む。PRINTER_BUSにはprinter online、last RX
+class/command/outcome、RX/TX counter、last valid RX ageがあり、COUNTERSにはu32幅の
+management TX/RX drop、CRC/frame errorがある。
+
+`bmcu.printer_tx`のfieldは`tx_started`, `tx_completed`, `tx_response_busy`,
+`tx_response_missing`, `tx_invalid_length`, `tx_dma_error`, `tx_timeout`, `tx_event_suppressed`。前2つの差は現在進行中
+または中断された送信を含み得る。物理DMA障害の判定には`tx_dma_error`/`tx_timeout`を使い、
+`tx_response_busy`をDMA障害と解釈してはならない。counterはBMCU起動時からの飽和值である。
 
 ### 2.5 Event・sensor
 

@@ -261,6 +261,7 @@ int main(void)
 
     while (1)
     {
+        bus_uart1_tx_poll();
         bus_uart1_rx_poll();
         const ahubus_package_type   ahub_stu     = ahubus_run();
         const bambubus_package_type bambubus_stu = bambubus_run();

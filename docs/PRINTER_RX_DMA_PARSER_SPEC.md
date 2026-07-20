@@ -270,9 +270,14 @@ All counters saturate at their declared width and are snapshot-readable:
 | `rx_dispatch_budget_hit` | work deferred by the per-call budget |
 | `rx_wrap_frame` | valid frame split across ring end |
 | `rx_compat_copy` | transitional wrapped-frame full copy |
-| `tx_response_queued` | printer responses accepted by TX path |
-| `tx_complete` | USART TC observed |
-| `tx_failed` | queued response failed to complete |
+| `tx_started` | USART1 DMA responses started |
+| `tx_completed` | USART TC observed after DMA completion |
+| `tx_response_busy` | handler skipped because a prior response remained queued |
+| `tx_response_missing` | response-required handler returned without building a response |
+| `tx_invalid_length` | response rejected before DMA start because its length was invalid |
+| `tx_dma_error` | DMA1 Channel 4 transfer-error flag observed |
+| `tx_timeout` | TX aborted because USART TC was not observed within 25 ms |
+| `tx_event_suppressed` | identical rejected/failed transaction events omitted inside the 5 s reporting window |
 
 ## 9.1 Implementation status
 
@@ -284,11 +289,24 @@ source default and `BMCU_PRINTER_RX_DMA=0` as the RXNE rollback build:
 - TX echo, DMA errors, USART overruns, and producer-over-consumer overruns are handled separately;
 - the authoritative quiescent check includes unconsumed DMA bytes;
 - three full-status records expose the current ingress, loss, and DMA counters;
-- the existing byte framer and two packet buffers remain as a transitional compatibility adapter.
+- two additional full-status records expose printer TX progress, response classification, DMA error, and timeout counters;
+- TX DMA TE and a 25 ms completion timeout share one recovery path that disables TX DMA, clears flags, returns DE to RX, and releases the bus;
+- response classification uses a hardware-independent result helper with native regression vectors;
+- `printer_rx_framer` is hardware-independent and directly covered by native golden vectors;
+- contiguous frames are published as pointers into the DMA ring without a full-frame copy;
+- the DMA consumer remains pinned until the synchronous handler releases the frame;
+- USART error recovery observed while a frame is retained is deferred until that release;
+- retained-frame ring overrun is detected and counted at release;
+- only a frame crossing the ring boundary is copied into one 1,280-byte compatibility buffer.
 
-`rx_compat_copy` therefore increases once per completed frame in the DMA build. The next
-migration increment replaces that adapter with the two-span parser/view and removes the
-extra 2,560-byte compatibility storage. Hardware timing and endurance gates remain open.
+`rx_compat_copy` now increases only for wrapped frames. This increment removes one legacy
+1,280-byte packet buffer; the final two-span handler conversion removes the remaining wrap
+buffer and its copy. At 1.25 Mbps with 8E1 framing, a maximum 1,280-byte frame leaves at
+least another 1,280 bytes, approximately 11.3 ms, before DMA can overwrite its retained
+start. Handler latency must remain below that interval with margin; the existing
+`rx_dma_overrun` counter makes a violation observable only after release and cannot make an
+already-overwritten direct view safe. Hardware timing and endurance gates therefore remain
+open.
 
 ## 10. Migration plan
 

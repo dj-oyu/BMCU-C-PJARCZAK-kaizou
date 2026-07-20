@@ -22,6 +22,25 @@ config_module = load("bambuddy_config")
 web_module = load("web_ui")
 
 
+class FakeNonBlockingClient:
+    def __init__(self, operation):
+        self.operation = operation
+        self.closed = False
+
+    def recv(self, _size):
+        if self.operation == "recv":
+            raise BlockingIOError(web_module.errno.EAGAIN, "would block")
+        return b""
+
+    def send(self, _data):
+        if self.operation == "send":
+            raise BlockingIOError(web_module.errno.EAGAIN, "would block")
+        return 0
+
+    def close(self):
+        self.closed = True
+
+
 class FixedRandom:
     def __init__(self):
         self.value = 0
@@ -73,6 +92,24 @@ class BambuddyConfigTests(unittest.TestCase):
 
 
 class WebUIConfigTests(unittest.TestCase):
+
+    def test_recv_would_block_keeps_client_open(self):
+        web = self.web(self.settings())
+        client = FakeNonBlockingClient("recv")
+        web.client = client
+        web.poll()
+        self.assertIs(web.client, client)
+        self.assertFalse(client.closed)
+
+    def test_send_would_block_keeps_client_open(self):
+        web = self.web(self.settings())
+        client = FakeNonBlockingClient("send")
+        web.client = client
+        web.response = b"response"
+        web.poll()
+        self.assertIs(web.client, client)
+        self.assertFalse(client.closed)
+        self.assertEqual(web.response, b"response")
 
     def test_url_must_not_embed_token(self):
         with tempfile.TemporaryDirectory() as directory:

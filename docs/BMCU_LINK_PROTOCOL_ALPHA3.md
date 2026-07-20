@@ -209,6 +209,8 @@ Full-status record types:
 | 6 | `PRINTER_RX_CORE` | zero or one |
 | 7 | `PRINTER_RX_LOSS` | zero or one |
 | 8 | `PRINTER_RX_DMA` | zero or one |
+| 9 | `PRINTER_TX_CORE` | zero or one |
+| 10 | `PRINTER_TX_FAULT` | zero or one |
 
 #### GLOBAL record_data — 16 bytes
 
@@ -310,7 +312,30 @@ This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is 
 | 0 | u32 | DMA producer-over-consumer ring overruns |
 | 4 | u32 | completed DMA ring revolutions |
 | 8 | u32 | maximum observed unconsumed DMA bytes |
-| 12 | u32 | frames copied into the transitional contiguous parser buffers |
+| 12 | u32 | wrapped frames copied into the compatibility buffer |
+
+#### PRINTER_TX_CORE record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | USART1 TX DMA transfers started |
+| 4 | u32 | USART1 transmission-complete interrupts observed |
+| 8 | u32 | response handlers skipped because a prior response was still queued |
+| 12 | u32 | response-required handlers that returned without a response |
+
+#### PRINTER_TX_FAULT record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | invalid response lengths rejected before DMA start |
+| 4 | u32 | DMA1 Channel 4 transfer errors |
+| 8 | u32 | USART1 TX operations aborted after the 25 ms completion deadline |
+| 12 | u32 | repeated identical printer-transaction EVENTs suppressed within the 5 s reporting window |
+
+All printer TX counters are saturating and reset at firmware initialization. A TX DMA error or timeout disables
+the DMA request and channel, clears the DMA/USART completion state, returns RS-485 DE to receive, and releases
+the bus for a later printer retry. Repeated identical rejected/failed transaction EVENTs are rate-limited to one per 5 s;
+the transaction and suppression counters still retain the complete occurrence totals.
 
 #### COUNTERS record_data — 16 bytes
 
@@ -331,8 +356,8 @@ This record is emitted with the printer-bus section when `CAP_PRINTER_TRACE` is 
 - Never block for UART completion; DMA remains responsible for transmission.
 - Do not emit a success ACK. The complete typed record set is the success response.
 
-A full request selects at most eleven records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH,
-three PRINTER_RX records, and one COUNTERS.
+A full request selects at most thirteen records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH,
+three PRINTER_RX records, two PRINTER_TX records, and one COUNTERS.
 At 115200 8E1 this is only a few hundred wire bytes, but staged emission prevents a burst from occupying all
 seven usable TX queue entries.
 
@@ -352,6 +377,10 @@ The payload union has specialized layouts for boot, printer link, printer transa
 state change, sensor, command result, safety decision, and diagnostic counter records. Unused union bytes must be
 zero. Record type, severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric
 enums defined in `src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
+Additive decision reason `14=NO_RESPONSE` distinguishes response construction failure from a queued-response
+conflict; `8=TX_BUSY` is used only when a prior response is queued. Asynchronous DMA errors and timeouts are
+reported by the PRINTER_TX_FAULT counters rather than attributed to a transaction until transaction-ID
+correlation reaches TX completion.
 
 `PRINTER_LONG_TRANSACTION (9)` preserves the complete long-frame `type:u16` and then carries
 `owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, payload_hash:u8`.

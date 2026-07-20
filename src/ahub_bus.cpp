@@ -401,8 +401,7 @@ ahubus_package_type ahubus_run()
 
         {
             const uint32_t s = irq_save_wch();
-            bus_port_to_host.recv_data_len    = 0;
-            bus_port_to_host.bus_package_type = _bus_data_type::none;
+            bus_port_to_host.release_recv_frame();
             irq_restore_wch(s);
         }
     }

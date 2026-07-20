@@ -9,10 +9,27 @@
 #include "core_riscv.h"
 #include "hal/irq_wch.h"
 #include "crc_bus.h"
+#include "printer_rx_framer.h"
 
 uint16_t bus_host_device_type=0x0000;
 
 DMA_InitTypeDef bus_uart1_dma_init_structure;
+namespace
+{
+constexpr uint32_t kPrinterTxTimeoutMs = 25u;
+volatile uint32_t g_printer_tx_started_tick = 0u;
+
+void printer_tx_abort()
+{
+    USART1->CTLR3 &= ~USART_DMAReq_Tx;
+    DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN);
+    DMA1->INTFCR = DMA1_FLAG_GL4 | DMA1_FLAG_TC4 | DMA1_FLAG_HT4 | DMA1_FLAG_TE4;
+    USART_ClearITPendingBit(USART1, USART_IT_TC);
+    GPIOA->BCR = GPIO_Pin_12;
+    bus_port_to_host.note_activity();
+    bus_port_to_host.idle = true;
+}
+}
 #if BMCU_PRINTER_RX_DMA
 namespace
 {
@@ -21,6 +38,14 @@ constexpr uint16_t kPrinterRxDmaHalf = kPrinterRxDmaSize / 2u;
 uint8_t g_printer_rx_dma_ring[kPrinterRxDmaSize] __attribute__((aligned(4)));
 volatile uint32_t g_printer_rx_dma_half_events = 0u;
 uint32_t g_printer_rx_dma_consumed = 0u;
+uint32_t g_printer_rx_dma_parse_cursor = 0u;
+uint16_t g_printer_rx_dma_parse_position = 0u;
+uint32_t g_printer_rx_dma_frame_end = 0u;
+volatile bool g_printer_rx_dma_frame_retained = false;
+volatile bool g_printer_rx_dma_discard_after_release = false;
+
+uint16_t g_printer_rx_dma_frame_position = 0u;
+PrinterRxFramer g_printer_rx_parser;
 
 inline void saturating_increment(volatile uint32_t& value)
 {
@@ -83,9 +108,69 @@ uint32_t rx_dma_produced()
     return produced;
 }
 
+void reset_dma_parser()
+{
+    g_printer_rx_parser.reset();
+}
+
+uint16_t dma_ring_position(uint32_t total)
+{
+    return (uint16_t)(total % kPrinterRxDmaSize);
+}
+
+void set_dma_cursors(uint32_t total)
+{
+    g_printer_rx_dma_consumed = total;
+    g_printer_rx_dma_parse_cursor = total;
+    g_printer_rx_dma_parse_position = dma_ring_position(total);
+    g_printer_rx_dma_frame_end = total;
+    g_printer_rx_dma_frame_retained = false;
+    g_printer_rx_dma_discard_after_release = false;
+    reset_dma_parser();
+}
+
+void advance_dma_parser_byte()
+{
+    ++g_printer_rx_dma_parse_cursor;
+    if (++g_printer_rx_dma_parse_position == kPrinterRxDmaSize)
+        g_printer_rx_dma_parse_position = 0u;
+}
+
+void publish_dma_frame(uint16_t length, uint8_t package_type)
+{
+    uint8_t *frame;
+    const uint32_t contiguous =
+        (uint32_t)g_printer_rx_dma_frame_position + length;
+    if (contiguous <= kPrinterRxDmaSize)
+    {
+        frame = &g_printer_rx_dma_ring[g_printer_rx_dma_frame_position];
+    }
+    else
+    {
+        frame = bus_port_to_host.rx_compat_buf();
+        const uint16_t first =
+            (uint16_t)(kPrinterRxDmaSize - g_printer_rx_dma_frame_position);
+        memcpy(frame, &g_printer_rx_dma_ring[g_printer_rx_dma_frame_position], first);
+        memcpy(frame + first, g_printer_rx_dma_ring, length - first);
+        saturating_increment(bus_port_to_host.rx_metrics.rx_compat_copy);
+    }
+
+    saturating_increment(bus_port_to_host.rx_metrics.rx_frames_valid);
+    g_printer_rx_dma_frame_end = g_printer_rx_dma_parse_cursor;
+    g_printer_rx_dma_frame_retained = true;
+    bus_port_to_host.publish_recv_frame(
+        frame, length, (_bus_data_type)package_type);
+}
+
 void discard_rx_dma_pending()
 {
-    g_printer_rx_dma_consumed = rx_dma_produced();
+    if (g_printer_rx_dma_frame_retained)
+    {
+        g_printer_rx_dma_discard_after_release = true;
+        reset_dma_parser();
+        return;
+    }
+    set_dma_cursors(rx_dma_produced());
 }
 
 void discard_rx_dma_pending_as_loss()
@@ -94,7 +179,7 @@ void discard_rx_dma_pending_as_loss()
     saturating_add(bus_port_to_host.rx_metrics.rx_resync_bytes,
                    produced - g_printer_rx_dma_consumed);
     bus_port_to_host.reset_rx_parser();
-    g_printer_rx_dma_consumed = produced;
+    set_dma_cursors(produced);
 }
 }
 #endif
@@ -203,7 +288,7 @@ void bus_uart1_init()
     NVIC_Init(&NVIC_InitStructure);
 
     g_printer_rx_dma_half_events = 0u;
-    g_printer_rx_dma_consumed = 0u;
+    set_dma_cursors(0u);
     DMA_Cmd(DMA1_Channel5, ENABLE);
     USART_DMACmd(USART1, USART_DMAReq_Rx, ENABLE);
 #endif
@@ -214,7 +299,9 @@ void bus_uart1_init()
 bool bus_uart1_rx_transport_quiet()
 {
 #if BMCU_PRINTER_RX_DMA
-    return rx_dma_produced() == g_printer_rx_dma_consumed;
+    return !g_printer_rx_parser.active() &&
+           !g_printer_rx_dma_frame_retained &&
+           rx_dma_produced() == g_printer_rx_dma_parse_cursor;
 #else
     return true;
 #endif
@@ -228,31 +315,120 @@ void bus_uart1_rx_poll()
         discard_rx_dma_pending();
         return;
     }
+    if (g_printer_rx_dma_frame_retained) return;
 
     const uint32_t produced = rx_dma_produced();
-    uint32_t available = produced - g_printer_rx_dma_consumed;
-    if (available > kPrinterRxDmaSize)
+    uint32_t held = produced - g_printer_rx_dma_consumed;
+    if (held > kPrinterRxDmaSize)
     {
         saturating_increment(bus_port_to_host.rx_metrics.rx_dma_overrun);
-        bus_port_to_host.reset_rx_parser();
         saturating_add(bus_port_to_host.rx_metrics.rx_resync_bytes,
-                       available - kPrinterRxDmaSize);
-        g_printer_rx_dma_consumed = produced - kPrinterRxDmaSize;
-        available = kPrinterRxDmaSize;
+                       held - kPrinterRxDmaSize);
+        set_dma_cursors(produced - kPrinterRxDmaSize);
+        held = kPrinterRxDmaSize;
     }
-    if (available > bus_port_to_host.rx_metrics.rx_dma_max_pending)
-        bus_port_to_host.rx_metrics.rx_dma_max_pending = available;
+    if (held > bus_port_to_host.rx_metrics.rx_dma_max_pending)
+        bus_port_to_host.rx_metrics.rx_dma_max_pending = held;
 
-    while (available-- != 0u)
+    uint32_t available = produced - g_printer_rx_dma_parse_cursor;
+    while (available != 0u && !g_printer_rx_dma_frame_retained)
     {
-        uint32_t index = g_printer_rx_dma_consumed;
-        while (index >= kPrinterRxDmaSize) index -= kPrinterRxDmaSize;
-        const uint8_t value = g_printer_rx_dma_ring[index];
-        ++g_printer_rx_dma_consumed;
-        bus_port_to_host.irq(value);
-        if (bus_port_to_host.recv_data_len != 0) break;
+        const uint32_t byte_cursor = g_printer_rx_dma_parse_cursor;
+        const uint16_t byte_position = g_printer_rx_dma_parse_position;
+        const uint8_t value = g_printer_rx_dma_ring[byte_position];
+        advance_dma_parser_byte();
+        --available;
+        bus_port_to_host.note_activity();
+        saturating_increment(bus_port_to_host.rx_metrics.rx_bytes);
+
+        const bool was_active = g_printer_rx_parser.active();
+        const PrinterRxFramerResult result = g_printer_rx_parser.push(value);
+        switch (result.event)
+        {
+        case PrinterRxFramerEvent::frame_started:
+            g_printer_rx_dma_frame_position = byte_position;
+            g_printer_rx_dma_consumed = byte_cursor;
+            break;
+
+        case PrinterRxFramerEvent::bad_length:
+            saturating_increment(bus_port_to_host.rx_metrics.rx_bad_length);
+            g_printer_rx_dma_consumed = g_printer_rx_dma_parse_cursor;
+            break;
+
+        case PrinterRxFramerEvent::header_crc_error:
+            saturating_increment(bus_port_to_host.rx_metrics.rx_header_crc_error);
+            g_printer_rx_dma_consumed = g_printer_rx_dma_parse_cursor;
+            break;
+
+        case PrinterRxFramerEvent::heartbeat_complete:
+            g_printer_rx_dma_consumed = g_printer_rx_dma_parse_cursor;
+            bambubus_heartbeat_seen_fast();
+            break;
+
+        case PrinterRxFramerEvent::frame_complete:
+            publish_dma_frame(result.frame_length, result.package_type);
+            break;
+
+        case PrinterRxFramerEvent::none:
+        default:
+            if (!was_active)
+            {
+                saturating_increment(bus_port_to_host.rx_metrics.rx_resync_bytes);
+                g_printer_rx_dma_consumed = g_printer_rx_dma_parse_cursor;
+            }
+            break;
+        }
     }
 #endif
+}
+
+void bus_uart1_rx_release_frame()
+{
+#if BMCU_PRINTER_RX_DMA
+    if (g_printer_rx_dma_frame_retained)
+    {
+        const uint32_t produced = rx_dma_produced();
+        const uint32_t held = produced - g_printer_rx_dma_consumed;
+        if (held > kPrinterRxDmaSize)
+        {
+            saturating_increment(bus_port_to_host.rx_metrics.rx_dma_overrun);
+            saturating_add(bus_port_to_host.rx_metrics.rx_resync_bytes,
+                           held - kPrinterRxDmaSize);
+            set_dma_cursors(produced);
+            return;
+        }
+
+        g_printer_rx_dma_consumed = g_printer_rx_dma_frame_end;
+        g_printer_rx_dma_frame_retained = false;
+        if (g_printer_rx_dma_discard_after_release)
+        {
+            saturating_add(bus_port_to_host.rx_metrics.rx_resync_bytes,
+                           produced - g_printer_rx_dma_frame_end);
+            set_dma_cursors(produced);
+        }
+    }
+#endif
+}
+
+void bus_uart1_tx_poll()
+{
+    if (bus_port_to_host.idle) return;
+
+    const uint32_t flags = DMA1->INTFR;
+    if ((flags & DMA1_FLAG_TE4) != 0u)
+    {
+        bus_port_to_host.report_tx_fault(bus_tx_fault::dma_error);
+        printer_tx_abort();
+        return;
+    }
+
+    const uint32_t timeout_ticks = time_hw_tpms * kPrinterTxTimeoutMs;
+    if (timeout_ticks != 0u &&
+        static_cast<uint32_t>(time_ticks32() - g_printer_tx_started_tick) >= timeout_ticks)
+    {
+        bus_port_to_host.report_tx_fault(bus_tx_fault::timeout);
+        printer_tx_abort();
+    }
 }
 
 void bus_uart1_dma_send(unsigned char *data, uint16_t length)
@@ -265,6 +441,7 @@ void bus_uart1_dma_send(unsigned char *data, uint16_t length)
     bus_port_to_host.idle = false;
 
     DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN);
+    DMA1->INTFCR = DMA1_FLAG_GL4 | DMA1_FLAG_TC4 | DMA1_FLAG_HT4 | DMA1_FLAG_TE4;
 
     DMA1_Channel4->MADDR = (uint32_t)data;
     DMA1_Channel4->CNTR  = length;
@@ -275,8 +452,11 @@ void bus_uart1_dma_send(unsigned char *data, uint16_t length)
     // wyczyść TC
     USART_ClearITPendingBit(USART1, USART_IT_TC);
 
+    g_printer_tx_started_tick = time_ticks32();
     USART1->CTLR3 |= USART_DMAReq_Tx;
     DMA1_Channel4->CFGR |= DMA_CFGR1_EN;
+    if (bus_port_to_host.tx_metrics.tx_started != 0xFFFFFFFFu)
+        ++bus_port_to_host.tx_metrics.tx_started;
 }
 
 extern "C" void USART1_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -305,6 +485,13 @@ void USART1_IRQHandler(void)
 #endif
     if (USART_GetITStatus(USART1, USART_IT_TC) != RESET)
     {
+        const bool tx_was_active = !bus_port_to_host.idle;
+        if (tx_was_active && (DMA1->INTFR & DMA1_FLAG_TE4) != 0u)
+        {
+            bus_port_to_host.report_tx_fault(bus_tx_fault::dma_error);
+            printer_tx_abort();
+            return;
+        }
         USART_ClearITPendingBit(USART1, USART_IT_TC);
         USART1->CTLR3 &= ~USART_DMAReq_Tx;
         DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN);
@@ -315,6 +502,8 @@ void USART1_IRQHandler(void)
         // TX done
         bus_port_to_host.note_activity();
         bus_port_to_host.idle = true;
+        if (tx_was_active && bus_port_to_host.tx_metrics.tx_completed != 0xFFFFFFFFu)
+            ++bus_port_to_host.tx_metrics.tx_completed;
     }
 }
 #if BMCU_PRINTER_RX_DMA

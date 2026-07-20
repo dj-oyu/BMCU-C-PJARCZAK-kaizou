@@ -1,4 +1,4 @@
-# Pico 2 W BMCU monitor
+# Pico W / Pico 2 W BMCU monitor
 
 This directory is independent of the BMCU firmware.  It contains a
 MicroPython implementation of the Pico side of BMCU Link protocol alpha.3.
@@ -83,12 +83,28 @@ path. `publish()` only enqueues; socket work runs in a later cooperative poll.
 
 ## Deploy from this workstation
 
-With the Pico held in BOOTSEL mode, run this from the repository root to copy
-the verified Pico 2 W MicroPython UF2 to its `RP2350` USB drive:
+With the Pico held in BOOTSEL mode, run the matching command from the repository
+root. The script checks the BOOTSEL volume label before copying, so an RP2040
+image cannot accidentally be written to a Pico 2 W (or vice versa).
+
+For the first-generation Raspberry Pi Pico W (RP2040, BOOTSEL label
+`RPI-RP2`), use the **Pico W** MicroPython image. Do not use the non-W Pico
+image because it does not include Wi-Fi support:
 
 ```powershell
-.\pico\flash_micropython.ps1 -BootDrive D
+.\pico\flash_micropython.ps1 -Board PicoW -BootDrive D `
+    -Uf2Path C:\tmp\RPI_PICO_W-20260406-v1.28.0.uf2
 ```
+
+For Pico 2 W (RP2350, BOOTSEL label `RP2350`):
+
+```powershell
+.\pico\flash_micropython.ps1 -Board Pico2W -BootDrive D
+```
+
+`Pico2W` remains the default for compatibility with the previous command. The
+default UF2 paths are only workstation conveniences; pass `-Uf2Path` when your
+download has a different version or filename.
 
 After it restarts, identify the new MicroPython COM port.  Create a local
 `pico\secrets.py` from `secrets_example.py`, then upload the application:
@@ -99,13 +115,14 @@ After it restarts, identify the new MicroPython COM port.  Create a local
 
 `deploy.ps1` uploads the Pico monitor, transport, configuration, Wi-Fi, UI,
 and main modules plus the explicitly supplied `secrets.py`; it never touches
-BMCU firmware sources.
+BMCU firmware sources. The same application files and default GP0/GP1 plus
+GP4/GP5 UART mapping work on both Pico W generations.
 
 ## Browser status page
 
 Once Wi-Fi is connected, open `http://<MDNS_HOSTNAME>.local/` (or `http://<Pico-IP>/`) from the same LAN. The page
 refreshes once per second and exposes the typed BMCU status, completed full
-status snapshots, decoded channel telemetry, decoder error counts, Wi-Fi state, and BMCU-link state.
+status snapshots, decoded channel telemetry, printer RX/TX counters (including DMA error and timeout), decoder error counts, Wi-Fi state, and BMCU-link state.
 The channel view keeps printer-facing AMS motion separate from the BMCU controller phase and also shows
 cached motor PWM, encoder delta, sensor validity, and motion faults.
 

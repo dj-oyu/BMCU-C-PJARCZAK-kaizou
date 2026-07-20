@@ -1,4 +1,4 @@
-"""Pico 2 W entry point for the BMCU H1 monitor link."""
+"""Pico W and Pico 2 W entry point for the BMCU H1 monitor link."""
 
 import time
 try:
@@ -150,6 +150,7 @@ def web_state():
             "channels": monitor.channels,
             "printer_auth": monitor.printer_auth,
             "printer_rx": monitor.printer_rx,
+            "printer_tx": monitor.printer_tx,
             "events": monitor.events,
             "sensors": monitor.sensors,
             "decoder_crc_errors": monitor.decoder.crc_errors,
@@ -172,6 +173,7 @@ def device_state(monitor):
         "channels": monitor.channels,
         "printer_auth": monitor.printer_auth,
         "printer_rx": monitor.printer_rx,
+        "printer_tx": monitor.printer_tx,
         "sensors": monitor.sensors,
         "decoder_crc_errors": monitor.decoder.crc_errors,
         "decoder_frame_errors": monitor.decoder.frame_errors,
