@@ -44,35 +44,77 @@ SETTINGS_PAGE = SETTINGS_PAGE.replace(
 RESET_PANEL = """<section class="card" style="margin-top:20px"><h2>BMCU recovery</h2><p>Idle-only local soft reset. Active motion is rejected by BMCU.</p><button id="resetBmcu">Request BMCU soft reset</button><span id="resetResult"></span></section><script>resetBmcu.onclick=async()=>{if(prompt('Type RESET BMCU to confirm')!=='RESET BMCU')return;resetBmcu.disabled=true;try{let c=await(await fetch('/api/bambuddy/config',{cache:'no-store'})).json(),r=await fetch('/api/devices/bmcu-a/soft-reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csrf:c.csrf,confirm:'RESET BMCU',reason:0,ttl_ms:5000})}),x=await r.json();resetResult.textContent=r.ok?'Requested; waiting for BMCU reboot':(x.error||'Rejected')}catch(e){resetResult.textContent='Request failed: '+e}finally{setTimeout(()=>resetBmcu.disabled=false,6000)}}</script>""".encode()
 PAGE = PAGE.replace(b"</body>", RESET_PANEL + b"</body>", 1)
 
-def _json_safe(value):
-    if isinstance(value, bytes):
-        return value.hex()
-    if isinstance(value, dict):
-        result = None
-        for key, item in value.items():
-            safe_item = _json_safe(item)
-            if safe_item is not item:
-                if result is None:
-                    result = dict(value)
-                result[key] = safe_item
-        return value if result is None else result
-    if isinstance(value, list):
-        result = None
-        for index, item in enumerate(value):
-            safe_item = _json_safe(item)
-            if safe_item is not item:
-                if result is None:
-                    result = list(value)
-                result[index] = safe_item
-        return value if result is None else result
-    return value
+class _JsonChunks:
+    """Incremental JSON encoder with bounded contiguous allocations."""
 
+    def __init__(self, chunk_size=512):
+        self.chunk_size = chunk_size
+        self.buffer = bytearray()
+        self.parts = []
+        self.length = 0
+
+    def write(self, data):
+        if isinstance(data, str):
+            data = data.encode()
+        offset = 0
+        while offset < len(data):
+            available = self.chunk_size - len(self.buffer)
+            count = min(available, len(data) - offset)
+            self.buffer.extend(memoryview(data)[offset:offset + count])
+            self.length += count
+            offset += count
+            if len(self.buffer) == self.chunk_size:
+                self.parts.append(bytes(self.buffer))
+                self.buffer = bytearray()
+
+    def finish(self):
+        if self.buffer:
+            self.parts.append(bytes(self.buffer))
+            self.buffer = bytearray()
+        return self.parts, self.length
+
+
+def _write_json(writer, value):
+    if value is None:
+        writer.write(b"null")
+    elif value is True:
+        writer.write(b"true")
+    elif value is False:
+        writer.write(b"false")
+    elif isinstance(value, bytes):
+        writer.write(json.dumps(value.hex()))
+    elif isinstance(value, str):
+        writer.write(json.dumps(value))
+    elif isinstance(value, dict):
+        writer.write(b"{")
+        first = True
+        for key, item in value.items():
+            if not first:
+                writer.write(b",")
+            first = False
+            writer.write(json.dumps(str(key)))
+            writer.write(b":")
+            _write_json(writer, item)
+        writer.write(b"}")
+    elif isinstance(value, (list, tuple)):
+        writer.write(b"[")
+        for index, item in enumerate(value):
+            if index:
+                writer.write(b",")
+            _write_json(writer, item)
+        writer.write(b"]")
+    else:
+        writer.write(json.dumps(value))
 
 class _Response:
     """Two-part HTTP response that avoids copying large bodies."""
 
     def __init__(self, header, body):
-        self.parts = [header, body]
+        if isinstance(body, list):
+            body.insert(0, header)
+            self.parts = body
+        else:
+            self.parts = [header, body]
         self.offset = 0
 
     def current(self):
@@ -83,7 +125,7 @@ class _Response:
             return b""
         if self.offset == 0:
             return self.parts[0]
-        return memoryview(self.parts[0])[self.offset:]
+        return self.parts[0][self.offset:]
 
     def consume(self, count):
         self.offset += count
@@ -108,26 +150,54 @@ class WebUI:
         self.error_handler = error_handler
         self.port = port
         self.server = None
+        self.servers = []
         self.client = None
         self.request = bytearray()
         self.response = None
         self.close_at_ms = None
-
-    def start(self):
-        self.server = socket.socket()
-        try:
-            self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        except (AttributeError, OSError):
-            pass
-        self.server.bind(('0.0.0.0', self.port))
-        self.server.listen(1)
-        self.server.setblocking(False)
+        self.client_deadline_ms = None
 
     @staticmethod
-    def _http_response(status, content_type, body):
+    def _listener(family, address, port, ipv6_only=False):
+        server = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if ipv6_only:
+                # lwIP values; MicroPython does not export these constants.
+                server.setsockopt(41, 27, 1)  # IPPROTO_IPV6, IPV6_V6ONLY
+            server.bind((address, port))
+            server.listen(1)
+            server.setblocking(False)
+            return server
+        except Exception:
+            try:
+                server.close()
+            except Exception:
+                pass
+            raise
+
+    def start(self):
+        self.servers = []
+        try:
+            self.servers.append(self._listener(
+                socket.AF_INET6, '::', self.port, ipv6_only=True))
+        except (AttributeError, OSError):
+            pass
+        self.server = self._listener(
+            socket.AF_INET, '0.0.0.0', self.port)
+        self.servers.append(self.server)
+
+    @staticmethod
+    def _http_response(status, content_type, body, body_length=None):
+        if body_length is None:
+            body_length = (sum(len(part) for part in body)
+                           if isinstance(body, list) else len(body))
+        if isinstance(body, bytes) and len(body) > 512:
+            body = [body[offset:offset + 512]
+                    for offset in range(0, len(body), 512)]
         header = ('HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n'
                   'Cache-Control: no-store\r\nConnection: close\r\n\r\n' %
-                  (status, content_type, len(body)))
+                  (status, content_type, body_length))
         return _Response(header.encode(), body)
 
     def _request_ready(self):
@@ -151,8 +221,11 @@ class WebUI:
 
     def _json_response(self, status, value):
         gc.collect()
-        body = json.dumps(_json_safe(value)).encode()
-        return self._http_response(status, 'application/json', body)
+        writer = _JsonChunks()
+        _write_json(writer, value)
+        parts, length = writer.finish()
+        return self._http_response(
+            status, 'application/json', parts, body_length=length)
 
     def _finish_request(self):
         marker = self.request.find(b'\r\n\r\n')
@@ -222,6 +295,7 @@ class WebUI:
         self.request = bytearray()
         self.response = None
         self.close_at_ms = None
+        self.client_deadline_ms = None
 
     @staticmethod
     def _now_ms():
@@ -235,21 +309,47 @@ class WebUI:
             return time.ticks_diff(left, right)
         return left - right
 
+    @staticmethod
+    def _ticks_add(value, delta):
+        if hasattr(time, "ticks_add"):
+            return time.ticks_add(value, delta)
+        return value + delta
+
+    def _touch_client(self):
+        self.client_deadline_ms = self._ticks_add(self._now_ms(), 5000)
+
     def _finish_response(self):
         try:
             self.client.shutdown(getattr(socket, "SHUT_WR", 1))
         except (AttributeError, OSError):
             pass
         self.response = None
-        self.close_at_ms = self._now_ms() + 100
+        self.close_at_ms = self._ticks_add(self._now_ms(), 100)
 
     def poll(self):
+        if (self.client and self.client_deadline_ms is not None and
+                self._ticks_diff(self._now_ms(),
+                                 self.client_deadline_ms) >= 0):
+            self._close_client()
+            return
         if self.client and self.close_at_ms is not None:
             if self._ticks_diff(self._now_ms(), self.close_at_ms) >= 0:
                 self._close_client()
             return
         if self.client and self.response is not None:
             chunked = isinstance(self.response, _Response)
+            sendall = getattr(self.client, "sendall", None)
+            if chunked and sendall is not None:
+                try:
+                    self.client.settimeout(1)
+                    while not self.response.done():
+                        payload = self.response.current()
+                        sendall(payload)
+                        self.response.consume(len(payload))
+                    self._finish_response()
+                except OSError:
+                    self._close_client()
+                return
             payload = self.response.current() if chunked else self.response
             try:
                 sent = self.client.send(payload)
@@ -258,13 +358,19 @@ class WebUI:
                     return
                 self._close_client()
                 return
-            if sent > 0 and chunked:
+            if sent == 0:
+                self._close_client()
+            elif sent is None:
+                return
+            elif sent > 0 and chunked:
+                self._touch_client()
                 self.response.consume(sent)
                 if self.response.done():
                     self._finish_response()
             elif sent >= len(payload):
                 self._finish_response()
             elif sent > 0:
+                self._touch_client()
                 self.response = self.response[sent:]
             return
         if self.client:
@@ -278,6 +384,7 @@ class WebUI:
             if not data:
                 self._close_client()
                 return
+            self._touch_client()
             self.request.extend(data)
             if len(self.request) > 3072:
                 self.response = self._http_response('413 Payload Too Large', 'text/plain', b'Request too large\n')
@@ -287,12 +394,17 @@ class WebUI:
                 except Exception as error:
                     if self.error_handler is not None:
                         self.error_handler("request", error)
-                    self.response = self._json_response(
-                        '500 Internal Server Error',
-                        {"error": "internal Pico error"})
+                    self.response = self._http_response(
+                        '500 Internal Server Error', 'text/plain',
+                        b'internal Pico error\n')
             return
-        try:
-            self.client, _ = self.server.accept()
-            self.client.setblocking(False)
-        except OSError:
-            pass
+        for server in self.servers or (self.server,):
+            if server is None:
+                continue
+            try:
+                self.client, _ = server.accept()
+                self.client.setblocking(False)
+                self._touch_client()
+                return
+            except OSError:
+                pass

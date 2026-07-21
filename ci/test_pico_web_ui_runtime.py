@@ -6,7 +6,7 @@ import unittest
 PICO_DIR = pathlib.Path(__file__).parents[1] / "pico"
 sys.path.insert(0, str(PICO_DIR))
 
-from web_ui import WebUI, _Response
+from web_ui import WebUI, _JsonChunks, _Response, _write_json
 
 
 class RequestClient:
@@ -26,14 +26,83 @@ class RequestClient:
 
 
 class WebUIRuntimeTests(unittest.TestCase):
+    def test_json_is_encoded_in_bounded_chunks(self):
+        value = {"payload": "x" * 1500, "items": [True, None, 7]}
+        writer = _JsonChunks(chunk_size=128)
+        _write_json(writer, value)
+        parts, length = writer.finish()
+        encoded = b"".join(parts)
+        self.assertEqual(length, len(encoded))
+        self.assertTrue(all(len(part) <= 128 for part in parts))
+        self.assertEqual(__import__("json").loads(encoded), value)
+
     def test_partial_response_uses_memoryview_without_copying_tail(self):
         response = _Response(b"header", b"x" * 100)
         response.consume(len(b"header"))
         self.assertEqual(response.current(), b"x" * 100)
         response.consume(25)
         tail = response.current()
-        self.assertIsInstance(tail, memoryview)
+        self.assertIsInstance(tail, bytes)
         self.assertEqual(len(tail), 75)
+
+    def test_accept_checks_each_listener(self):
+        class EmptyServer:
+            def accept(self):
+                raise OSError("would block")
+
+        class ReadyServer:
+            def __init__(self, client):
+                self.client = client
+
+            def accept(self):
+                return self.client, ("peer", 1)
+
+        client = RequestClient(b"")
+        client.setblocking = lambda _value: None
+        web = WebUI(lambda _path: {"ok": True})
+        web.servers = [EmptyServer(), ReadyServer(client)]
+        web.poll()
+        self.assertIs(web.client, client)
+        self.assertIsNotNone(web.client_deadline_ms)
+
+    def test_sendall_flushes_all_response_chunks(self):
+        class SendAllClient(RequestClient):
+            def __init__(self):
+                super().__init__(b"")
+                self.sent = []
+                self.timeout = None
+
+            def settimeout(self, value):
+                self.timeout = value
+
+            def sendall(self, data):
+                self.sent.append(bytes(data))
+
+            def shutdown(self, _direction):
+                pass
+
+        web = WebUI(lambda _path: {"ok": True})
+        client = SendAllClient()
+        web.client = client
+        web.response = _Response(b"header", [b"a" * 512, b"tail"])
+        web.poll()
+        self.assertEqual(client.sent, [b"header", b"a" * 512, b"tail"])
+        self.assertEqual(client.timeout, 1)
+        self.assertIsNone(web.response)
+        self.assertIsNotNone(web.close_at_ms)
+
+    def test_zero_byte_send_closes_dead_client(self):
+        class ZeroSendClient(RequestClient):
+            def send(self, _data):
+                return 0
+
+        web = WebUI(lambda _path: {"ok": True})
+        client = ZeroSendClient(b"")
+        web.client = client
+        web.response = _Response(b"header", b"body")
+        web.poll()
+        self.assertTrue(client.closed)
+        self.assertIsNone(web.client)
 
     def test_provider_exception_returns_500_and_is_reported(self):
         reported = []

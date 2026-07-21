@@ -13,7 +13,7 @@ from bambuddy_config import BambuddyConfig
 from bambuddy_transport import BambuddyOutbox
 from bambuddy_ws import BambuddyWebSocketClient
 from bmcu_link import BMCUMonitor
-from runtime_log import PicoRuntimeLog, guarded_call
+from runtime_log import PicoRuntimeLog
 from wifi import WiFiStation
 from web_ui import WebUI
 
@@ -255,18 +255,34 @@ last_transport_log_ms = None
 last_transport_error = None
 
 
+def record_exception(component, error):
+    try:
+        runtime_log.exception(component, error)
+    except Exception:
+        pass
+
+
 def service_once(now_ms):
     global last_transport_state, last_transport_log_ms, last_transport_error
     # Keep BMCU UART service ahead of Wi-Fi, WebSocket, and HTTP work.
     for monitor in monitors:
-        guarded_call(runtime_log, "bmcu." + monitor.link_id + ".poll",
-                     lambda monitor=monitor: monitor.poll(now_ms))
-    guarded_call(runtime_log, "wifi.poll", lambda: wifi.poll(now_ms))
-    guarded_call(runtime_log, "bambuddy.reconcile", reconcile_bambuddy)
+        try:
+            monitor.poll(now_ms)
+        except Exception as error:
+            record_exception("bmcu." + monitor.link_id + ".poll", error)
+    try:
+        wifi.poll(now_ms)
+    except Exception as error:
+        record_exception("wifi.poll", error)
+    try:
+        reconcile_bambuddy()
+    except Exception as error:
+        record_exception("bambuddy.reconcile", error)
     if bambuddy_client is not None:
-        guarded_call(
-            runtime_log, "bambuddy.poll",
-            lambda: bambuddy_client.poll(now_ms, wifi.state == "online"))
+        try:
+            bambuddy_client.poll(now_ms, wifi.state == "online")
+        except Exception as error:
+            record_exception("bambuddy.poll", error)
         current_transport_state = bambuddy_client.state
         if current_transport_state != last_transport_state:
             current_error = bambuddy_client.last_error
@@ -282,13 +298,25 @@ def service_once(now_ms):
                 last_transport_log_ms = now_ms
                 last_transport_error = current_error
             last_transport_state = current_transport_state
-    guarded_call(runtime_log, "web.poll", web.poll, recover_web)
+    try:
+        web.poll()
+    except Exception as error:
+        record_exception("web.poll", error)
+        try:
+            recover_web()
+        except Exception as recovery_error:
+            record_exception("web.poll.recovery", recovery_error)
     for monitor in monitors:
-        guarded_call(runtime_log, "bmcu." + monitor.link_id + ".ping",
-                     lambda monitor=monitor: monitor.ping_if_idle(now_ms))
+        try:
+            monitor.ping_if_idle(now_ms)
+        except Exception as error:
+            record_exception("bmcu." + monitor.link_id + ".ping", error)
 
 
 while True:
     now = time.ticks_ms()
-    guarded_call(runtime_log, "main.loop", lambda: service_once(now))
+    try:
+        service_once(now)
+    except Exception as error:
+        record_exception("main.loop", error)
     time.sleep_ms(1)
