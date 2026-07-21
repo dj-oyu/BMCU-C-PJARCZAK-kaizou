@@ -326,7 +326,6 @@ class BambuddyWebSocketClient:
             raise ValueError("invalid WebSocket accept")
         remainder = bytes(self._handshake_in[marker + 4:])
         self.state = "online"
-        self._backoff_index = 0
         if remainder:
             self._handle_frames(remainder)
 
@@ -421,6 +420,9 @@ class BambuddyWebSocketClient:
             self._resend_not_before = ticks_add(self._inflight_at, 1000)
         else:
             self._resend_not_before = 0
+            # WebSocket/HELLO success alone does not prove telemetry health.
+            # Reset retry backoff only after a batch makes durable progress.
+            self._backoff_index = 0
         self._inflight = None
 
     def _handle_frames(self, data):
@@ -490,6 +492,7 @@ class BambuddyWebSocketClient:
             self._queue_json(batch)
 
     def poll(self, now_ms, wifi_online=True):
+        self.outbox.flush(now_ms)
         if not wifi_online:
             self._close()
             self.state = "wifi_wait"

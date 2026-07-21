@@ -178,6 +178,21 @@ class WebSocketTests(unittest.TestCase):
         self.assertIn(b"token=secret", request)
         self.assertNotIn(b"secret", str(client.status()).encode())
 
+    def test_handshake_does_not_reset_failure_backoff(self):
+        key = ws._b64(self.random(16))
+        response = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + ws.websocket_accept(key) + "\r\n\r\n"
+        ).encode()
+        fake = FakeSocket([response])
+        client = self.client(socket_factory=lambda _host, _port: fake)
+        client._backoff_index = 4
+        client.poll(0, True)
+        self.assertEqual(client.state, "online")
+        self.assertEqual(client._backoff_index, 4)
+
     def test_rejected_index_is_enriched_before_queue_ack(self):
         outbox = self.outbox()
         outbox.publish({"type": "status", "link_id": "a"}, 1, 1000)
@@ -205,6 +220,7 @@ class WebSocketTests(unittest.TestCase):
         }).encode())
         self.assertEqual(len(outbox.queue), 0)
         self.assertIsNone(client._inflight)
+        self.assertEqual(client._backoff_index, 0)
 
     def test_accepted_only_ack_marks_transport_hello_persisted(self):
         client = self.client()
