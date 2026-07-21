@@ -15,6 +15,8 @@ SCHEMA = "bmcu.management.v2"
 REGISTRY_VERSION = "alpha.3"
 DEFAULT_QUEUE_LIMIT = 128
 DEFAULT_QUEUE_AGE_MS = 30000
+DEFAULT_ACTIVE_STATUS_INTERVAL_MS = 3000
+DEFAULT_IDLE_STATUS_INTERVAL_MS = 15000
 
 
 def _ticks_diff(now, then):
@@ -228,15 +230,26 @@ class BambuddyOutbox:
     """Envelope builder plus loss-signalling FIFO used by network adapters."""
 
     def __init__(self, device_id, mode="production_monitor", boot_session=None,
-                 queue_limit=DEFAULT_QUEUE_LIMIT, queue_age_ms=DEFAULT_QUEUE_AGE_MS):
+                 queue_limit=DEFAULT_QUEUE_LIMIT, queue_age_ms=DEFAULT_QUEUE_AGE_MS,
+                 active_status_interval_ms=DEFAULT_ACTIVE_STATUS_INTERVAL_MS,
+                 idle_status_interval_ms=DEFAULT_IDLE_STATUS_INTERVAL_MS,
+                 status_interval_ms=None):
         self.builder = EnvelopeBuilder(device_id, mode, boot_session)
         self.queue = TelemetryQueue(queue_limit, queue_age_ms)
+        if status_interval_ms is not None:
+            active_status_interval_ms = status_interval_ms
+            idle_status_interval_ms = status_interval_ms
+        self.active_status_interval_ms = max(1, active_status_interval_ms)
+        self.idle_status_interval_ms = max(1, idle_status_interval_ms)
+        self._status_last_ms = {}
+        self._status_active = {}
+        self._pending_status = {}
 
     @property
     def pico_boot_session(self):
         return self.builder.pico_boot_session
 
-    def publish(self, message, now_ms, received_at_us):
+    def _enqueue(self, message, now_ms, received_at_us):
         envelope = self.builder.build(message, received_at_us, len(self.queue))
         dropped = self.queue.enqueue(envelope, now_ms)
         if dropped and envelope["frame"]["kind"] != "transport_drop":
@@ -258,6 +271,58 @@ class BambuddyOutbox:
             notice["received_at_us"] = received_at_us
             notice["data"]["dropped_count"] = self.queue.dropped_count
         return envelope
+
+    @staticmethod
+    def _is_active_status(message):
+        data = message.get("data") or {}
+        motion = data.get("motion") or ()
+        return any(isinstance(value, int) and value != 0 for value in motion)
+
+    def _status_interval(self, message):
+        return (self.active_status_interval_ms
+                if self._is_active_status(message)
+                else self.idle_status_interval_ms)
+
+    def publish(self, message, now_ms, received_at_us):
+        message_type = message.get("type")
+        link_id = message.get("link_id", "bridge")
+        if message_type != "status":
+            if (message_type == "link_state" and
+                    message.get("state") in ("stale", "offline", "incompatible")):
+                self._pending_status.pop(link_id, None)
+                self._status_active[link_id] = False
+            return self._enqueue(message, now_ms, received_at_us)
+
+        active = self._is_active_status(message)
+        previous_active = self._status_active.get(link_id)
+        self._status_active[link_id] = active
+        state_changed = previous_active is not None and previous_active != active
+        last_ms = self._status_last_ms.get(link_id)
+        interval_ms = (self.active_status_interval_ms
+                       if active else self.idle_status_interval_ms)
+        if (last_ms is None or state_changed or
+                _ticks_diff(now_ms, last_ms) >= interval_ms):
+            self._pending_status.pop(link_id, None)
+            self._status_last_ms[link_id] = now_ms
+            return self._enqueue(message, now_ms, received_at_us)
+
+        # STATUS is a replaceable snapshot. Retain only the newest sample while
+        # preserving immediate delivery for EVENT/HELLO/link-state records.
+        self._pending_status[link_id] = (message, received_at_us)
+        return None
+
+    def flush(self, now_ms):
+        flushed = []
+        for link_id in list(self._pending_status):
+            message, received_at_us = self._pending_status[link_id]
+            last_ms = self._status_last_ms.get(link_id)
+            if (last_ms is not None and
+                    _ticks_diff(now_ms, last_ms) < self._status_interval(message)):
+                continue
+            self._pending_status.pop(link_id)
+            self._status_last_ms[link_id] = now_ms
+            flushed.append(self._enqueue(message, now_ms, received_at_us))
+        return flushed
 
     def apply_ack(self, ack):
         return self.queue.apply_ack(ack.get("persisted"), ack.get("rejected"))

@@ -85,7 +85,7 @@ backpressure never blocks UART receive. When full, it removes the oldest
 non-critical STATUS before an ERROR or CRITICAL EVENT when possible and emits a
 `transport_drop` envelope with the cumulative loss count.
 
-STATUS is queued on semantic change and at most once per second as a heartbeat.
+STATUS is coalesced per link: at most once every 3 seconds while any AMS motion is active, once every 15 seconds while idle, and not periodically after the link becomes stale. Activity transitions are queued immediately.
 EVENT, HELLO, link-state, and loss records are queued immediately. The rate and
 deduplication rules are normative in the envelope contract.
 

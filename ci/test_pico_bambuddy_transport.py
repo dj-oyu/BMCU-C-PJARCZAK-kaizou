@@ -32,6 +32,78 @@ class BambuddyTransportTests(unittest.TestCase):
         self.assertEqual(a["link"]["transport_sequence"], 0)
         self.assertEqual(b["link"]["transport_sequence"], 0)
 
+    def test_status_is_coalesced_to_one_record_per_second_per_link(self):
+        outbox = transport.BambuddyOutbox(
+            "bridge", boot_session="boot", status_interval_ms=1000)
+        first = outbox.publish({
+            "type": "status", "link_id": "a", "sequence": 1,
+            "data": {"pressure": 1},
+        }, 0, 0)
+        suppressed = outbox.publish({
+            "type": "status", "link_id": "a", "sequence": 2,
+            "data": {"pressure": 2},
+        }, 100, 100000)
+        outbox.publish({
+            "type": "status", "link_id": "a", "sequence": 3,
+            "data": {"pressure": 3},
+        }, 900, 900000)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(suppressed)
+        self.assertEqual(len(outbox.queue), 1)
+        self.assertEqual(outbox.flush(999), [])
+        flushed = outbox.flush(1000)
+        self.assertEqual(len(flushed), 1)
+        self.assertEqual(len(outbox.queue), 2)
+        self.assertEqual(flushed[0]["data"]["data"]["pressure"], 3)
+
+    def test_adaptive_status_rate_and_activity_transitions(self):
+        outbox = transport.BambuddyOutbox("bridge", boot_session="boot")
+        idle = {"type": "status", "link_id": "a",
+                "data": {"motion": [0, 0, 0, 0]}}
+        active = {"type": "status", "link_id": "a",
+                  "data": {"motion": [0, 2, 0, 0]}}
+
+        self.assertIsNotNone(outbox.publish(idle, 0, 0))
+        self.assertIsNone(outbox.publish(idle, 100, 100000))
+        self.assertIsNotNone(outbox.publish(active, 200, 200000))
+        self.assertIsNone(outbox.publish(active, 1000, 1000000))
+        self.assertEqual(outbox.flush(3199), [])
+        self.assertEqual(len(outbox.flush(3200)), 1)
+        self.assertIsNotNone(outbox.publish(idle, 3300, 3300000))
+        self.assertIsNone(outbox.publish(idle, 4000, 4000000))
+        self.assertEqual(outbox.flush(18299), [])
+        self.assertEqual(len(outbox.flush(18300)), 1)
+
+    def test_stale_link_discards_pending_periodic_status(self):
+        outbox = transport.BambuddyOutbox("bridge", boot_session="boot")
+        idle = {"type": "status", "link_id": "a",
+                "data": {"motion": [0, 0, 0, 0]}}
+        outbox.publish(idle, 0, 0)
+        outbox.publish(idle, 100, 100000)
+        outbox.publish({"type": "link_state", "link_id": "a",
+                        "state": "stale"}, 200, 200000)
+        self.assertEqual(outbox.flush(20000), [])
+        self.assertEqual([item["frame"]["kind"]
+                          for item in outbox.queue.batch()],
+                         ["status", "link_state"])
+
+    def test_status_limits_are_independent_per_link_and_events_are_immediate(self):
+        outbox = transport.BambuddyOutbox(
+            "bridge", boot_session="boot", status_interval_ms=1000)
+        outbox.publish({"type": "status", "link_id": "a"}, 0, 0)
+        second_link = outbox.publish(
+            {"type": "status", "link_id": "b"}, 10, 10000)
+        event = outbox.publish(
+            {"type": "event", "link_id": "a"}, 20, 20000)
+        suppressed = outbox.publish(
+            {"type": "status", "link_id": "a"}, 30, 30000)
+
+        self.assertIsNotNone(second_link)
+        self.assertIsNotNone(event)
+        self.assertIsNone(suppressed)
+        self.assertEqual(len(outbox.queue), 3)
+
     def test_persisted_watermark_removes_only_matching_link_session(self):
         outbox = transport.BambuddyOutbox("bridge", boot_session="boot")
         outbox.publish({"type": "status", "link_id": "a", "sequence": 1}, 1, 1000)
@@ -85,7 +157,8 @@ class BambuddyTransportTests(unittest.TestCase):
 
     def test_age_bound_emits_transport_drop_notice(self):
         outbox = transport.BambuddyOutbox(
-            "bridge", boot_session="boot", queue_age_ms=10, queue_limit=4)
+            "bridge", boot_session="boot", queue_age_ms=10, queue_limit=4,
+            status_interval_ms=1)
         outbox.publish({"type": "status", "link_id": "a"}, 0, 0)
         outbox.publish({"type": "status", "link_id": "a"}, 20, 20000)
         kinds = [item["frame"]["kind"] for item in outbox.queue.batch()]

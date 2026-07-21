@@ -99,8 +99,10 @@ records, increments the cumulative drop count, and continues with later data.
 
 ## 3. Rate and backpressure
 
-STATUS is sent only for semantic state changes and at most once per second as a
-heartbeat. EVENT, HELLO, link-state, and `transport_drop` are sent immediately.
+STATUS is coalesced per link to at most one snapshot every 3 seconds during AMS
+motion and every 15 seconds while idle. Activity transitions are immediate, and a
+stale link produces no periodic STATUS. EVENT, HELLO, link-state, and
+`transport_drop` are sent immediately.
 Normal operation is limited to 2 envelopes/s/link; bursts may reach 20
 envelopes/s/link for at most 5 seconds. The queue is the backpressure boundary:
 on saturation, drop the oldest non-critical STATUS first, preserve ERROR and
