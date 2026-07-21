@@ -158,6 +158,45 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.printer_tx["tx_timeout"], 19)
         self.assertEqual(self.monitor.printer_tx["tx_no_response_expected"], 20)
 
+    def test_soft_reset_guard_requires_complete_idle_snapshot(self):
+        self.assertEqual(self.monitor.soft_reset_guard_error(),
+                         "complete fresh BMCU status is required")
+        self.monitor.link_state = "online"
+        self.monitor.snapshot = [{}]
+        self.assertEqual(self.monitor.soft_reset_guard_error(),
+                         "complete channel status is required")
+        idle = {"motor_pwm": 0, "controller_motion": 3, "ams_motion": 0}
+        self.monitor.channels = [dict(idle) for _ in range(4)]
+        self.assertIsNone(self.monitor.soft_reset_guard_error())
+        self.monitor.channels[2]["motor_pwm"] = 1
+        self.assertEqual(self.monitor.soft_reset_guard_error(),
+                         "BMCU motion is not idle")
+
+    def test_soft_reset_request_and_ack_are_tracked(self):
+        sequence = self.monitor.request_soft_reset(0x12345678, reason=2, ttl_ms=4000)
+        decoded = link.FrameDecoder().feed(self.uart.writes[-1])[0]
+        self.assertEqual(decoded["kind"], link.REQUEST_SOFT_RESET)
+        self.assertEqual(decoded["payload"], bytes.fromhex("785634120200a00f"))
+        self.monitor._handle_frame(
+            frame(link.ACK, sequence, bytes((link.REQUEST_SOFT_RESET, 0))), 200)
+        self.assertEqual(self.monitor.soft_reset["state"], "scheduled")
+        self.hello(sequence=20)
+        self.assertEqual(self.monitor.soft_reset["state"], "rebooted")
+        self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,
+                                         snapshot_payload(8, 0, 1)), 250)
+        self.assertEqual(self.monitor.soft_reset["state"], "completed")
+        self.assertEqual(self.monitor.soft_reset["bmcu_boot_session"], 1)
+
+    def test_reset_cancel_event_is_decoded_and_applied(self):
+        self.monitor.request_soft_reset(7)
+        data = (7).to_bytes(4, "little") + bytes((2, 0, 1, 0))
+        payload = (99).to_bytes(4, "little") + bytes((
+            link.RECORD_RESET_STATE, 3, 0, 8)) + data
+        self.monitor._handle_frame(frame(link.EVENT, 8, payload), 200)
+        self.assertEqual(self.monitor.events[-1]["event_name"], "reset_state")
+        self.assertEqual(self.monitor.soft_reset["state"], "cancelled")
+        self.assertEqual(self.monitor.soft_reset["cancel_reason"], 1)
+
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()
         self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,

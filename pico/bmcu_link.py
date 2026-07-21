@@ -22,6 +22,7 @@ GET_STATUS = 0x10
 SET_LED_MODE = 0x11
 PING = 0x12
 GET_FULL_STATUS = 0x17
+REQUEST_SOFT_RESET = 0x18
 PONG = 0x72
 FULL_STATUS_RECORD = 0x73
 ACK = 0x7f
@@ -33,6 +34,7 @@ FULL_RECORD_PRINTER_RX_DMA = 8
 FULL_RECORD_PRINTER_TX_CORE = 9
 FULL_RECORD_PRINTER_TX_FAULT = 10
 RECORD_PRINTER_LONG_TRANSACTION = 9
+RECORD_RESET_STATE = 10
 
 
 def crc16_ccitt_false(data):
@@ -143,6 +145,7 @@ class BMCUMonitor:
         self.printer_auth = None
         self.printer_rx = None
         self.printer_tx = None
+        self.soft_reset = None
         self._snapshot_parts = None
         self._snapshot_count = 0
         self._snapshot_id = None
@@ -183,6 +186,30 @@ class BMCUMonitor:
 
     def ping(self, token):
         return self._send(PING, struct.pack("<I", token & 0xffffffff))
+
+    def soft_reset_guard_error(self):
+        if self.link_state != "online" or self.snapshot is None:
+            return "complete fresh BMCU status is required"
+        if any(channel is None for channel in self.channels):
+            return "complete channel status is required"
+        if any(channel["motor_pwm"] != 0 or channel["controller_motion"] != 3 or
+               channel["ams_motion"] != 0 for channel in self.channels):
+            return "BMCU motion is not idle"
+        return None
+
+    def request_soft_reset(self, operation_id, reason=0, ttl_ms=5000):
+        if not 1 <= operation_id <= 0xffffffff:
+            raise ValueError("operation_id must be a non-zero u32")
+        if not 0 <= reason <= 2 or not 1 <= ttl_ms <= 5000:
+            raise ValueError("invalid soft reset request")
+        sequence = self._send(
+            REQUEST_SOFT_RESET,
+            struct.pack("<IBBH", operation_id, reason, 0, ttl_ms))
+        self.soft_reset = {
+            "operation_id": operation_id, "reason": reason, "ttl_ms": ttl_ms,
+            "sequence": sequence, "state": "requested", "ack_result": None,
+        }
+        return sequence
 
     def ping_if_idle(self, now_ms, interval_ms=2000):
         """Probe only when no valid frame has demonstrated liveness recently."""
@@ -289,6 +316,9 @@ class BMCUMonitor:
         message = {"type": "frame", "kind": kind, "sequence": frame["sequence"]}
         if kind == HELLO and len(payload) == 9:
             self.bmcu_boot_session += 1
+            if self.soft_reset is not None and self.soft_reset.get("state") == "scheduled":
+                self.soft_reset["state"] = "rebooted"
+                self.soft_reset["bmcu_boot_session"] = self.bmcu_boot_session
             self._last_unsolicited_sequence = frame["sequence"]
             self._last_hw_tick32 = None
             self._hw_tick_epoch = 0
@@ -333,6 +363,9 @@ class BMCUMonitor:
             message.update({"type": "ack", "request_kind": payload[0], "result": payload[1]})
             if payload[0] == GET_FULL_STATUS and payload[1] == 3:
                 self._schedule_snapshot_retry(now_ms)
+            if payload[0] == REQUEST_SOFT_RESET and self.soft_reset is not None:
+                self.soft_reset["ack_result"] = payload[1]
+                self.soft_reset["state"] = "scheduled" if payload[1] == 0 else "rejected"
         elif kind == FULL_STATUS_RECORD and len(payload) == 26:
             self._handle_snapshot(payload, message, now_ms)
         else:
@@ -362,6 +395,10 @@ class BMCUMonitor:
             event.update({"event_name": "sensor", "sensor": payload[0],
                           "slot": payload[1], "validity": payload[2],
                           "value_format": payload[3], "value": _i32(payload, 4)})
+        elif event["record_type"] == RECORD_RESET_STATE and event["payload_length"] >= 8:
+            event.update({"event_name": "reset_state",
+                          "operation_id": _u32(payload, 0), "reset_state": payload[4],
+                          "request_reason": payload[5], "cancel_reason": payload[6]})
         elif (event["record_type"] == RECORD_PRINTER_LONG_TRANSACTION and
               event["payload_length"] >= 8):
             event.update({"event_name": "printer_long_transaction",
@@ -379,6 +416,12 @@ class BMCUMonitor:
             self.events.pop(0)
         if event.get("event_name") == "sensor":
             self.sensors[event["sensor"]] = event
+            return
+        if event.get("event_name") == "reset_state" and self.soft_reset is not None:
+            if event["operation_id"] == self.soft_reset.get("operation_id"):
+                self.soft_reset["state"] = (
+                    "scheduled" if event["reset_state"] == 1 else "cancelled")
+                self.soft_reset["cancel_reason"] = event["cancel_reason"]
             return
         if event.get("event_name") != "state_change" or self.status is None:
             return
@@ -498,6 +541,8 @@ class BMCUMonitor:
             self._snapshot_retry_ms = None
             self._snapshot_retries = 0
             self.link_state = "online"
+            if self.soft_reset is not None and self.soft_reset.get("state") == "rebooted":
+                self.soft_reset["state"] = "completed"
             for part in self.snapshot:
                 channel = part.get("channel_data")
                 if channel is not None:

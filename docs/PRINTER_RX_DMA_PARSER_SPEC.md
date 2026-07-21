@@ -48,7 +48,7 @@ Known baseline limitations:
   are not separately counted;
 - printer transaction telemetry is produced after the handler and does not yet correlate
   RX, decision, response queued, DMA start, and USART TC with one transaction ID;
-- `quiet_for_us()` does not include all partial-RX/parser states;
+- the authoritative reset predicate is implemented, but its reset/abort paths still require target fault injection;
 - current automated tests do not execute the USART1 ingress or Bambu parser.
 
 ## 3. Non-negotiable invariants
@@ -361,7 +361,7 @@ firmware compiles.
 | AHub framing on shared ingress | real-use evidence only | **none automated** | retained AHub golden vectors and differential tests |
 | `bambubus_run()` dispatch | firmware build only | **none** | handler spy tests and response golden vectors |
 | heartbeat fast path | source inspection only | **none** | cadence, truncated, timeout, and recovery tests |
-| `quiet_for_us()` | source inspection only | **none** | boundary/partial/TX-pending/tick-wrap tests |
+| reset quiescent policy | pure host policy vectors + firmware build | request/safety decisions covered | target partial-RX/TX/DE/error/tick-wrap fault injection |
 | management alpha.3 codec | host/Pico corpus | covered | retain existing corpus |
 | Pico snapshot/event handling | `ci/test_pico_monitor.py` | covered | retain existing tests |
 | issue #3 auth trace decoder | host and Pico unit tests | covered | retain and add real ingress vectors |
@@ -457,6 +457,16 @@ A parser/DMA change must not merge unless:
 9. rollback firmware with `BMCU_PRINTER_RX_DMA=0` remains buildable.
 
 Default enable additionally requires all P0 hardware cases in the validation report.
+
+### 13.1 Current measured build exception (2026-07-21)
+
+The default DMA `fw` build uses 15,464 / 20,480 RAM bytes (75.5%) and
+55,108 / 61,440 flash bytes (89.7%). RAM is 104 bytes above the nominal 75%
+RXD-012 threshold; this is a recorded measured exception, not a claim that the
+budget gate passed. The RXNE rollback build uses 14,140 RAM bytes (69.0%) and
+54,056 flash bytes (88.0%). Both builds pass, and the default artifact remains
+the DMA build. Review of the 104-byte RAM exception and P0 hardware validation
+remain required before closing issue #3.
 
 ## 14. Open decisions
 

@@ -207,10 +207,25 @@ full snapshotから新しいbaselineを確立する。
    一定時間継続した時だけderived alarmにする。
 6. `stale`、sequence gap、incomplete snapshot、CRC error、drop増加はtelemetry品質低下として扱い、
    それだけでfilament faultとは判定しない。
-7. remote motor/slot operationは無効にする。現行HTTP APIはread-onlyで、writeは内部の
-   `set_led_mode()`だけが実装済みである。
+7. remote motor/slot operationは無効にする。soft resetはCSRFと明示確認を要求するPico-local
+   endpointだけを提供し、Bambuddy remote controlへは公開しない。
 
-## 6. 現行gap・互換性上の注意
+## 6. Pico-local soft reset
+
+`POST /api/devices/<link_id>/soft-reset` accepts JSON
+`csrf, confirm="RESET BMCU", reason, ttl_ms` and returns `202` only after
+the request is written to the management UART. Pico requires an online link,
+a complete Full Status, all channel records present, controller phase `stop`,
+AMS motion `idle`, and PWM zero. BMCU independently rechecks stricter local
+safety and may reject with ACK.
+
+`bmcu.soft_reset` exposes `requested|scheduled|rejected|cancelled|rebooted|completed`,
+the operation ID, ACK result, and cancellation reason. `completed` requires a
+new HELLO/boot session; callers must then wait for a complete replacement
+snapshot. The local page requires typing `RESET BMCU`. This endpoint is not a
+Bambuddy remote-control contract.
+
+## 7. 現行gap・互換性上の注意
 
 - `0x83`はalpha.3でありstable v1ではない。
 - `PRINTER_TRANSACTION (0x04)`と`SENSOR_RECORD (0x05)` kind/capabilityはABI予約済みだが、

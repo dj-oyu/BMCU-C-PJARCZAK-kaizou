@@ -157,10 +157,25 @@ kindごとに型・長さ・範囲を固定する。可変文字列、JSON、任
 | `0x10 GET_STATUS` | Pico→BMCU | 0 | 即時STATUS要求 |
 | `0x11 SET_LED_MODE` | Pico→BMCU | 3 | `mode:u8, timeout_s:u16` |
 | `0x12 PING` | Pico→BMCU | 4 | `token:u32` |
+| `0x17 GET_FULL_STATUS` | Pico→BMCU | 2 | `section_mask:u8, channel_mask:u8` |
+| `0x18 REQUEST_SOFT_RESET` | Pico→BMCU | 8 | `operation_id:u32, reason:u8, flags:u8, ttl_ms:u16` |
 | `0x72 PONG` | BMCU→Pico | 8 | `token:u32, hw_tick32:u32` |
 | `0x7F ACK` | BMCU→Pico | 2 | `request_kind:u8, result:u8` |
 
-### 7.2 STATUS v2（27 byte）
+### 7.2 Soft reset safety contract
+
+`REQUEST_SOFT_RESET` is implemented as an idle-only S2 recovery operation.
+Version 1 has no force flag and accepts only a local CSRF-confirmed Pico request.
+Bambuddy-originated control remains disabled until a separate authenticated
+control scope is available.
+
+BMCU is authoritative for motor/calibration/printer-bus quiescence and rechecks it
+after `ACK_OK`. Pico additionally requires an online link, a complete Full Status,
+all controller phases stopped, all AMS motions idle, and all PWM values zero.
+Reset completion requires a new HELLO/boot session and a new complete snapshot.
+Hardware validation must cover every refusal path and ACK-before-reset ordering.
+
+### 7.3 STATUS v2（27 byte）
 
 | offset | 型 | 名前 |
 | ---: | --- | --- |
@@ -175,7 +190,7 @@ kindごとに型・長さ・範囲を固定する。可変文字列、JSON、任
 
 v2のoffsetを固定し、詳細情報は新messageで追加する。`hw_tick32`の差分は`(new-old)&0xffffffff`で求め、`tick_hz`で秒へ換算する。壁時計と受信時刻はPico/Bambuddyが付与する。
 
-### 7.3 必須追加message
+### 7.4 必須追加message
 
 | kind案 | 名前 | 方向 | 固定payload |
 | --- | --- | --- | --- |
@@ -189,14 +204,14 @@ v2のoffsetを固定し、詳細情報は新messageで追加する。`hw_tick32`
 | `0x12` | `PING` | Pico→BMCU | `token:u32` |
 | `0x15` | `GET_DEVICE_INFO` | Pico→BMCU | none |
 | `0x16` | `GET_BUS_STATUS` | Pico→BMCU | none |
-| `0x17` | `GET_SENSOR_SNAPSHOT` | Pico→BMCU | `channel_mask:u8, detail:u8` |
+| `0x17` | `GET_FULL_STATUS` | Pico→BMCU | implemented above; this supersedes the earlier sensor-snapshot candidate |
 | `0x72` | `PONG` | BMCU→Pico | `token:u32, hw_tick32:u32` |
 | `0x7E` | `DEVICE_INFO` | BMCU→Pico | protocol range、capabilities、fw/hw/build id |
 
-`GET_SENSOR_SNAPSHOT`は同じ `sample_id` のGLOBAL 1件とCHANNEL最大4件を返す。
-全チャネルを1つの巨大payloadへ詰めず、固定長のチャネルレコードへ分割する。
+旧 `GET_SENSOR_SNAPSHOT` 案の要件は `GET_FULL_STATUS` のGLOBAL/CHANNEL固定長レコードへ統合済みである。
+全チャネルを1つの巨大payloadへ詰めず、同一snapshot IDの固定長レコードへ分割する。
 
-### 7.4 Binary log record
+### 7.5 Binary log record
 
 BMCUはログ文字列を生成しない。レコードは16 byte固定で、8 byteの共通headerと
 8 byteの`union` payloadからなる。
@@ -215,7 +230,7 @@ command owner、outcome、reason、ACK result、severity、source、sensor valid
 文字列名、JSON化、時刻整形、単位換算、メッセージ連結はPico/Bambuddy側のenum
 registryで行う。BMCU側のhot pathでは構造体への整数代入とキューへの固定長コピーだけを行う。
 
-### 7.5 Decision outcome/reason
+### 7.6 Decision outcome/reason
 
 outcomeは `ACCEPTED / APPLIED / REPLIED / IGNORED / REJECTED / FAILED`。
 reasonは少なくとも `OK / TARGET_MISMATCH / SLOT_RANGE / AMS_OFFLINE /

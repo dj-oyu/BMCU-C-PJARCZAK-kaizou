@@ -68,6 +68,7 @@ bambuddy_outbox = BambuddyOutbox(bridge_id)
 bambuddy_client = None
 bambuddy_revision = -1
 monotonic_us = MonotonicMicros()
+reset_operation_nonce = time.ticks_ms() & 0xffffffff
 runtime_log = PicoRuntimeLog(time.ticks_ms)
 runtime_log.info("boot", "Pico application started", {
     "reset_cause": machine.reset_cause(),
@@ -181,6 +182,7 @@ def web_state():
             "printer_auth": monitor.printer_auth,
             "printer_rx": monitor.printer_rx,
             "printer_tx": monitor.printer_tx,
+            "soft_reset": monitor.soft_reset,
             "events": monitor.events,
             "sensors": monitor.sensors,
             "decoder_crc_errors": monitor.decoder.crc_errors,
@@ -205,6 +207,7 @@ def device_state(monitor):
         "printer_auth": monitor.printer_auth,
         "printer_rx": monitor.printer_rx,
         "printer_tx": monitor.printer_tx,
+        "soft_reset": monitor.soft_reset,
         "sensors": monitor.sensors,
         "decoder_crc_errors": monitor.decoder.crc_errors,
         "decoder_frame_errors": monitor.decoder.frame_errors,
@@ -232,11 +235,41 @@ def api_state(path="/api/status"):
     return None
 
 
+def local_soft_reset(path, request):
+    global reset_operation_nonce
+    pieces = path.split("/")
+    if len(pieces) != 5 or pieces[:3] != ["", "api", "devices"]:
+        raise ValueError("invalid device path")
+    monitor = monitor_by_id.get(pieces[3])
+    if monitor is None:
+        raise ValueError("unknown BMCU link")
+    expected_csrf = bambuddy_settings.public()["csrf"]
+    if request.get("csrf") != expected_csrf:
+        raise ValueError("invalid CSRF token")
+    if request.get("confirm") != "RESET BMCU":
+        raise ValueError("explicit confirmation is required")
+    guard_error = monitor.soft_reset_guard_error()
+    if guard_error is not None:
+        raise ValueError(guard_error)
+
+    reason = int(request.get("reason", 0))
+    ttl_ms = int(request.get("ttl_ms", 5000))
+    reset_operation_nonce = (reset_operation_nonce + 1) & 0xffffffff
+    if reset_operation_nonce == 0:
+        reset_operation_nonce = 1
+    sequence = monitor.request_soft_reset(reset_operation_nonce, reason, ttl_ms)
+    return {
+        "link_id": monitor.link_id, "operation_id": reset_operation_nonce,
+        "sequence": sequence, "state": "requested",
+    }
+
+
 web = WebUI(
     api_state,
     getattr(config, "WEB_PORT", 80),
     config_provider=commissioning_state,
     config_updater=bambuddy_settings.update,
+    command_updater=local_soft_reset,
     error_handler=lambda component, error: runtime_log.exception(
         "web." + component, error),
 )

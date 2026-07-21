@@ -14,6 +14,7 @@
       "17": "set_led_mode",
       "18": "ping",
       "23": "get_full_status",
+      "24": "request_soft_reset",
       "114": "pong",
       "115": "full_status_record",
       "127": "ack"
@@ -25,7 +26,8 @@
       "8": "raw_hw_tick",
       "16": "printer_trace",
       "32": "sensor_record",
-      "64": "full_status"
+      "64": "full_status",
+      "128": "soft_reset"
     },
     "full_status_section": {
       "1": "global",
@@ -116,7 +118,18 @@
       "6": "command_result",
       "7": "safety_decision",
       "8": "diagnostic_counter",
-      "9": "printer_long_transaction"
+      "9": "printer_long_transaction",
+      "10": "reset_state"
+    },
+    "reset_state": {
+      "1": "scheduled",
+      "2": "cancelled"
+    },
+    "reset_cancel_reason": {
+      "0": "none",
+      "1": "safety_changed",
+      "2": "expired",
+      "3": "link_tx_fault"
     },
     "sensor_validity": {
       "0": "unknown",

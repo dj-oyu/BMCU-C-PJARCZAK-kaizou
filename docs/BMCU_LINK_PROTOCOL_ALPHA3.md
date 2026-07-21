@@ -73,6 +73,7 @@ renumbered or reused. New values may be appended.
 | `0x11` | `SET_LED_MODE` | Pico → BMCU | implemented |
 | `0x12` | `PING` | Pico → BMCU | implemented |
 | `0x17` | `GET_FULL_STATUS` | Pico → BMCU | implemented |
+| `0x18` | `REQUEST_SOFT_RESET` | Pico → BMCU | implemented; hardware validation pending |
 | `0x72` | `PONG` | BMCU → Pico | implemented |
 | `0x73` | `FULL_STATUS_RECORD` | BMCU → Pico | implemented |
 | `0x7F` | `ACK` | BMCU → Pico | implemented |
@@ -152,6 +153,35 @@ SET_LED_MODE request: mode:u8 | timeout_s:u16
 PING request:         token:u32
 PONG response:        token:u32 | hw_tick32:u32
 ```
+
+### 5.4 REQUEST_SOFT_RESET — 8 bytes
+
+```text
+operation_id:u32 | reason:u8 | flags:u8 | ttl_ms:u16
+```
+
+`operation_id` is non-zero and is accepted at most once per BMCU boot. `reason` is
+`0=manual`, `1=recovery_409d`, or `2=commissioning`. Alpha.3 accepts only
+`flags=0`; force reset is intentionally unsupported. `ttl_ms` is `1..5000`.
+
+The request returns `ACK_OK` only after all local safety predicates pass. This ACK
+means reset scheduled, not reset completed. `BAD_VALUE` rejects malformed fields,
+`BUSY` rejects an active snapshot/reset, `BAD_STATE` rejects motion, calibration,
+or a non-quiescent printer bus, and `DUPLICATE` rejects an accepted operation ID.
+
+After ACK is queued, BMCU rechecks safety while draining the H1 TX queue, waits for
+USART transmission-complete, commands all motor PWM values to zero, waits 20 ms,
+and calls `NVIC_SystemReset()`. Any safety change, TTL expiry, or H1 TX fault
+cancels the reset. Completion is observed only when Pico receives a new `HELLO`,
+increments `bmcu_boot_session`, and obtains a complete Full Status snapshot.
+
+The authoritative local predicate requires all controller phases and AMS motions
+idle, all four PWM commands zero, calibration inactive, no active snapshot, no
+pending/partial/unread printer RX, no queued or active printer TX, USART1 TC set,
+RS-485 DE in receive, no pending DMA/USART transport error, and at least five
+seconds since printer-bus activity or a printer motion command. Persistence writes
+are suppressed while reset is pending. Bambuddy remote control remains disabled
+until a separately authenticated control scope is implemented.
 
 ## 6. Full status synchronization
 
@@ -375,7 +405,7 @@ LogRecord (16 bytes):
 ```
 
 The payload union has specialized layouts for boot, printer link, printer transaction, printer long transaction,
-state change, sensor, command result, safety decision, and diagnostic counter records. Unused union bytes must be
+state change, sensor, command result, safety decision, diagnostic counter, and reset-state records. Unused union bytes must be
 zero. Record type, severity, source, command owner, outcome, reason, ACK result, and sensor validity are numeric
 enums defined in `src/bmcu_link_protocol.h`. Pico/Bambuddy owns their human-readable labels.
 Additive decision reasons `14=NO_RESPONSE` and `15=NO_RESPONSE_EXPECTED` distinguish response construction
@@ -386,6 +416,11 @@ correlation reaches TX completion.
 `PRINTER_LONG_TRANSACTION (9)` preserves the complete long-frame `type:u16` and then carries
 `owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, payload_hash:u8`.
 The existing `PRINTER_TRANSACTION (3)` layout is unchanged for alpha.3 compatibility.
+
+`RESET_STATE (10)` carries
+`operation_id:u32, state:u8, request_reason:u8, cancel_reason:u8, reserved:u8`.
+`state` is `1=SCHEDULED` or `2=CANCELLED`; cancellation reasons are
+`1=SAFETY_CHANGED`, `2=EXPIRED`, and `3=LINK_TX_FAULT`.
 
 `STATE_CHANGE` field `8` is the per-channel motion-fault latch. Its `slot` is the channel index and its
 value uses the motion-fault enum documented in the CHANNEL full-status record.

@@ -182,6 +182,28 @@ class WebUIConfigTests(unittest.TestCase):
         self.assertTrue(settings.enabled)
         self.assertNotIn(b"secret", web.response)
 
+    def test_local_soft_reset_route_requires_explicit_command_handler(self):
+        calls = []
+
+        def command(path, request):
+            calls.append((path, request))
+            return {"state": "requested", "operation_id": 7}
+
+        web = web_module.WebUI(
+            lambda _path: {"ok": True}, command_updater=command)
+        body = json.dumps({"csrf": "token", "confirm": "RESET BMCU"}).encode()
+        header = (
+            b"POST /api/devices/bmcu-a/soft-reset HTTP/1.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + ("Content-Length: %d\r\n\r\n" % len(body)).encode()
+        )
+        web.request = bytearray(header + body)
+        self.assertTrue(web._request_ready())
+        web._finish_request()
+        self.assertIn(b"202 Accepted", web.response)
+        self.assertEqual(calls[0][0], "/api/devices/bmcu-a/soft-reset")
+        self.assertEqual(calls[0][1]["confirm"], "RESET BMCU")
+
 
 if __name__ == "__main__":
     unittest.main()
