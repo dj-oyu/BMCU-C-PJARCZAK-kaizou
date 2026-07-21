@@ -26,6 +26,7 @@ struct MotionControlChannelTelemetry
 };
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);
+bool Motion_control_is_reset_safe(void);
 float Motion_control_get_filament_meters(uint8_t channel);
 void MC_PULL_detect_channels_inserted();
 

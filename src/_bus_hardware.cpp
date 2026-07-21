@@ -307,6 +307,18 @@ bool bus_uart1_rx_transport_quiet()
 #endif
 }
 
+bool bus_uart1_reset_transport_quiescent()
+{
+    if (!bus_uart1_rx_transport_quiet()) return false;
+    if ((DMA1_Channel4->CFGR & DMA_CFGR1_EN) != 0u) return false;
+    if ((DMA1->INTFR & (DMA1_FLAG_TE4 | DMA1_FLAG_TE5)) != 0u) return false;
+    if ((USART1->STATR & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE)) != 0u)
+        return false;
+    if ((USART1->STATR & USART_STATR_TC) == 0u) return false;
+    if ((GPIOA->OUTDR & GPIO_Pin_12) != 0u) return false;
+    return true;
+}
+
 void bus_uart1_rx_poll()
 {
 #if BMCU_PRINTER_RX_DMA

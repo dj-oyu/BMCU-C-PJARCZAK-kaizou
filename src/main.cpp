@@ -295,6 +295,6 @@ int main(void)
         bmcu_link_set_control_error(error);
         bmcu_link_service();
         RGB_update();
-        persistence_save_run();
+        if (!bmcu_link_reset_pending()) persistence_save_run();
     }
 }

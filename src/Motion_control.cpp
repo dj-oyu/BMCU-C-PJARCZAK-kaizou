@@ -3117,6 +3117,19 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     return true;
 }
 
+bool Motion_control_is_reset_safe(void)
+{
+    const _ams& state = ams[BAMBU_BUS_AMS_NUM];
+    for (uint8_t channel = 0u; channel < kChCount; ++channel)
+    {
+        if (g_motor_pwm[channel] != 0 ||
+            MOTOR_CONTROL[channel].motion != filament_motion_enum::filament_motion_stop ||
+            state.filament[channel].motion != _filament_motion::idle)
+            return false;
+    }
+    return true;
+}
+
 // ===== PWM init =====
 void MC_PWM_init()
 {

@@ -16,7 +16,7 @@ enum Kind : uint8_t
     KIND_HELLO = 0x01u, KIND_STATUS = 0x02u, KIND_EVENT = 0x03u,
     KIND_PRINTER_TRANSACTION = 0x04u, KIND_SENSOR_RECORD = 0x05u,
     KIND_GET_STATUS = 0x10u, KIND_SET_LED_MODE = 0x11u, KIND_PING = 0x12u,
-    KIND_GET_FULL_STATUS = 0x17u,
+    KIND_GET_FULL_STATUS = 0x17u, KIND_REQUEST_SOFT_RESET = 0x18u,
     KIND_PONG = 0x72u, KIND_FULL_STATUS_RECORD = 0x73u, KIND_ACK = 0x7Fu,
 };
 
@@ -25,7 +25,7 @@ enum Capability : uint16_t
     CAP_STATUS_EVENTS = 1u << 0, CAP_LED_OVERRIDE = 1u << 1,
     CAP_PING_PONG = 1u << 2, CAP_RAW_HW_TICK = 1u << 3,
     CAP_PRINTER_TRACE = 1u << 4, CAP_SENSOR_RECORD = 1u << 5,
-    CAP_FULL_STATUS = 1u << 6,
+    CAP_FULL_STATUS = 1u << 6, CAP_SOFT_RESET = 1u << 7,
 };
 
 enum FullStatusSection : uint8_t
@@ -90,7 +90,18 @@ enum RecordType : uint8_t
     RECORD_BOOT = 1u, RECORD_PRINTER_LINK = 2u, RECORD_PRINTER_TRANSACTION = 3u,
     RECORD_STATE_CHANGE = 4u, RECORD_SENSOR = 5u, RECORD_COMMAND_RESULT = 6u,
     RECORD_SAFETY_DECISION = 7u, RECORD_DIAGNOSTIC_COUNTER = 8u,
-    RECORD_PRINTER_LONG_TRANSACTION = 9u,
+    RECORD_PRINTER_LONG_TRANSACTION = 9u, RECORD_RESET_STATE = 10u,
+};
+
+enum ResetState : uint8_t
+{
+    RESET_SCHEDULED = 1u, RESET_CANCELLED = 2u,
+};
+
+enum ResetCancelReason : uint8_t
+{
+    RESET_CANCEL_NONE = 0u, RESET_CANCEL_SAFETY_CHANGED = 1u,
+    RESET_CANCEL_EXPIRED = 2u, RESET_CANCEL_LINK_TX_FAULT = 3u,
 };
 
 enum SensorValidity : uint8_t
@@ -158,6 +169,15 @@ struct LogPrinterLongTransactionPayload
     uint8_t payload_hash;
 };
 
+struct LogResetStatePayload
+{
+    uint32_t operation_id;
+    uint8_t state;
+    uint8_t request_reason;
+    uint8_t cancel_reason;
+    uint8_t reserved;
+};
+
 struct LogStateChangePayload
 {
     uint8_t field;
@@ -206,6 +226,7 @@ union LogRecordPayload
     LogPrinterLinkPayload printer_link;
     LogPrinterTransactionPayload printer_transaction;
     LogPrinterLongTransactionPayload printer_long_transaction;
+    LogResetStatePayload reset_state;
     LogStateChangePayload state_change;
     LogSensorPayload sensor;
     LogCommandResultPayload command_result;
@@ -224,6 +245,8 @@ static_assert(sizeof(LogRecordHeader) == 8u, "LogRecordHeader ABI changed");
 static_assert(sizeof(LogRecordPayload) == 8u, "LogRecordPayload ABI changed");
 static_assert(sizeof(LogPrinterLongTransactionPayload) == 8u,
               "LogPrinterLongTransactionPayload ABI changed");
+static_assert(sizeof(LogResetStatePayload) == 8u,
+              "LogResetStatePayload ABI changed");
 static_assert(sizeof(LogRecord) == 16u, "LogRecord ABI changed");
 }
 

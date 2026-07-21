@@ -46,6 +46,7 @@ struct bus_tx_metrics
 };
 
 bool bus_uart1_rx_transport_quiet();
+bool bus_uart1_reset_transport_quiescent();
 void bus_uart1_rx_poll();
 void bus_uart1_rx_release_frame();
 void bus_uart1_tx_poll();
@@ -115,9 +116,7 @@ public:
     {
         if (!idle || send_data_len != 0 || recv_data_len != 0) return false;
         if (_index != 0 || drop_bytes != 0) return false;
-#if BMCU_PRINTER_RX_DMA
-        if (!bus_uart1_rx_transport_quiet()) return false;
-#endif
+        if (!bus_uart1_reset_transport_quiescent()) return false;
         return static_cast<uint32_t>(time_ticks32() - last_activity_tick) >=
                microseconds * time_hw_tpus;
     }

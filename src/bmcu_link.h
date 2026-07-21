@@ -31,5 +31,6 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
                                         uint8_t payload_hash);
 void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault);
 uint32_t bmcu_link_tx_drop_count(void);
+bool bmcu_link_reset_pending(void);
 
 #endif

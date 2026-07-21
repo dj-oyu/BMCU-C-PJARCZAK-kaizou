@@ -1,6 +1,8 @@
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "bmcu_soft_reset_policy.h"
 #include "_bus_hardware.h"
+#include "bambu_bus_ams.h"
 
 #include "Motion_control.h"
 #include "ams.h"
@@ -10,6 +12,7 @@
 #include "ch32v20x_misc.h"
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_usart.h"
+#include "core_riscv.h"
 #include "hal/time_hw.h"
 #include "hal/irq_wch.h"
 
@@ -152,6 +155,17 @@ uint32_t g_tx_started_tick = 0u;
 uint32_t g_diag_until_tick = 0u;
 uint32_t g_rx_diag_until_tick = 0u;
 
+enum SoftResetPhase : uint8_t { kResetIdle = 0u, kResetDrain = 1u, kResetSettle = 2u };
+uint8_t g_reset_phase = kResetIdle;
+uint32_t g_reset_operation_id = 0u;
+uint32_t g_last_reset_operation_id = 0u;
+uint32_t g_reset_deadline_tick = 0u;
+uint32_t g_reset_settle_tick = 0u;
+uint32_t g_last_printer_motion_tick = 0u;
+uint8_t g_reset_request_reason = 0u;
+uint8_t g_have_last_reset_operation = 0u;
+uint8_t g_have_printer_motion_tick = 0u;
+
 
 uint16_t crc16(const uint8_t* data, uint8_t length)
 {
@@ -276,6 +290,14 @@ void put16(uint8_t* output, uint16_t value)
     output[1] = static_cast<uint8_t>(value >> 8);
 }
 
+uint32_t get32(const uint8_t* input)
+{
+    return static_cast<uint32_t>(input[0]) |
+           (static_cast<uint32_t>(input[1]) << 8) |
+           (static_cast<uint32_t>(input[2]) << 16) |
+           (static_cast<uint32_t>(input[3]) << 24);
+}
+
 void put32(uint8_t* output, uint32_t value)
 {
     output[0] = static_cast<uint8_t>(value);
@@ -290,7 +312,8 @@ void send_hello()
     if (payload == nullptr) return;
     payload[0] = VERSION;
     put16(&payload[1], CAP_STATUS_EVENTS | CAP_LED_OVERRIDE | CAP_PING_PONG |
-                          CAP_RAW_HW_TICK | CAP_PRINTER_TRACE | CAP_FULL_STATUS);
+                          CAP_RAW_HW_TICK | CAP_PRINTER_TRACE | CAP_FULL_STATUS |
+                          CAP_SOFT_RESET);
     payload[3] = 1u;
     payload[4] = 1u;
     put32(&payload[5], time_hw_tpus * 1000000u);
@@ -608,13 +631,88 @@ bool send_next_event()
     return true;
 }
 
-void send_ack(uint16_t sequence, uint8_t request_kind, AckResult result)
+bool printer_reset_quiescent(uint32_t now)
+{
+    const uint32_t quiet_ticks = time_hw_tpms * 5000u;
+    if (!Motion_control_is_reset_safe()) return false;
+    if (!bus_port_to_host.quiet_for_us(5000000u)) return false;
+    if (g_have_printer_motion_tick != 0u && quiet_ticks != 0u &&
+        static_cast<uint32_t>(now - g_last_printer_motion_tick) < quiet_ticks)
+        return false;
+    return true;
+}
+
+void push_reset_state_event(uint8_t state, uint8_t cancel_reason)
+{
+    LogRecord record = {};
+    record.header.hw_tick32 = time_ticks32();
+    record.header.type = RECORD_RESET_STATE;
+    record.header.severity = state == RESET_CANCELLED ? SEVERITY_WARNING : SEVERITY_NOTICE;
+    record.header.source = SOURCE_SYSTEM;
+    record.header.payload_length = sizeof(LogResetStatePayload);
+    record.payload.reset_state.operation_id = g_reset_operation_id;
+    record.payload.reset_state.state = state;
+    record.payload.reset_state.request_reason = g_reset_request_reason;
+    record.payload.reset_state.cancel_reason = cancel_reason;
+    push_log_record(record);
+}
+
+void cancel_soft_reset(uint8_t reason)
+{
+    if (g_reset_phase == kResetIdle) return;
+    g_reset_phase = kResetIdle;
+    push_reset_state_event(RESET_CANCELLED, reason);
+}
+
+void service_soft_reset(uint32_t now)
+{
+    if (g_reset_phase == kResetIdle) return;
+    if (g_tx_fault != 0u)
+    {
+        cancel_soft_reset(RESET_CANCEL_LINK_TX_FAULT);
+        return;
+    }
+    if (time_diff32(now, g_reset_deadline_tick) >= 0)
+    {
+        cancel_soft_reset(RESET_CANCEL_EXPIRED);
+        return;
+    }
+    if (g_calibration_busy || g_full_active || !printer_reset_quiescent(now))
+    {
+        cancel_soft_reset(RESET_CANCEL_SAFETY_CHANGED);
+        return;
+    }
+
+    if (g_reset_phase == kResetDrain)
+    {
+        if (g_event_read != g_event_write)
+        {
+            (void)send_next_event();
+            return;
+        }
+        if (g_tx_active || g_tx_read != g_tx_write ||
+            (USART3->STATR & USART_STATR_TC) == 0u)
+            return;
+
+        for (uint8_t channel = 0u; channel < 4u; ++channel)
+            Motion_control_set_PWM(channel, 0);
+        g_reset_settle_tick = now + time_hw_tpms * 20u;
+        g_reset_phase = kResetSettle;
+        return;
+    }
+
+    if (time_diff32(now, g_reset_settle_tick) >= 0)
+        NVIC_SystemReset();
+}
+
+bool send_ack(uint16_t sequence, uint8_t request_kind, AckResult result)
 {
     uint8_t* payload = reserve_payload(KIND_ACK, sequence, 2u);
-    if (payload == nullptr) return;
+    if (payload == nullptr) return false;
     payload[0] = request_kind;
     payload[1] = static_cast<uint8_t>(result);
     commit_payload(2u);
+    return true;
 }
 
 void send_pong(uint16_t sequence, const uint8_t token[4])
@@ -714,6 +812,49 @@ void handle_frame(const uint8_t* raw, uint8_t length)
             }
             bmcu_link_status_changed(BMCU_STATUS_CHANGE_LED);
             send_ack(sequence, kind, ACK_OK);
+        }
+        break;
+
+    case KIND_REQUEST_SOFT_RESET:
+        if (payload_length != 8u)
+        {
+            send_ack(sequence, kind, ACK_BAD_VALUE);
+            break;
+        }
+        {
+            bmcu_soft_reset::Request request = {};
+            request.operation_id = get32(&payload[0]);
+            request.reason = payload[4];
+            request.flags = payload[5];
+            request.ttl_ms = static_cast<uint16_t>(payload[6]) |
+                             (static_cast<uint16_t>(payload[7]) << 8);
+
+            const bmcu_soft_reset::SafetyState safety = {
+                g_reset_phase != kResetIdle,
+                g_calibration_busy,
+                g_full_active != 0u,
+                Motion_control_is_reset_safe(),
+                printer_reset_quiescent(time_ticks32()),
+            };
+            const bool duplicate = g_have_last_reset_operation != 0u &&
+                                   request.operation_id == g_last_reset_operation_id;
+            const AckResult result =
+                bmcu_soft_reset::evaluate_request(request, safety, duplicate);
+            if (result != ACK_OK)
+            {
+                send_ack(sequence, kind, result);
+                break;
+            }
+            if (!send_ack(sequence, kind, ACK_OK)) break;
+
+            const uint32_t now = time_ticks32();
+            g_reset_operation_id = request.operation_id;
+            g_last_reset_operation_id = request.operation_id;
+            g_have_last_reset_operation = 1u;
+            g_reset_request_reason = request.reason;
+            g_reset_deadline_tick = now + static_cast<uint32_t>(request.ttl_ms) * time_hw_tpms;
+            g_reset_phase = kResetDrain;
+            push_reset_state_event(RESET_SCHEDULED, RESET_CANCEL_NONE);
         }
         break;
 
@@ -866,6 +1007,16 @@ void bmcu_link_service(void)
     const uint32_t now = time_ticks32();
     tx_fail_if_needed(now);
 
+    if (g_reset_phase != kResetIdle)
+    {
+        service_soft_reset(now);
+        if (g_reset_phase != kResetIdle)
+        {
+            tx_start_if_idle();
+            return;
+        }
+    }
+
     const uint32_t one_second = time_hw_tpms * 1000u;
     if (one_second != 0u && static_cast<uint32_t>(now - g_last_led_tick) >= one_second)
     {
@@ -881,7 +1032,15 @@ void bmcu_link_service(void)
     if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
     if (!emitted) emitted = send_next_event();
 
-    if (!emitted && g_status_dirty != 0u)
+    // A full snapshot is a bounded baseline transaction. STATUS can become
+    // dirty on every control-loop pass, so allowing it to use each newly freed
+    // TX slot can otherwise starve the snapshot forever. Keep EVENT priority,
+    // but finish one snapshot record whenever the reserved TX capacity permits;
+    // dirty STATUS reasons remain accumulated and are emitted afterwards.
+    if (!emitted && g_full_active)
+        emitted = send_next_full_status_record();
+
+    if (!emitted && !g_full_active && g_status_dirty != 0u)
     {
         const uint32_t pending = take_status_changes();
         if (pending != 0u)
@@ -899,7 +1058,6 @@ void bmcu_link_service(void)
         }
     }
 
-    if (!emitted) (void)send_next_full_status_record();
     tx_start_if_idle();
 }
 
@@ -977,6 +1135,12 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
                                    uint16_t response_length)
 {
     const uint32_t tick = time_ticks32();
+    if (rx_class == static_cast<uint8_t>(bambubus_package_type::filament_motion_short) ||
+        rx_class == static_cast<uint8_t>(bambubus_package_type::filament_motion_long))
+    {
+        g_last_printer_motion_tick = tick;
+        g_have_printer_motion_tick = 1u;
+    }
     g_printer_bus.last_rx_class = rx_class;
     g_printer_bus.last_command = command;
     g_printer_bus.last_outcome = outcome;
@@ -1072,4 +1236,9 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
 uint32_t bmcu_link_tx_drop_count(void)
 {
     return g_tx_drop + g_event_drop;
+}
+
+bool bmcu_link_reset_pending(void)
+{
+    return g_reset_phase != kResetIdle;
 }
