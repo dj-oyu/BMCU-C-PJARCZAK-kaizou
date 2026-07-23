@@ -174,8 +174,9 @@ class BambuddyWebSocketClient:
 
     def __init__(self, outbox, url, token, firmware="unknown", capabilities=None,
                  batch_limit=16, ack_timeout_ms=10000, socket_factory=None,
-                 random_bytes=None, clock_us=None):
+                 random_bytes=None, clock_us=None, control=None):
         self.outbox = outbox
+        self.control = control
         self.endpoint = parse_ws_url(url)
         self.token = token
         self.firmware = firmware
@@ -331,7 +332,7 @@ class BambuddyWebSocketClient:
 
     def _hello(self):
         if self._hello_envelope is None:
-            self._hello_envelope = self.outbox.builder.build({
+            payload = {
                 "type": "hello",
                 "link_id": "transport",
                 "firmware": self.firmware,
@@ -339,7 +340,15 @@ class BambuddyWebSocketClient:
                 "links": self.outbox.builder.link_sessions(),
                 "scope": "bmcu_link:telemetry",
                 "drop_count": self.outbox.queue.dropped_count,
-            }, self.clock_us(), len(self.outbox.queue))
+            }
+            if self.control is not None:
+                # The replay window is scoped to this HELLO announcement: an
+                # unpersisted HELLO is resent verbatim, so the nonce rotates
+                # only when a fresh HELLO envelope is built.
+                payload["control_session_nonce"] = self.control.new_session()
+                payload["control_enabled"] = self.control.enabled
+            self._hello_envelope = self.outbox.builder.build(
+                payload, self.clock_us(), len(self.outbox.queue))
         return self._hello_envelope
 
     def _queue_json(self, value):
@@ -393,6 +402,10 @@ class BambuddyWebSocketClient:
             if self.token:
                 detail = detail.replace(self.token, "***")
             self.last_error = "Bambuddy: " + detail[:160]
+            return
+        if message.get("type") == "control":
+            if self.control is not None:
+                self.control.handle(message)
             return
         if message.get("type") != "ack":
             return
@@ -477,6 +490,9 @@ class BambuddyWebSocketClient:
         if not self._hello_acked:
             if ticks_diff(now_ms, self._hello_at) >= self.ack_timeout_ms:
                 raise OSError("Bambuddy HELLO ACK timeout")
+            return
+        if self.control is not None and self.control.results:
+            self._queue_json(self.control.results.pop(0))
             return
         if self._inflight is not None:
             if ticks_diff(now_ms, self._inflight_at) >= self.ack_timeout_ms:

@@ -33,6 +33,27 @@ SETTINGS_PAGE = SETTINGS_PAGE.replace(
 SETTINGS_PAGE = SETTINGS_PAGE.replace(
     b"status.textContent='Saved'};load()",
     b"status.textContent='Saved';setTimeout(load,300)};load()", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"<button>Save</button>",
+    b"<h1>CONTROL (remote soft reset)</h1>"
+    b"<p>Independent from the telemetry token; default off. The BMCU stays "
+    b"the final safety authority.</p>"
+    b"<label><input id='cen' type='checkbox'> Enable authenticated CONTROL"
+    b"</label><label>Control key (64 hex; leave blank to keep current)"
+    b"<input id='ckey' type='password' autocomplete='new-password'></label>"
+    b"<label><input id='cclr' type='checkbox'> Clear control key (also "
+    b"disables CONTROL)</label><button>Save</button>", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"enabled.checked=x.enabled;url.value=x.url;",
+    b"enabled.checked=x.enabled;url.value=x.url;"
+    b"cen.checked=!!x.control_enabled;cclr.checked=false;", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"token:token.value}",
+    b"token:token.value,control_enabled:cen.checked,"
+    b"control_key:ckey.value,clear_control_key:cclr.checked}", 1)
+SETTINGS_PAGE = SETTINGS_PAGE.replace(
+    b"csrf=x.csrf;token.value='';",
+    b"csrf=x.csrf;token.value='';ckey.value='';", 1)
 
 class _JsonChunks:
     """Incremental JSON encoder with bounded contiguous allocations."""

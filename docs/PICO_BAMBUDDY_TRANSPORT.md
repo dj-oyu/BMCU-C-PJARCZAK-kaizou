@@ -121,3 +121,28 @@ therefore WebSocket remains the preferred transport.
   quarantined and counted as a transport drop; and
 - CONTROL: excluded from Phase 5. Future presentation, reset, and motion
   commands require their separately scoped and authenticated contract.
+
+## 8. Authenticated CONTROL path (soft reset only)
+
+Implemented per MAC input byte contract v1 (issue #2/#6) in
+`pico/bmcu_control.py`; `ci/test_pico_control.py` pins the byte layout with
+known-answer vectors shared with Bambuddy.
+
+- Authorization is a device-scoped 32-byte `control_key` (64 hex via the
+  commissioning UI), fully independent from the telemetry token. CONTROL is
+  default-disabled; enabling requires a stored key, and clearing the key also
+  disables CONTROL. The key is never echoed by any API or page.
+- Messages and results are HMAC-SHA256 over fixed-order, length-prefixed
+  fields with separated contexts (`BMCU-CTRL-v1` / `BMCU-CTRL-RES-v1`).
+- Replay protection: a per-WS-session `control_session_nonce` announced in the
+  transport HELLO (rotates with each freshly built HELLO envelope), a strictly
+  increasing `control_sequence`, and a bounded `operation_id` window. Message
+  TTL is bounded to 1..60000 ms; the soft-reset payload TTL to 1..5000 ms.
+- Fail-closed: structural or MAC failures are never answered (a counter and
+  diagnostic string record them); post-authentication failures return a signed
+  `rejected` result with a reason. The only enabled command is `soft_reset`,
+  converted to `REQUEST_SOFT_RESET` only after the local idle guard passes —
+  and the BMCU still re-checks its own safety predicates before resetting.
+- Lifecycle results (`scheduled`, `rebooted`, `cancelled`, `completed`) are
+  signed with the originating session's nonce and drain one frame at a time
+  between telemetry batches.
