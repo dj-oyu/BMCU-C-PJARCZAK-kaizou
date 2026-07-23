@@ -197,6 +197,44 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.soft_reset["state"], "cancelled")
         self.assertEqual(self.monitor.soft_reset["cancel_reason"], 1)
 
+    def test_solicited_status_reply_does_not_trigger_resync(self):
+        self.hello()
+        get_status_wire = next(wire for wire in self.uart.writes
+                                if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
+        request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
+        before = len(self.uart.writes)
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
+        self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
+        self.assertIsNotNone(self.monitor.status)
+        self.assertEqual(self.monitor._last_unsolicited_sequence, 10)
+        self.assertEqual(len(self.uart.writes), before)
+
+    def test_solicited_sequence_is_consumed_after_one_reply(self):
+        self.hello()
+        get_status_wire = next(wire for wire in self.uart.writes
+                                if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
+        request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
+        self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
+        self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 210)
+        self.assertTrue(any(item.get("type") == "resync" for item in self.messages))
+
+    def test_resync_loop_is_broken_end_to_end(self):
+        self.hello()
+        get_status_wire = next(wire for wire in self.uart.writes
+                                if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
+        request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
+        self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
+        # The solicited reply must not have advanced _last_unsolicited_sequence, so the
+        # next unsolicited STATUS/EVENT keeps following the hello sequence (10), not the
+        # solicited reply's sequence -- this is what breaks the endless resync loop.
+        self.monitor._handle_frame(frame(link.STATUS, 11, payload), 250)
+        self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
+
     def test_incomplete_snapshot_times_out_and_retries(self):
         self.hello()
         self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,
@@ -206,6 +244,82 @@ class PicoMonitorTests(unittest.TestCase):
         self.monitor._service_snapshot_timeout(1900)
         self.assertEqual(len(self.uart.writes), before + 1)
         self.assertTrue(any(item.get("reason") == "timeout" for item in self.messages))
+
+    def _full_status_write_count(self):
+        count = 0
+        for wire in self.uart.writes:
+            if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_FULL_STATUS:
+                count += 1
+        return count
+
+    def test_ack_busy_backs_off_and_eventually_exhausts_with_growing_delay(self):
+        self.hello()
+        self.assertEqual(self._full_status_write_count(), 1)
+
+        # 1st BUSY ack -> retries=1, backoff 250<<1=500ms.
+        self.monitor._handle_frame(
+            frame(link.ACK, 900, bytes((link.GET_FULL_STATUS, 3))), 150)
+        self.assertEqual(self.monitor._snapshot_retries, 1)
+        retry_at_1 = self.monitor._snapshot_retry_ms
+        self.assertEqual(retry_at_1, 150 + 500)
+        self.monitor._service_snapshot_timeout(retry_at_1)
+        self.assertEqual(self._full_status_write_count(), 2)
+
+        # 2nd BUSY ack -> retries=2, backoff 250<<2=1000ms (strictly larger than before).
+        self.monitor._handle_frame(
+            frame(link.ACK, 901, bytes((link.GET_FULL_STATUS, 3))), 750)
+        self.assertEqual(self.monitor._snapshot_retries, 2)
+        retry_at_2 = self.monitor._snapshot_retry_ms
+        self.assertEqual(retry_at_2, 750 + 1000)
+        self.monitor._service_snapshot_timeout(retry_at_2)
+        self.assertEqual(self._full_status_write_count(), 3)
+
+        # 3rd BUSY ack -> retries=3, still within SNAPSHOT_MAX_RETRIES, one more request.
+        self.monitor._handle_frame(
+            frame(link.ACK, 902, bytes((link.GET_FULL_STATUS, 3))), 1850)
+        self.assertEqual(self.monitor._snapshot_retries, 3)
+        retry_at_3 = self.monitor._snapshot_retry_ms
+        self.assertEqual(retry_at_3, 1850 + 2000)
+        self.monitor._service_snapshot_timeout(retry_at_3)
+        self.assertEqual(self._full_status_write_count(), 4)
+
+        # 4th BUSY ack -> retries=4, exceeds SNAPSHOT_MAX_RETRIES once its retry fires.
+        self.monitor._handle_frame(
+            frame(link.ACK, 903, bytes((link.GET_FULL_STATUS, 3))), 3950)
+        self.assertEqual(self.monitor._snapshot_retries, 4)
+        retry_at_4 = self.monitor._snapshot_retry_ms
+        self.assertEqual(retry_at_4, 3950 + 4000)
+        writes_before_exhaustion = self._full_status_write_count()
+        self.monitor._service_snapshot_timeout(retry_at_4)
+        self.assertEqual(self._full_status_write_count(), writes_before_exhaustion)
+        self.assertEqual(self.monitor.link_state, "stale")
+        self.assertTrue(any(item.get("reason") == "retry_exhausted" for item in self.messages))
+        # The hot loop is broken: retries are reset so a later baseline request can
+        # start a fresh, slow-paced round instead of being permanently exhausted.
+        self.assertEqual(self.monitor._snapshot_retries, 0)
+
+        # Recovery: once the BMCU stops being busy, the next baseline-triggering
+        # frame (an unsolicited STATUS advancing the sequence) requests a fresh
+        # snapshot instead of staying stuck forever.
+        writes_before_recovery = self._full_status_write_count()
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, 11, payload), retry_at_4 + 50)
+        self.assertEqual(self._full_status_write_count(), writes_before_recovery + 1)
+
+    def test_stale_outstanding_get_status_expires_and_is_treated_as_unsolicited(self):
+        self.hello()
+        self.assertEqual(len(self.monitor._outstanding_get_status), 1)
+        stale_sequence, sent_at = self.monitor._outstanding_get_status[0]
+
+        past_expiry = sent_at + link.BMCUMonitor.OUTSTANDING_GET_STATUS_TTL_MS + 1
+        payload = (25).to_bytes(4, "little") + bytes(23)
+        self.monitor._handle_frame(frame(link.STATUS, stale_sequence, payload), past_expiry)
+
+        # Expired: the stale solicited sequence must not swallow this frame -- it is
+        # classified as unsolicited (and, since it doesn't follow the hello sequence,
+        # triggers the gap/resync path) and updates _last_unsolicited_sequence.
+        self.assertTrue(any(item.get("type") == "resync" for item in self.messages))
+        self.assertEqual(self.monitor._last_unsolicited_sequence, stale_sequence)
 
 
 if __name__ == "__main__":

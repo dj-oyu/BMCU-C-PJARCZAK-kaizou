@@ -129,6 +129,9 @@ uint32_t g_full_tick = 0u;
 uint8_t g_full_record_count = 0u;
 uint8_t g_full_record_next = 0u;
 uint8_t g_full_active = 0u;
+uint8_t g_full_prefer_record = 0u;
+uint32_t g_full_record_drop = 0u;
+FullStatusRecord g_full_record_dummy = {};
 
 StatusCache g_status_cache = {};
 PrinterBusCache g_printer_bus = {};
@@ -151,6 +154,8 @@ enum LinkDiag : uint8_t
 };
 uint8_t g_link_diag = kDiagOff;
 uint8_t g_tx_fault = 0u;
+uint32_t g_tx_fault_cooldown_tick = 0u;
+uint32_t g_tx_fault_count = 0u;
 uint32_t g_tx_started_tick = 0u;
 uint32_t g_diag_until_tick = 0u;
 uint32_t g_rx_diag_until_tick = 0u;
@@ -225,6 +230,10 @@ __attribute__((noinline, cold)) void tx_abort_cold()
     g_tx_fault = 1u;
     g_tx_read = g_tx_write;
     ++g_tx_drop;
+    ++g_tx_fault_count;
+    // Recoverable fault: re-arm after a cooldown instead of latching forever.
+    // Every abort restarts the cooldown, so repeated faults cannot busy-loop.
+    g_tx_fault_cooldown_tick = time_ticks32() + time_hw_tpms * 150u;
     g_link_diag = kDiagTxTimeout;
 }
 
@@ -237,6 +246,25 @@ void tx_fail_if_needed(uint32_t now)
     const bool transfer_error = (DMA1->INTFR & DMA1_FLAG_TE2) != 0u;
     if (!timed_out && !transfer_error) return;
     tx_abort_cold();
+}
+
+// Main-loop driven, same context as tx_fail_if_needed/tx_finish_if_complete.
+// Once the abort cooldown expires, fully re-arm the TX path so the BMCU can
+// transmit again after a transient DMA timeout/transfer error.
+void tx_recover_if_ready(uint32_t now)
+{
+    if (!g_tx_fault) return;
+    if (time_diff32(now, g_tx_fault_cooldown_tick) < 0) return;
+
+    // Clear pending DMA channel-2 flags and make sure the channel is disabled.
+    DMA1_Channel2->CFGR &= ~static_cast<uint32_t>(DMA_CFGR2_EN);
+    DMA1->INTFCR = DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2;
+    // Clear the USART transmit-complete flag so the next frame starts clean.
+    USART3->STATR = static_cast<uint16_t>(~USART_STATR_TC);
+    g_tx_active = 0u;
+    g_tx_fault = 0u;
+    // Queue was drained on abort; resume from the (now empty) ring.
+    tx_start_if_idle();
 }
 
 bool tx_has_capacity(uint8_t reserved_slots)
@@ -443,6 +471,14 @@ void build_status_payload(uint8_t payload[27])
 
 FullStatusRecord& append_full_record(uint8_t type)
 {
+    if (g_full_record_count >= kMaxFullStatusRecords)
+    {
+        // Never write past the array; hand back a throwaway slot that is not
+        // counted and therefore never transmitted.
+        ++g_full_record_drop;
+        g_full_record_dummy.type = type;
+        return g_full_record_dummy;
+    }
     FullStatusRecord& record = g_full_records[g_full_record_count++];
     record.type = type;
     return record;
@@ -1006,6 +1042,7 @@ void bmcu_link_service(void)
 
     const uint32_t now = time_ticks32();
     tx_fail_if_needed(now);
+    tx_recover_if_ready(now);
 
     if (g_reset_phase != kResetIdle)
     {
@@ -1030,15 +1067,36 @@ void bmcu_link_service(void)
     }
 
     if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
-    if (!emitted) emitted = send_next_event();
 
     // A full snapshot is a bounded baseline transaction. STATUS can become
     // dirty on every control-loop pass, so allowing it to use each newly freed
     // TX slot can otherwise starve the snapshot forever. Keep EVENT priority,
     // but finish one snapshot record whenever the reserved TX capacity permits;
     // dirty STATUS reasons remain accumulated and are emitted afterwards.
+    //
+    // Only one frame goes out per cycle, so a sustained event storm would
+    // otherwise never let the snapshot advance -- pinning g_full_active and
+    // forcing GET_FULL_STATUS to answer ACK_BUSY forever. While a snapshot is
+    // draining, alternate event/snapshot each cycle so the snapshot always
+    // makes forward progress; when no snapshot is active, EVENT keeps priority.
     if (!emitted && g_full_active)
-        emitted = send_next_full_status_record();
+    {
+        if (g_full_prefer_record)
+        {
+            emitted = send_next_full_status_record();
+            if (!emitted) emitted = send_next_event();
+        }
+        else
+        {
+            emitted = send_next_event();
+            if (!emitted) emitted = send_next_full_status_record();
+        }
+        g_full_prefer_record ^= 1u;
+    }
+    else if (!emitted)
+    {
+        emitted = send_next_event();
+    }
 
     if (!emitted && !g_full_active && g_status_dirty != 0u)
     {

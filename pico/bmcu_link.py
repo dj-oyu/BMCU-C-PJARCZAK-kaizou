@@ -128,6 +128,7 @@ class BMCUMonitor:
     """Protocol state machine; ``on_message`` receives typed dictionaries."""
     SNAPSHOT_TIMEOUT_MS = 1200
     SNAPSHOT_MAX_RETRIES = 3
+    OUTSTANDING_GET_STATUS_TTL_MS = 3000
 
 
     def __init__(self, uart, on_message=None, link_id="bmcu-a"):
@@ -156,6 +157,7 @@ class BMCUMonitor:
         self._snapshot_retry_ms = None
         self._snapshot_retries = 0
         self._last_unsolicited_sequence = None
+        self._outstanding_get_status = []
         self._last_hw_tick32 = None
         self._hw_tick_epoch = 0
         self.bmcu_boot_session = 0
@@ -176,12 +178,27 @@ class BMCUMonitor:
     def _ticks_diff(now, then):
         return time.ticks_diff(now, then) if hasattr(time, "ticks_diff") else now - then
 
+    @staticmethod
+    def _ticks_add(base, delta):
+        return time.ticks_add(base, delta) if hasattr(time, "ticks_add") else base + delta
+
     def get_status(self):
-        return self._send(GET_STATUS)
+        sequence = self._send(GET_STATUS)
+        self._prune_outstanding_get_status(self._clock_ms)
+        self._outstanding_get_status.append((sequence, self._clock_ms))
+        if len(self._outstanding_get_status) > 4:
+            self._outstanding_get_status.pop(0)
+        return sequence
+
+    def _prune_outstanding_get_status(self, now_ms):
+        self._outstanding_get_status = [
+            entry for entry in self._outstanding_get_status
+            if self._ticks_diff(now_ms, entry[1]) < self.OUTSTANDING_GET_STATUS_TTL_MS
+        ]
 
     def get_full_status(self):
         sequence = self._send(GET_FULL_STATUS, b"\x0f\x0f")
-        self._snapshot_deadline_ms = self._clock_ms + self.SNAPSHOT_TIMEOUT_MS
+        self._snapshot_deadline_ms = self._ticks_add(self._clock_ms, self.SNAPSHOT_TIMEOUT_MS)
         return sequence
 
     def ping(self, token):
@@ -255,8 +272,8 @@ class BMCUMonitor:
 
     def _schedule_snapshot_retry(self, now_ms):
         self._snapshot_deadline_ms = None
-        delay_ms = 250 << min(self._snapshot_retries, 2)
-        self._snapshot_retry_ms = now_ms + delay_ms
+        delay_ms = 250 << min(self._snapshot_retries, 4)
+        self._snapshot_retry_ms = self._ticks_add(now_ms, delay_ms)
 
     def _service_snapshot_timeout(self, now_ms):
         if self._snapshot_deadline_ms is not None:
@@ -272,6 +289,7 @@ class BMCUMonitor:
                 self.get_full_status()
             else:
                 self.link_state = "stale"
+                self._snapshot_retries = 0
                 self._emit({"type": "snapshot_error", "reason": "retry_exhausted"})
 
     def _extend_hw_tick(self, tick32, message):
@@ -320,6 +338,7 @@ class BMCUMonitor:
                 self.soft_reset["state"] = "rebooted"
                 self.soft_reset["bmcu_boot_session"] = self.bmcu_boot_session
             self._last_unsolicited_sequence = frame["sequence"]
+            self._outstanding_get_status = []
             self._last_hw_tick32 = None
             self._hw_tick_epoch = 0
             self.status = None
@@ -338,7 +357,15 @@ class BMCUMonitor:
             self._emit(message)
             self._request_missing_baseline()
             return
-        if kind in (STATUS, EVENT):
+        solicited = False
+        if kind == STATUS:
+            self._prune_outstanding_get_status(now_ms)
+            for entry in self._outstanding_get_status:
+                if entry[0] == frame["sequence"]:
+                    self._outstanding_get_status.remove(entry)
+                    solicited = True
+                    break
+        if kind in (STATUS, EVENT) and not solicited:
             previous = self._last_unsolicited_sequence
             expected = None if previous is None else (previous + 1) & 0xffff
             self._last_unsolicited_sequence = frame["sequence"]
@@ -362,6 +389,7 @@ class BMCUMonitor:
         elif kind == ACK and len(payload) == 2:
             message.update({"type": "ack", "request_kind": payload[0], "result": payload[1]})
             if payload[0] == GET_FULL_STATUS and payload[1] == 3:
+                self._snapshot_retries += 1
                 self._schedule_snapshot_retry(now_ms)
             if payload[0] == REQUEST_SOFT_RESET and self.soft_reset is not None:
                 self.soft_reset["ack_result"] = payload[1]
@@ -527,7 +555,7 @@ class BMCUMonitor:
         if self._snapshot_parts is None:
             self._snapshot_parts, self._snapshot_count = {}, count
             self._snapshot_id = snapshot_id
-            self._snapshot_deadline_ms = now_ms + self.SNAPSHOT_TIMEOUT_MS
+            self._snapshot_deadline_ms = self._ticks_add(now_ms, self.SNAPSHOT_TIMEOUT_MS)
         self._snapshot_parts[index] = message.copy()
         if len(self._snapshot_parts) == count:
             self.snapshot = [self._snapshot_parts[i] for i in range(count)]

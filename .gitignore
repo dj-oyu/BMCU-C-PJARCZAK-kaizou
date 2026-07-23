@@ -8,4 +8,5 @@ firmware-build/
 firmwares/
 dist/
 pico/secrets.py
+pico/SECRETS_LOCAL.md
 pico/bambuddy.json

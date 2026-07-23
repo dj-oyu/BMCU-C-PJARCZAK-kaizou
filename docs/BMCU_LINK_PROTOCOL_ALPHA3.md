@@ -447,6 +447,18 @@ Pico state handling:
 - Apply later STATUS/EVENT records incrementally.
 - Use PING/PONG for liveness, not periodic full snapshots.
 - On a sequence gap or incomplete snapshot: mark state uncertain and request a new full snapshot.
+- **Solicited replies must not feed the unsolicited gap detector.** A STATUS
+  answering `GET_STATUS` echoes the request sequence (§5.2), which is unrelated
+  to the BMCU-local unsolicited counter. The client must track the sequences of
+  its outstanding `GET_STATUS` requests (bounded, with an expiry of a few
+  seconds) and classify a matching STATUS as solicited: consume the entry, skip
+  the gap check, and leave the unsolicited tracker untouched. Feeding solicited
+  replies into the gap detector causes a self-sustaining resync loop — each
+  invalidation issues a new `GET_STATUS` whose echoed reply trips the detector
+  again, and the snapshot in flight is discarded every cycle.
+- `ACK_BUSY` on `GET_FULL_STATUS` must count toward a bounded retry budget with
+  growing backoff, exactly like a snapshot timeout. Rescheduling on BUSY without
+  counting turns a long calibration into an unbounded fast polling loop.
 
 ## 9. Compatibility and resource limits
 
@@ -458,3 +470,9 @@ Pico state handling:
 - BMCU must reject commands with unexpected payload lengths.
 - Full-status rate limiting is a host policy; once on connect and on explicit diagnosis is expected. It must not
   be used as the normal polling mechanism.
+- A BMCU-side TX fault (DMA timeout/transfer error) is transient, not terminal: the BMCU drops the queued
+  frames, waits a short cooldown (~150 ms), re-arms the TX path, and resumes. Hosts should expect a brief
+  unsolicited-sequence gap after such a fault, not a permanently silent link.
+- While a full snapshot is draining, the BMCU alternates EVENT and FULL_STATUS_RECORD frames so a sustained
+  event burst cannot starve the snapshot (which would otherwise pin the busy state and make every
+  `GET_FULL_STATUS` return `ACK_BUSY`).

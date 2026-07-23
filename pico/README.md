@@ -3,6 +3,11 @@
 This directory is independent of the BMCU firmware.  It contains a
 MicroPython implementation of the Pico side of BMCU Link protocol alpha.3.
 
+End-user setup and operation guide (Japanese):
+[`docs/PICO_USER_GUIDE.md`](../docs/PICO_USER_GUIDE.md). Bambuddy-side
+multi-link integration notes for developers:
+[`docs/BAMBUDDY_MULTI_LINK_NOTES.md`](../docs/BAMBUDDY_MULTI_LINK_NOTES.md).
+
 It uses the production management connection only:
 
 ```text
@@ -120,6 +125,25 @@ and main modules plus the explicitly supplied `secrets.py`; it never touches
 BMCU firmware sources. The same application files and default GP0/GP1 plus
 GP4/GP5 UART mapping work on both Pico W generations.
 
+## Deploy without USB (WebREPL or BOOTSEL direct-flash)
+
+Some boards develop a USB fault where the BOOTSEL ROM enumerates fine but
+MicroPython never appears as a COM port (any firmware version; Wi-Fi and UART
+keep working). Two alternatives cover that case:
+
+- **WebREPL (OTA):** if the deployed image enabled WebREPL (a `boot.py` that
+  calls `webrepl.start()` plus `webrepl_cfg.py`), files can be pushed over
+  Wi-Fi with `webrepl_cli.py -p <password> <file> <host>:/<file>`. Credentials
+  live in the untracked local notes file (`pico/SECRETS_LOCAL.md`).
+- **BOOTSEL direct-flash:** build a littlefs2 image of the application files
+  on the workstation with `littlefs-python` (block_size 4096, prog_size 256,
+  disk_version 2.0, block_count = drive size / 4096) and write it straight to
+  the embedded drive region while in BOOTSEL. Find the region with
+  `picotool info -a <micropython.uf2>` ("embedded drive"; `0x10180000` for
+  RPI_PICO2_W v1.28.0), then in one BOOTSEL session:
+  `picotool load <micropython.uf2>`, `picotool load -t bin fs.bin -o <addr>`,
+  `picotool reboot`. The board comes up on Wi-Fi with the app installed.
+
 ## Browser status page
 
 Once Wi-Fi is connected, open `http://<MDNS_HOSTNAME>.local/` (or `http://<Pico-IP>/`) from the same LAN. The page
@@ -128,11 +152,18 @@ status snapshots, decoded channel telemetry, printer RX/TX counters (including D
 The channel view keeps printer-facing AMS motion separate from the BMCU controller phase and also shows
 cached motor PWM, encoder delta, sensor validity, and motion faults.
 
-Telemetry HTTP endpoints are deliberately read-only. The only write endpoint is
-the CSRF-protected Bambuddy commissioning configuration at
-`POST /api/bambuddy/config`. Link-scoped telemetry endpoints are:
+The page shows every configured link as its own stacked dashboard section
+(status cards, slot grid, diagnostics, events, and a per-link soft-reset
+button); values from different BMCUs are never combined.
 
-- `GET /api/devices`
+Telemetry HTTP endpoints are deliberately read-only. The write endpoints are
+the CSRF-protected Bambuddy commissioning configuration at
+`POST /api/bambuddy/config` and the guarded, CSRF-protected
+`POST /api/devices/<link-id>/soft-reset`. Telemetry endpoints are:
+
+- `GET /api/devices` — the aggregate the local page polls: bridge ID, Wi-Fi,
+  Bambuddy transport state, Pico runtime summary, and the full state plus
+  recent events of every link
 - `GET /api/devices/<link-id>/status`
 - `GET /api/devices/<link-id>/events`
 - `GET /api/pico/logs`
@@ -144,7 +175,8 @@ poll does not terminate the whole application. The latest exception traceback
 is also saved as `pico_crash.json` on the Pico and loaded after the next boot;
 repeated identical failures are rate-limited to protect flash endurance.
 
-`GET /api/status` remains a local-page compatibility aggregate. The API exposes no
+The legacy single-BMCU `GET /api/status` aggregate has been removed; use
+`GET /api/devices`. The API exposes no
 motor, slot, or filament operations, and no LED control endpoint until an
 authenticated Bambuddy/UI contract is defined.
 
