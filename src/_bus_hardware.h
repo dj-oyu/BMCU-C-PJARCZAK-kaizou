@@ -1,6 +1,55 @@
 #pragma once
 #include "crc_bus.h"
 #include <string.h>
+#include "hal/time_hw.h"
+
+#ifndef BMCU_PRINTER_RX_DMA
+#define BMCU_PRINTER_RX_DMA 1
+#endif
+
+struct bus_rx_metrics
+{
+    volatile uint32_t rx_bytes;
+    volatile uint32_t rx_frames_valid;
+    volatile uint32_t rx_bad_length;
+    volatile uint32_t rx_header_crc_error;
+    volatile uint32_t rx_resync_bytes;
+    volatile uint32_t rx_publish_drop;
+    volatile uint32_t rx_dma_error;
+    volatile uint32_t rx_usart_overrun;
+    volatile uint32_t rx_dma_overrun;
+    volatile uint32_t rx_dma_wrap;
+    volatile uint32_t rx_dma_max_pending;
+    volatile uint32_t rx_compat_copy;
+};
+
+enum class bus_tx_fault : uint8_t
+{
+    response_busy,
+    response_missing,
+    no_response_expected,
+    invalid_length,
+    dma_error,
+    timeout,
+};
+
+struct bus_tx_metrics
+{
+    volatile uint32_t tx_started;
+    volatile uint32_t tx_completed;
+    volatile uint32_t tx_response_busy;
+    volatile uint32_t tx_response_missing;
+    volatile uint32_t tx_no_response_expected;
+    volatile uint32_t tx_invalid_length;
+    volatile uint32_t tx_dma_error;
+    volatile uint32_t tx_timeout;
+};
+
+bool bus_uart1_rx_transport_quiet();
+bool bus_uart1_reset_transport_quiescent();
+void bus_uart1_rx_poll();
+void bus_uart1_rx_release_frame();
+void bus_uart1_tx_poll();
 
 enum class _bus_data_type : uint8_t
 {
@@ -18,7 +67,11 @@ public:
 
 private:
     uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));
+#if BMCU_PRINTER_RX_DMA
+    uint8_t recv_data_buf[1][1280] __attribute__((aligned(4)));
+#else
     uint8_t recv_data_buf[2][1280] __attribute__((aligned(4)));
+#endif
     uint8_t tx_build_sel = 0;
     int _index = 0;
     int length = 999;
@@ -30,11 +83,62 @@ private:
     void (*port_send_datas)(uint8_t *data, uint16_t len);
 
 public:
+    bus_rx_metrics rx_metrics = {};
+    bus_tx_metrics tx_metrics = {};
     uint8_t * volatile bus_recv_data_ptr = recv_data_buf[0];
     volatile int recv_data_len = 0;
     volatile int send_data_len = 0;
     volatile _bus_data_type bus_package_type = _bus_data_type::none;
     volatile bool idle = true;
+    volatile uint32_t last_activity_tick = 0u;
+
+    inline __attribute__((always_inline)) void note_activity()
+    {
+        last_activity_tick = time_ticks32();
+    }
+
+    inline __attribute__((always_inline)) void report_tx_fault(bus_tx_fault fault)
+    {
+        volatile uint32_t *counter = nullptr;
+        switch (fault)
+        {
+        case bus_tx_fault::response_busy: counter = &tx_metrics.tx_response_busy; break;
+        case bus_tx_fault::response_missing: counter = &tx_metrics.tx_response_missing; break;
+        case bus_tx_fault::no_response_expected: counter = &tx_metrics.tx_no_response_expected; break;
+        case bus_tx_fault::invalid_length: counter = &tx_metrics.tx_invalid_length; break;
+        case bus_tx_fault::dma_error: counter = &tx_metrics.tx_dma_error; break;
+        case bus_tx_fault::timeout: counter = &tx_metrics.tx_timeout; break;
+        }
+        if (counter != nullptr && *counter != 0xFFFFFFFFu) ++*counter;
+    }
+
+    inline __attribute__((always_inline)) bool quiet_for_us(uint32_t microseconds) const
+    {
+        if (!idle || send_data_len != 0 || recv_data_len != 0) return false;
+        if (_index != 0 || drop_bytes != 0) return false;
+        if (!bus_uart1_reset_transport_quiescent()) return false;
+        return static_cast<uint32_t>(time_ticks32() - last_activity_tick) >=
+               microseconds * time_hw_tpus;
+    }
+
+private:
+    uint32_t send_not_before_tick = 0u;
+    bool send_deferred = false;
+
+    inline __attribute__((always_inline)) bool send_is_ready()
+    {
+        if (!send_deferred) return true;
+        if (time_diff32(time_ticks32(), send_not_before_tick) < 0) return false;
+        send_deferred = false;
+        return true;
+    }
+
+public:
+    inline __attribute__((always_inline)) void defer_send_us(uint32_t microseconds)
+    {
+        send_not_before_tick = time_ticks32() + microseconds * time_hw_tpus;
+        send_deferred = true;
+    }
 
     inline __attribute__((always_inline)) uint8_t* tx_build_buf()
     {
@@ -50,16 +154,54 @@ public:
         irq_package_type = _bus_data_type::none;
         bus_irq_data_ptr = recv_data_buf[0];
         drop_bytes = 0;
+#if BMCU_PRINTER_RX_DMA
+        bus_recv_data_ptr = recv_data_buf[0];
+#else
         bus_recv_data_ptr = recv_data_buf[1];
+#endif
         idle = true;
+        last_activity_tick = time_ticks32();
+        send_deferred = false;
         send_data_len = 0;
         recv_data_len = 0;
         tx_build_sel  = 0;
+        memset((void *)&rx_metrics, 0, sizeof(rx_metrics));
+        memset((void *)&tx_metrics, 0, sizeof(tx_metrics));
         port_send_datas = _port_send_datas;
+    }
+
+    void reset_rx_parser()
+    {
+        _index = 0;
+        length = 999;
+        data_length_index = 0;
+        data_CRC8_index = 0;
+        irq_package_type = _bus_data_type::none;
+        drop_bytes = 0;
+    }
+
+    uint8_t *rx_compat_buf() { return recv_data_buf[0]; }
+
+    void publish_recv_frame(uint8_t *data, int len, _bus_data_type type)
+    {
+        bus_recv_data_ptr = data;
+        bus_package_type = type;
+        recv_data_len = len;
+    }
+
+    void release_recv_frame()
+    {
+#if BMCU_PRINTER_RX_DMA
+        bus_uart1_rx_release_frame();
+#endif
+        recv_data_len = 0;
+        bus_package_type = _bus_data_type::none;
     }
 
     void irq(uint8_t data)
     {
+        note_activity();
+        if (rx_metrics.rx_bytes != 0xFFFFFFFFu) ++rx_metrics.rx_bytes;
         if (drop_bytes > 0)
         {
             if (--drop_bytes == 0)
@@ -79,6 +221,10 @@ public:
                 length = data_CRC8_index = 6;
                 _index = 1;
                 irq_package_type = (_bus_data_type)data;
+            }
+            else if (rx_metrics.rx_resync_bytes != 0xFFFFFFFFu)
+            {
+                ++rx_metrics.rx_resync_bytes;
             }
             return;
         }
@@ -122,6 +268,7 @@ public:
 
             if (length <= (int)data_CRC8_index || length > BUF_SZ)
             {
+                if (rx_metrics.rx_bad_length != 0xFFFFFFFFu) ++rx_metrics.rx_bad_length;
                 _index = 0;
                 return;
             }
@@ -131,6 +278,8 @@ public:
         {
             if (data != bus_crc8(buf, (uint32_t)data_CRC8_index))
             {
+                if (rx_metrics.rx_header_crc_error != 0xFFFFFFFFu)
+                    ++rx_metrics.rx_header_crc_error;
                 _index = 0;
                 return;
             }
@@ -162,6 +311,10 @@ public:
         if (idx >= length)
         {
             _index = 0;
+            if (rx_metrics.rx_frames_valid != 0xFFFFFFFFu) ++rx_metrics.rx_frames_valid;
+#if BMCU_PRINTER_RX_DMA
+            if (rx_metrics.rx_compat_copy != 0xFFFFFFFFu) ++rx_metrics.rx_compat_copy;
+#endif
 
             if (recv_data_len == 0)
             {
@@ -170,6 +323,10 @@ public:
                 bus_irq_data_ptr = tmp;
                 bus_package_type = irq_package_type;
                 recv_data_len = length;
+            }
+            else if (rx_metrics.rx_publish_drop != 0xFFFFFFFFu)
+            {
+                ++rx_metrics.rx_publish_drop;
             }
             return;
         }
@@ -180,9 +337,15 @@ public:
     void send_package()
     {
         const int len = send_data_len;
-        if (len > 0 && len <= 1280)
+        if (len == 0) return;
+        if (len < 0 || len > 1280)
         {
-            if (!idle) return;
+            report_tx_fault(bus_tx_fault::invalid_length);
+            send_data_len = 0;
+            return;
+        }
+        {
+            if (!idle || !send_is_ready()) return;
 
             uint8_t *tx = tx_build_buf();
             tx_build_sel ^= 1;

@@ -6,6 +6,10 @@
 #include "app_api.h"
 #include "_bus_hardware.h"
 #include "crc_bus.h"
+#include "bmcu_link.h"
+#include "bmcu_link_protocol.h"
+#include "printer_bus_result.h"
+#include "Motion_control.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -91,6 +95,16 @@ void bambubus_long_package_analysis(uint8_t *buf, int data_length, bambubus_long
 
 bambubus_long_packge_data printer_data_long;
 
+static uint8_t bounded_payload_hash(const uint8_t* data, uint16_t length)
+{
+    // FNV-1a over a bounded prefix: stable evidence without copying raw printer
+    // payloads or adding unbounded work to the parser path.
+    uint8_t hash = 0xC5u;
+    const uint16_t bounded = length < 32u ? length : 32u;
+    for (uint16_t i = 0u; i < bounded; ++i)
+        hash = static_cast<uint8_t>((hash ^ data[i]) * 0x93u);
+    return hash;
+}
 static uint8_t online_detect_prefix_now = 0x0Cu;
 static bool have_registered = false;
 static uint8_t online_detect_phase = 0u;
@@ -178,12 +192,31 @@ uint8_t get_filament_left_char(const _ams *ams)
 static uint32_t time_sendout_onuse_ticks[4] = {};
 static uint8_t last_before_on_use_motion_flag = 0x00;
 static uint8_t count_on_use = 0u;
+
+static inline uint8_t bmcu_pressure_class(uint16_t pressure)
+{
+    if (pressure == 0xF06Fu) return 2u;
+    if (pressure == 0xFFFFu || pressure == 0xFF74u) return 0u;
+    return 1u;
+}
+
+class BmcuStatusNotifyGuard
+{
+public:
+    ~BmcuStatusNotifyGuard()
+    {
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_SLOT |
+                                 BMCU_STATUS_CHANGE_MOTION |
+                                 BMCU_STATUS_CHANGE_PRESSURE);
+    }
+};
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     if (ams_num != fixed_ams_num) return false;
 
     _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
+    BmcuStatusNotifyGuard status_guard;
 
     if (read_num < 4)
     {
@@ -578,7 +611,10 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
     package_send->filament_channel_2 = ch;
 
     if (ch < 4u)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -789,7 +825,10 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     package_send->filament_channel = ch;
 
     if (ch < 4)
-        memcpy(&package_send->meters, &ams_ptr->filament[ch].meters, sizeof(package_send->meters));
+    {
+        const float meters = Motion_control_get_filament_meters(ch);
+        memcpy(&package_send->meters, &meters, sizeof(package_send->meters));
+    }
 
     memcpy(&package_send->pressure, &pressure, sizeof(pressure));
 
@@ -830,23 +869,23 @@ static inline void online_detect_build_packet(const uint8_t ams_num, const uint8
     package_add_crc(online_detect_res, 29);
 }
 
-void get_package_online_detect(unsigned char *buf, int length)
+bool get_package_online_detect(unsigned char *buf, int length)
 {
     (void)length;
-    if (bus_port_to_host.send_data_len != 0) return;
+    if (bus_port_to_host.send_data_len != 0) return true;
 
     const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    if (ams_num >= 4u) return;
+    if (ams_num >= 4u) return true;
 
     if (ams[bambubus_ams_map[ams_num]].online != true)
     {
         online_detect_reset();
-        return;
+        return true;
     }
 
     if (buf[5] == 0x00)
     {
-        if (have_registered) return;
+        if (have_registered) return true;
 
         if (online_detect_phase == 0u)
         {
@@ -864,17 +903,17 @@ void get_package_online_detect(unsigned char *buf, int length)
         uint8_t *out = bus_port_to_host.tx_build_buf();
         memcpy(out, online_detect_res, 29);
         bus_port_to_host.send_data_len = 29;
-        return;
+        return false;
     }
 
-    if (buf[5] != 0x01) return;
-    if (buf[6] != ams_num) return;
+    if (buf[5] != 0x01) return true;
+    if (buf[6] != ams_num) return true;
 
     online_detect_prefix_now = 0x0Au;
     online_detect_build_packet(ams_num, 0x01);
 
     if (memcmp(online_detect_res + 7, buf + 7, 17) != 0)
-        return;
+        return true;
 
     have_registered = true;
     online_detect_phase = 3u;
@@ -882,6 +921,7 @@ void get_package_online_detect(unsigned char *buf, int length)
     uint8_t *out = bus_port_to_host.tx_build_buf();
     memcpy(out, online_detect_res, 29);
     bus_port_to_host.send_data_len = 29;
+    return false;
 }
 
 void get_package_long_packge_MC_online(unsigned char *buf, int length)
@@ -1205,38 +1245,49 @@ bambubus_package_type bambubus_run()
             const int len = rx_len;
 
             stu = get_packge_type(buf, len);
+            const bool response_pending_before = bus_port_to_host.send_data_len != 0;
+            bool handler_dispatched = false;
+            bool no_response_expected = false;
 
             switch (stu)
             {
             case bambubus_package_type::filament_motion_short:
+                handler_dispatched = true;
                 get_package_motion((bambubus_printer_motion_package_struct *)buf);
                 break;
 
             case bambubus_package_type::filament_motion_long:
+                handler_dispatched = true;
                 get_package_stu_motion((bambubus_printer_stu_motion_package_struct *)buf);
                 break;
 
             case bambubus_package_type::online_detect:
-                get_package_online_detect(buf, len);
+                handler_dispatched = true;
+                no_response_expected = get_package_online_detect(buf, len);
                 break;
 
             case bambubus_package_type::MC_online:
+                handler_dispatched = true;
                 get_package_long_packge_MC_online(buf, len);
                 break;
 
             case bambubus_package_type::read_filament_info:
+                handler_dispatched = true;
                 get_package_long_packge_filament(buf, len);
                 break;
 
             case bambubus_package_type::version:
+                handler_dispatched = true;
                 get_package_long_packge_version(buf, len);
                 break;
 
             case bambubus_package_type::serial_number:
+                handler_dispatched = true;
                 get_package_long_packge_serial_number(buf, len);
                 break;
 
             case bambubus_package_type::set_filament_info:
+                handler_dispatched = true;
             {
                 const uint8_t b = buf[5];
                 const uint8_t ams_num = (b >> 4) & 0x0F;
@@ -1250,6 +1301,7 @@ bambubus_package_type bambubus_run()
             }
 
             case bambubus_package_type::set_filament_info_type2:
+                handler_dispatched = true;
                 get_package_set_filament_type2(buf, len);
                 if (printer_data_long.datas[0] == (uint8_t)BAMBU_BUS_AMS_NUM && printer_data_long.datas[1] < 4)
                     ams_datas_set_need_to_save_filament(printer_data_long.datas[1]);
@@ -1259,13 +1311,50 @@ bambubus_package_type bambubus_run()
                 break;
             }
 
-            if (bus_port_to_host.send_data_len != 0) delay_us(50u);
+            const uint16_t response_length = bus_port_to_host.send_data_len > 0
+                ? static_cast<uint16_t>(bus_port_to_host.send_data_len) : 0u;
+            uint8_t command = len > 4 ? buf[4] : 0u;
+            if (len > 12 && (buf[1] == 0x04u || buf[1] == 0x05u)) command = buf[11];
+
+            printer_bus_result::HandlerDisposition disposition =
+                printer_bus_result::HandlerDisposition::unsupported;
+            if (stu == bambubus_package_type::none)
+                disposition = printer_bus_result::HandlerDisposition::no_handler;
+            else if (handler_dispatched)
+                disposition = no_response_expected
+                    ? printer_bus_result::HandlerDisposition::no_response_expected
+                    : printer_bus_result::HandlerDisposition::response_expected;
+
+            const printer_bus_result::TransactionResult result =
+                printer_bus_result::classify_transaction(
+                    disposition, response_pending_before, response_length);
+            const bmcu_link_protocol::TransactionOutcome outcome = result.outcome;
+            const bmcu_link_protocol::DecisionReason reason = result.reason;
+            if (reason == bmcu_link_protocol::REASON_TX_BUSY)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::response_busy);
+            else if (reason == bmcu_link_protocol::REASON_NO_RESPONSE)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::response_missing);
+            else if (reason == bmcu_link_protocol::REASON_NO_RESPONSE_EXPECTED)
+                bus_port_to_host.report_tx_fault(bus_tx_fault::no_response_expected);
+            bmcu_link_printer_transaction(
+                static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
+                static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
+
+            if (len >= 15 && (buf[1] == 0x04u || buf[1] == 0x05u))
+            {
+                bmcu_link_printer_long_transaction(
+                    printer_data_long.type, static_cast<uint8_t>(outcome),
+                    static_cast<uint8_t>(reason), printer_data_long.data_length,
+                    response_length,
+                    bounded_payload_hash(printer_data_long.datas, printer_data_long.data_length));
+            }
+
+            if (response_length != 0u) bus_port_to_host.defer_send_us(50u);
         }
 
         {
             const uint32_t s = irq_save_wch();
-            bus_port_to_host.recv_data_len = 0;
-            bus_port_to_host.bus_package_type = _bus_data_type::none;
+            bus_port_to_host.release_recv_frame();
             irq_restore_wch(s);
         }
     }

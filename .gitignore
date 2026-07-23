@@ -1,0 +1,12 @@
+.pio/
+tmp/
+__pycache__/
+*.py[cod]
+.vscode/
+.venv/
+firmware-build/
+firmwares/
+dist/
+pico/secrets.py
+pico/SECRETS_LOCAL.md
+pico/bambuddy.json

@@ -5,8 +5,29 @@
 void Motion_control_init();
 void Motion_control_set_PWM(uint8_t CHx, int PWM);
 void Motion_control_run(int error);
+enum MotionControlFault : uint8_t
+{
+    MOTION_FAULT_NONE = 0u,
+    MOTION_FAULT_PULL_NO_PROGRESS = 1u,
+    MOTION_FAULT_PULL_TRAVEL_BUDGET = 2u,
+};
+
 bool Motion_control_save_dm_key_none_thresholds(void);
 
+struct MotionControlChannelTelemetry
+{
+    uint16_t raw_angle;
+    int16_t position_delta;
+    int16_t motor_pwm;
+    uint8_t sensor_online;
+    uint8_t motion_fault;
+    uint8_t sensor_good;
+    uint8_t controller_motion;
+};
+
+bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);
+bool Motion_control_is_reset_safe(void);
+float Motion_control_get_filament_meters(uint8_t channel);
 void MC_PULL_detect_channels_inserted();
 
 // Externy
