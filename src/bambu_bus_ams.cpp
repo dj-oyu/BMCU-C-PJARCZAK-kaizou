@@ -1374,7 +1374,14 @@ bambubus_package_type bambubus_run()
     }
 
     if (time_diff32(now, hb_deadline) > 0)
+    {
         stu = bambubus_package_type::error;
+        // Heartbeat lost: when the bus returns the printer re-runs AMS
+        // registration, and a still-latched have_registered would swallow
+        // that query unanswered (recurring HMS 0500_409D at print start
+        // that only a power cycle cleared). Re-arm while the bus is quiet.
+        online_detect_reset();
+    }
 
     return stu;
 }
