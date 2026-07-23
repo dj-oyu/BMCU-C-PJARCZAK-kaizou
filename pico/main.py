@@ -130,12 +130,6 @@ monitor_by_id = {monitor.link_id: monitor for monitor in monitors}
 wifi = WiFiStation(secrets, publish_wifi)
 
 
-def device_summary(monitor):
-    return {"id": monitor.link_id, "link": monitor.link_state,
-            "bmcu_boot_session": monitor.bmcu_boot_session,
-            "tick_hz": monitor.tick_hz}
-
-
 def transport_state():
     if bambuddy_client is not None:
         return bambuddy_client.status()
@@ -166,34 +160,6 @@ def pico_state(log_limit=None, include_details=True):
     return result
 
 
-def web_state():
-    # Legacy aggregate kept for the local page; every device also has a scoped API.
-    monitor = monitors[0]
-    online = not monitor.is_stale(time.ticks_ms())
-    return {
-        "wifi": {"state": wifi.state, "ip": wifi.ip, "hostname": wifi.hostname},
-        "bambuddy": transport_state(),
-        "bmcu": {
-            "link": "online" if online else "stale",
-            "tick_hz": monitor.tick_hz,
-            "status": monitor.status,
-            "snapshot": monitor.snapshot,
-            "channels": monitor.channels,
-            "printer_auth": monitor.printer_auth,
-            "printer_rx": monitor.printer_rx,
-            "printer_tx": monitor.printer_tx,
-            "soft_reset": monitor.soft_reset,
-            "events": monitor.events,
-            "sensors": monitor.sensors,
-            "decoder_crc_errors": monitor.decoder.crc_errors,
-            "decoder_frame_errors": monitor.decoder.frame_errors,
-        },
-        "bridge_id": bridge_id,
-        "devices": [device_summary(item) for item in monitors],
-        "pico": pico_state(8, False),
-    }
-
-
 def device_state(monitor):
     return {
         "bridge_id": bridge_id,
@@ -214,12 +180,23 @@ def device_state(monitor):
     }
 
 
-def api_state(path="/api/status"):
-    if path == "/api/status":
-        return web_state()
+def api_state(path="/api/devices"):
     if path == "/api/devices":
-        return {"bridge_id": bridge_id,
-                "devices": [device_summary(item) for item in monitors]}
+        # One aggregate for the local page and diagnostics: every link plus
+        # bridge-level Wi-Fi, transport, and Pico runtime state.
+        devices = []
+        for monitor in monitors:
+            entry = device_state(monitor)
+            entry["events"] = monitor.events
+            devices.append(entry)
+        return {
+            "bridge_id": bridge_id,
+            "wifi": {"state": wifi.state, "ip": wifi.ip,
+                     "hostname": wifi.hostname},
+            "bambuddy": transport_state(),
+            "devices": devices,
+            "pico": pico_state(8, False),
+        }
     if path == "/api/pico/logs":
         return pico_state(12, True)
     pieces = path.split("/")

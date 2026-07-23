@@ -1,6 +1,10 @@
 # Pico 2 W multi-BMCU bridge specification
 
-Status: target design; the checked-in Pico implementation currently supports one UART link and only `GET /api/status`.
+Status: implemented. The checked-in Pico builds one `BMCUMonitor` per
+`BMCU_LINKS` entry, serves the link-scoped `/api/devices` surface, renders
+every link on the local dashboard, and multiplexes all links over one
+Bambuddy WebSocket. The legacy single-BMCU `GET /api/status` aggregate has
+been removed.
 
 ## Scope
 
@@ -56,17 +60,19 @@ The initial command set remains read-only (`GET_FULL_STATUS`, `GET_STATUS`,
 `PING`) plus the existing safe LED command.  No broadcast write command is
 permitted.
 
-## Planned HTTP and Bambuddy surface
+## HTTP and Bambuddy surface
 
-After the multi-link phase, the diagnostic HTTP surface will expose:
+The diagnostic HTTP surface exposes:
 
 ```text
-GET /api/devices
+GET /api/devices                      (aggregate: bridge, Wi-Fi, transport,
+                                       Pico runtime, full state of every link)
 GET /api/devices/<link-id>/status
 GET /api/devices/<link-id>/events
+POST /api/devices/<link-id>/soft-reset (CSRF + explicit confirmation)
 ```
 
-The UI shows a device selector and one isolated dashboard per link.  The
+The UI renders one isolated dashboard section per link, stacked.  The
 summary page may show link health, but does not combine slots, pressure, or
 sensor values from different BMCUs.
 

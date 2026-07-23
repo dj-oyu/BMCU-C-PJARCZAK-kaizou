@@ -10,33 +10,43 @@ Bambuddyへ提供できる情報をまとめる。wire上の正規仕様は
 
 | 経路 | 状態 | 内容 | 用途 |
 | --- | --- | --- | --- |
-| `GET http://<Pico-IP>/api/status` | 実装済み・read-only | 現在状態、最新full snapshot、直近イベント、診断値を1つのJSONで返す | Bambuddy試作・診断 |
+| `GET http://<Pico-IP>/api/devices` | 実装済み・read-only | 全構成リンクの現在状態、最新full snapshot、直近イベント、診断値と、bridge/Wi-Fi/transport/Pico状態を1つのJSONで返す | Bambuddy試作・診断 |
 | `publish(message)` callback | 型付き辞書まで実装済み、外部transportは未実装 | 受信フレームとPicoのlink/Wi-Fi状態変化 | 将来の認証付きoptional-device transport |
 | USB JSONL | `DEBUG_USB=True`の時だけ | `publish(message)`を1行JSONで出力 | commissioning専用 |
 
 HTTP serverは認証・TLSなし、同時に1接続だけを処理する暫定APIである。信頼できる
 LAN外には公開しない。USB出力はUART処理を遅延させ得るためproduction transportには使わない。
 
-## 2. `/api/status` JSON
+## 2. `/api/devices` JSON
 
 ```json
 {
-  "wifi": {"state": "online", "ip": "192.168.x.x"},
-  "bmcu": {
-    "link": "online",
-    "tick_hz": 18000000,
-    "status": {},
-    "snapshot": [],
-    "channels": [{}, {}, {}, {}],
-    "events": [],
-    "sensors": {},
-    "decoder_crc_errors": 0,
-    "decoder_frame_errors": 0
-  }
+  "bridge_id": "pico-bmcu-bridge",
+  "wifi": {"state": "online", "ip": "192.168.x.x", "hostname": "bmcu-monitor-a"},
+  "bambuddy": {"state": "connected"},
+  "pico": {},
+  "devices": [
+    {
+      "link_id": "bmcu-a",
+      "link": "online",
+      "tick_hz": 18000000,
+      "status": {},
+      "snapshot": [],
+      "channels": [{}, {}, {}, {}],
+      "events": [],
+      "sensors": {},
+      "decoder_crc_errors": 0,
+      "decoder_frame_errors": 0
+    }
+  ]
 }
 ```
 
-未受信値は`null`、byte列は小文字hex文字列になる。
+未受信値は`null`、byte列は小文字hex文字列になる。構成された各リンクが
+`devices[]`に1要素ずつ入る。以降の節で`bmcu.<field>`と表記する値は、各
+`devices[]`要素の同名field(例: `devices[0].status`)を指す。
+`GET /api/devices/<link-id>/status`は同じ形の単一デバイス分(events除く)を返す。
+旧`GET /api/status`単一BMCU集約は廃止済み。
 
 ### 2.1 Pico・link情報
 

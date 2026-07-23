@@ -6,7 +6,7 @@ import unittest
 PICO_DIR = pathlib.Path(__file__).parents[1] / "pico"
 sys.path.insert(0, str(PICO_DIR))
 
-from web_ui import WebUI, _JsonChunks, _Response, _write_json
+from web_ui import PAGE, WebUI, _JsonChunks, _Response, _write_json
 
 
 class RequestClient:
@@ -116,12 +116,20 @@ class WebUIRuntimeTests(unittest.TestCase):
                 reported.append((component, str(error))),
         )
         web.client = RequestClient(
-            b"GET /api/status HTTP/1.1\r\nHost: pico\r\n\r\n")
+            b"GET /api/devices HTTP/1.1\r\nHost: pico\r\n\r\n")
         web.poll()
 
         self.assertIn(b"500 Internal Server Error", web.response)
         self.assertIn(b"internal Pico error", web.response)
         self.assertEqual(reported, [("request", "status failed")])
+
+    def test_dashboard_is_multi_device(self):
+        # The page polls the aggregate and renders one section per link.
+        self.assertIn(b"fetch('/api/devices'", PAGE)
+        self.assertNotIn(b"/api/status", PAGE)
+        # The soft-reset button targets the clicked link, never a fixed one.
+        self.assertIn(b"'/api/devices/'+link+'/soft-reset'", PAGE)
+        self.assertNotIn(b"/api/devices/bmcu-a/soft-reset", PAGE)
 
 
 if __name__ == "__main__":
