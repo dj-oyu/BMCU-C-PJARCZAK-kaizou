@@ -10,6 +10,8 @@
     {"name":"get_full_status","kind":"0x17","sequence":4100,"payload_hex":"0f0f","wire_hex":"a55a83170410020f0f604d"},
     {"name":"pong","kind":"0x72","sequence":4099,"payload_hex":"78563412efcdab89","wire_hex":"a55a837203100878563412efcdab89d76c"},
     {"name":"full_status_record","kind":"0x73","sequence":4100,"payload_hex":"0700020402007b000000000102030405060708090a0b0c0d0e0f","wire_hex":"a55a837304101a0700020402007b000000000102030405060708090a0b0c0d0e0f311b"},
-    {"name":"ack","kind":"0x7f","sequence":4098,"payload_hex":"1100","wire_hex":"a55a837f02100211002c03"}
+    {"name":"ack","kind":"0x7f","sequence":4098,"payload_hex":"1100","wire_hex":"a55a837f02100211002c03"},
+    {"name":"full_status_record_ams_service","kind":"0x73","sequence":4101,"payload_hex":"1f0000020b0090010000dc05000000fa0000d007000028230000","wire_hex":"a55a837305101a1f0000020b0090010000dc05000000fa0000d007000028230000cdb0"},
+    {"name":"full_status_record_ams_registration","kind":"0x73","sequence":4102,"payload_hex":"1f0001020c00900100000b00160021002c00370042004d001b00","wire_hex":"a55a837306101a1f0001020c00900100000b00160021002c00370042004d001b00e089"}
   ]
 }

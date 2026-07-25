@@ -1,6 +1,7 @@
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
 #include "bmcu_soft_reset_policy.h"
+#include "bmcu_ams_service_watch.h"
 #include "_bus_hardware.h"
 #include "bambu_bus_ams.h"
 
@@ -92,7 +93,9 @@ struct PrinterAuthCache
     uint8_t last_payload_hash;
 };
 
-constexpr uint8_t kMaxFullStatusRecords = 13u;
+// GLOBAL 1 + CHANNEL 4 + PRINTER_BUS 1 + PRINTER_AUTH 1 + PRINTER_RX 3 +
+// PRINTER_TX 2 + AMS_SERVICE 1 + AMS_REGISTRATION 1 + COUNTERS 1 = 15.
+constexpr uint8_t kMaxFullStatusRecords = 15u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
@@ -138,6 +141,7 @@ PrinterBusCache g_printer_bus = {};
 PrinterTransactionEventCache g_printer_transaction_event = {};
 uint32_t g_printer_transaction_event_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
+bmcu_ams_service::Watch g_ams_service = {};
 uint8_t g_status_cache_valid = 0u;
 LogRecord g_events[kEventSlots];
 uint8_t g_event_read = 0u;
@@ -598,6 +602,34 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         put32(&tx_fault.data[4], bus_port_to_host.tx_metrics.tx_dma_error);
         put32(&tx_fault.data[8], bus_port_to_host.tx_metrics.tx_timeout);
         put32(&tx_fault.data[12], bus_port_to_host.tx_metrics.tx_no_response_expected);
+
+        // Freshen the gap accumulators at the snapshot tick so the encoded
+        // values are coherent with g_full_tick. nullptr: a snapshot must never
+        // consume an edge that a later polled emission would have reported.
+        bmcu_ams_service::poll(g_ams_service, g_full_tick, time_hw_tpms, nullptr);
+
+        FullStatusRecord& ams_service = append_full_record(FULL_RECORD_AMS_SERVICE);
+        put32(&ams_service.data[0], g_ams_service.gap_now_ms);
+        put32(&ams_service.data[4], g_ams_service.gap_max_ms);
+        put32(&ams_service.data[8], g_ams_service.gap_max_since_confirm_ms);
+        put32(&ams_service.data[12], g_ams_service.ms_since_confirm);
+
+        FullStatusRecord& ams_reg = append_full_record(FULL_RECORD_AMS_REGISTRATION);
+        put16(&ams_reg.data[0], g_ams_service.service_count[bmcu_ams_service::kServiceMotion]);
+        put16(&ams_reg.data[2], g_ams_service.service_count[bmcu_ams_service::kServiceStuMotion]);
+        put16(&ams_reg.data[4], g_ams_service.service_count[bmcu_ams_service::kServiceMcOnline]);
+        put16(&ams_reg.data[6], g_ams_service.registration_query_count);
+        put16(&ams_reg.data[8], g_ams_service.would_reoffer_count);
+        put16(&ams_reg.data[10], g_ams_service.confirm_count);
+        put16(&ams_reg.data[12], g_ams_service.reset_count);
+        uint8_t ams_flags = 0u;
+        if (g_ams_service.registered) ams_flags |= 1u << 0;
+        if (g_ams_service.confirm_seen) ams_flags |= 1u << 1;
+        if (bmcu_ams_service::service_stale(g_ams_service)) ams_flags |= 1u << 2;
+        if (bmcu_ams_service::reoffer_armed(g_ams_service)) ams_flags |= 1u << 3;
+        if (g_ams_service.have_service) ams_flags |= 1u << 4;
+        ams_reg.data[14] = ams_flags;
+        ams_reg.data[15] = 0u;
     }
 
     if (section_mask & FULL_SECTION_COUNTERS)
@@ -962,6 +994,38 @@ void process_one_rx_frame()
         }
     }
 }
+
+void emit_ams_diag_counter(uint8_t counter, uint32_t value, uint32_t tick)
+{
+    // No local rate limiter on purpose. The pure module already edge-latches
+    // one emission per silence/arming episode, so the bound this path needs is
+    // already in place. A tick-difference limiter here would compare a raw
+    // 32-bit SysTick delta (18 MHz, wrapping every ~238.6 s) against a 5 s
+    // window, so two legitimate emissions separated by ~238.6 s * k would alias
+    // into the window and be dropped permanently - the module's edge latch has
+    // already been consumed by then, so the event never comes back.
+    LogRecord record = {};
+    record.header.hw_tick32 = tick;
+    record.header.type = RECORD_DIAGNOSTIC_COUNTER;
+    record.header.severity = SEVERITY_NOTICE;
+    record.header.source = SOURCE_PRINTER_BUS;
+    record.header.payload_length = sizeof(LogDiagnosticCounterPayload);
+    record.payload.diagnostic_counter.counter = counter;
+    record.payload.diagnostic_counter.value = value;
+    push_log_record(record);
+}
+
+void emit_ams_service_events(const bmcu_ams_service::Events& events, uint32_t tick)
+{
+    // events.gap_ms is captured inside the module at the instant the edge is
+    // raised. Reading the live g_ams_service.gap_now_ms here would report 0 for
+    // any edge raised on the frame-arrival path, because note_service() zeroes
+    // the gap after poll() latched the event.
+    if (events.gap_event)
+        emit_ams_diag_counter(DIAG_COUNTER_AMS_SERVICE_GAP_MS, events.gap_ms, tick);
+    if (events.reoffer_event)
+        emit_ams_diag_counter(DIAG_COUNTER_AMS_WOULD_REOFFER, events.gap_ms, tick);
+}
 }
 
 void bmcu_link_init(void)
@@ -1289,6 +1353,47 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
         ? 0xFFu : static_cast<uint8_t>(response_length);
     record.payload.printer_long_transaction.payload_hash = payload_hash;
     push_log_record(record);
+}
+
+void bmcu_link_ams_service_poll(void)
+{
+    const uint32_t tick = time_ticks32();
+    bmcu_ams_service::Events events = {};
+    bmcu_ams_service::poll(g_ams_service, tick, time_hw_tpms, &events);
+    emit_ams_service_events(events, tick);
+}
+
+void bmcu_link_ams_service_frame(uint8_t service_kind)
+{
+    if (service_kind >= bmcu_ams_service::kServiceKindCount) return;
+    const uint32_t tick = time_ticks32();
+    bmcu_ams_service::Events events = {};
+    bmcu_ams_service::note_service(g_ams_service, service_kind, tick, time_hw_tpms, &events);
+    emit_ams_service_events(events, tick);
+}
+
+void bmcu_link_ams_registration_query(void)
+{
+    const uint32_t tick = time_ticks32();
+    bmcu_ams_service::Events events = {};
+    bmcu_ams_service::note_query(g_ams_service, tick, time_hw_tpms, &events);
+    emit_ams_service_events(events, tick);
+}
+
+void bmcu_link_ams_registration_confirm(void)
+{
+    const uint32_t tick = time_ticks32();
+    bmcu_ams_service::Events events = {};
+    bmcu_ams_service::note_confirm(g_ams_service, tick, time_hw_tpms, &events);
+    emit_ams_service_events(events, tick);
+}
+
+void bmcu_link_ams_registration_reset(void)
+{
+    const uint32_t tick = time_ticks32();
+    bmcu_ams_service::Events events = {};
+    bmcu_ams_service::note_reset(g_ams_service, tick, time_hw_tpms, &events);
+    emit_ams_service_events(events, tick);
 }
 
 uint32_t bmcu_link_tx_drop_count(void)

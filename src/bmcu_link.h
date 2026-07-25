@@ -29,6 +29,14 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
                                         uint16_t payload_length, uint16_t response_length,
                                         uint8_t payload_hash);
+// Observe-only AMS service/registration instrumentation (issue #3 phase 1).
+// These only feed diagnostic telemetry; nothing they record is ever read back
+// into a printer-bus decision. Main-loop context only.
+void bmcu_link_ams_service_poll(void);
+void bmcu_link_ams_service_frame(uint8_t service_kind);
+void bmcu_link_ams_registration_query(void);
+void bmcu_link_ams_registration_confirm(void);
+void bmcu_link_ams_registration_reset(void);
 void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault);
 uint32_t bmcu_link_tx_drop_count(void);
 bool bmcu_link_reset_pending(void);

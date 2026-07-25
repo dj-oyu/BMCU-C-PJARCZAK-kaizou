@@ -241,6 +241,8 @@ Full-status record types:
 | 8 | `PRINTER_RX_DMA` | zero or one |
 | 9 | `PRINTER_TX_CORE` | zero or one |
 | 10 | `PRINTER_TX_FAULT` | zero or one |
+| 11 | `AMS_SERVICE` | zero or one |
+| 12 | `AMS_REGISTRATION` | zero or one |
 
 #### GLOBAL record_data — 16 bytes
 
@@ -368,6 +370,61 @@ the bus for a later printer retry. Repeated identical rejected/failed transactio
 Intentional no-response decisions are IGNORED, do not generate warning EVENTs, and are counted separately from
 	x_response_missing.
 
+#### AMS_SERVICE record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | `gap_now_ms` |
+| 4 | u32 | `gap_max_ms` |
+| 8 | u32 | `gap_max_since_confirm_ms` |
+| 12 | u32 | `ms_since_confirm` |
+
+"Serviced" means a CRC-valid printer frame of kind `0x03` filament_motion_short, `0x04`
+filament_motion_long, or long frame `0x21A` MC_online carried this BMCU's AMS number. The counters are
+taken on the address match alone, before the queued-response (TX-busy) guard and before the AMS-online and
+`set_motion` filters, so BMCU-side state can never fabricate apparent printer silence; queued-response skips
+remain separately visible in PRINTER_TX_CORE. Service counts are therefore a superset of handled frames.
+
+`gap_now_ms` is milliseconds since the last such frame, measured from module init while
+`have_service` is clear. `gap_max_ms` is a monotonic maximum since boot and only begins tracking
+after the first service frame, so a BMCU that booted before the printer cannot pollute it.
+`gap_max_since_confirm_ms` accumulates `min(gap_now_ms, ms_since_confirm)`, capping a gap
+that began before the confirmed registration at the session length; it resets to zero at each confirm, which
+a host detects through `confirm_count`. All millisecond fields saturate at `0xFFFFFFFF` instead of wrapping.
+Because the maxima are monotonic between well-defined reset events, a slow or lossy readout link can delay
+a read but never corrupt the value. Validity is carried by the AMS_REGISTRATION flags rather than by
+sentinels: offsets 8 and 12 read zero while `confirm_settled` is clear, offsets 0 and 4 are only meaningful
+once `have_service` is set.
+
+#### AMS_REGISTRATION record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u16 | `count_motion` — `0x03` frames addressed to this AMS |
+| 2 | u16 | `count_stu_motion` — `0x04` frames addressed to this AMS |
+| 4 | u16 | `count_mc_online` — `0x21A` frames naming this AMS |
+| 6 | u16 | `registration_query_count` — `0x05` online_detect frames with subtype `0x00` |
+| 8 | u16 | `would_reoffer_count` — queries seen while the candidate predicate was armed |
+| 10 | u16 | `confirm_count` — registration latch events |
+| 12 | u16 | `reset_count` — registered→unregistered edges |
+| 14 | u8 | flags |
+| 15 | u8 | reserved, zero |
+
+All seven counters saturate at `0xFFFF`. `registration_query_count` counts every query the printer emits,
+including those the firmware answers with silence because it already holds the registration latch — that
+silence is exactly what the capture is looking for. `reset_count` counts transitions, not calls, because the
+firmware clears the latch repeatedly while the AMS is offline or the heartbeat is lapsed.
+
+Flags: bit0 `registered`, bit1 `confirm_settled` (at least one confirm since boot; validates AMS_SERVICE
+offsets 8 and 12), bit2 `service_stale` (`gap_now_ms >= 1500`), bit3 `reoffer_armed`, bit4
+`have_service` (at least one service frame since boot; validates AMS_SERVICE offsets 0 and 4), bits 5-7
+reserved zero.
+
+`reoffer_armed` is the candidate re-offer predicate `registered AND ms_since_confirm >= 3000 AND
+gap_now_ms >= 1500`. It is phase-1 instrumentation: the firmware evaluates it and reports it but
+never acts on it, and no printer-bus byte or registration decision depends on it. Both thresholds are named
+constants in `src/bmcu_ams_service_watch.h` so a capture can retune them.
+
 #### COUNTERS record_data — 16 bytes
 
 | Offset | Type | Field |
@@ -387,8 +444,11 @@ Intentional no-response decisions are IGNORED, do not generate warning EVENTs, a
 - Never block for UART completion; DMA remains responsible for transmission.
 - Do not emit a success ACK. The complete typed record set is the success response.
 
-A full request selects at most thirteen records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH,
-three PRINTER_RX records, two PRINTER_TX records, and one COUNTERS.
+A full request selects at most fifteen records: one GLOBAL, four CHANNEL, one PRINTER_BUS, one PRINTER_AUTH,
+three PRINTER_RX records, two PRINTER_TX records, one AMS_SERVICE, one AMS_REGISTRATION, and one COUNTERS.
+AMS_SERVICE and AMS_REGISTRATION belong to the PRINTER_BUS section, so one section request returns them
+together with PRINTER_AUTH — correlating AMS service traffic with the `0x040D`/`0x040E` authorization
+counters in a single snapshot is the point of the pairing.
 At 115200 8E1 this is only a few hundred wire bytes, but staged emission prevents a burst from occupying all
 seven usable TX queue entries.
 
@@ -421,6 +481,15 @@ The existing `PRINTER_TRANSACTION (3)` layout is unchanged for alpha.3 compatibi
 `operation_id:u32, state:u8, request_reason:u8, cancel_reason:u8, reserved:u8`.
 `state` is `1=SCHEDULED` or `2=CANCELLED`; cancellation reasons are
 `1=SAFETY_CHANGED`, `2=EXPIRED`, and `3=LINK_TX_FAULT`.
+
+`DIAGNOSTIC_COUNTER (8)` carries `counter:u8, reserved[3], value:u32`. Registered counter ids are
+`1=AMS_SERVICE_GAP_MS` and `2=AMS_WOULD_REOFFER`; both report `gap_now_ms` as `value`, use severity
+`NOTICE` and source `PRINTER_BUS`. Id 1 is emitted on the first crossing of 5000 ms of AMS service silence
+in a silence episode, id 2 on the edge where the candidate re-offer predicate becomes armed. Both are
+edge-latched — re-arming requires an intervening service frame or registration confirm — and that latch is
+the only bound on the emission rate; no additional time-based suppression is applied. `value` is the gap
+sampled at the instant the edge was raised, which for an edge raised by a service frame is the silence that
+just ended, not the (zero) gap after it.
 
 `STATE_CHANGE` field `8` is the per-channel motion-fault latch. Its `slot` is the channel index and its
 value uses the motion-fault enum documented in the CHANNEL full-status record.
