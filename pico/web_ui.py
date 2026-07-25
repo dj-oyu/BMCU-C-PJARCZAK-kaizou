@@ -13,6 +13,13 @@ except ImportError:
     import uerrno as errno
 
 
+# A commissioning POST must fit a 4096-byte CA PEM once JSON-escaped, plus the
+# URL, token, control key, CSRF token, and field names. The whole-request cap
+# adds room for a browser's request line and headers on top of that body.
+MAX_BODY_BYTES = 8192
+MAX_REQUEST_BYTES = 12288
+
+
 def _would_block(error):
     code = error.args[0] if error.args else None
     return code in (
@@ -54,6 +61,66 @@ SETTINGS_PAGE = SETTINGS_PAGE.replace(
 SETTINGS_PAGE = SETTINGS_PAGE.replace(
     b"csrf=x.csrf;token.value='';",
     b"csrf=x.csrf;token.value='';ckey.value='';", 1)
+
+
+def _patch_settings(page, old, new):
+    """Byte-patch the commissioning page, failing loudly on a silent no-match."""
+    if old not in page:
+        raise ValueError("settings page patch did not match")
+    return page.replace(old, new, 1)
+
+
+# TLS / fallback commissioning: wss:// and https:// need commissioned trust
+# material because MicroPython has no system trust store.
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"<p>Trusted-LAN ws:// push transport.",
+    b"<p>ws:// and http:// are trusted-LAN only; wss:// and https:// need a "
+    b"CA certificate below. https:// selects the NDJSON fallback, which "
+    b"carries telemetry but no commands.")
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"<h1>CONTROL (remote soft reset)</h1>",
+    b"<label><input id='tins' type='checkbox'> Skip TLS verification "
+    b"(insecure; test only)</label>"
+    b"<label>CA certificate PEM for wss:// or https:// (leave blank to keep "
+    b"current)<textarea id='tca' rows='4' style='width:100%'></textarea>"
+    b"</label><label><input id='tclr' type='checkbox'> Clear CA certificate"
+    b"</label><p id='tlsstate'>CA certificate: --</p>"
+    b"<h1>CONTROL (remote soft reset)</h1>")
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"cen.checked=!!x.control_enabled;cclr.checked=false;",
+    b"cen.checked=!!x.control_enabled;cclr.checked=false;"
+    b"tins.checked=!!x.tls_insecure;tclr.checked=false;"
+    b"tlsstate.textContent='CA certificate: '+"
+    b"(x.tls_ca_set?'is set':'not set');")
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"control_key:ckey.value,clear_control_key:cclr.checked}",
+    b"control_key:ckey.value,clear_control_key:cclr.checked,"
+    b"tls_insecure:tins.checked,tls_ca:tca.value,clear_tls_ca:tclr.checked}")
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"csrf=x.csrf;token.value='';ckey.value='';",
+    b"csrf=x.csrf;token.value='';ckey.value='';tca.value='';")
+
+# CONTROL is only wired to the WebSocket transport. Say so on the page and
+# report the effective state, so nobody trusts an inert remote reset path.
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"the final safety authority.</p>",
+    b"the final safety authority. https:// and http:// select the NDJSON "
+    b"fallback, which carries no commands, so CONTROL stays inert on those "
+    b"schemes.</p><p id='cstate'>CONTROL: --</p>")
+SETTINGS_PAGE = _patch_settings(
+    SETTINGS_PAGE,
+    b"tlsstate.textContent='CA certificate: '+"
+    b"(x.tls_ca_set?'is set':'not set');",
+    b"tlsstate.textContent='CA certificate: '+"
+    b"(x.tls_ca_set?'is set':'not set');"
+    b"cstate.textContent='CONTROL: '+(x.control_active?'active':"
+    b"(x.control_enabled?'enabled but inert on this transport':'off'));")
 
 class _JsonChunks:
     """Incremental JSON encoder with bounded contiguous allocations."""
@@ -224,9 +291,11 @@ class WebUI:
                     content_length = int(value.strip())
                 except ValueError:
                     content_length = -1
-        if content_length < 0 or content_length > 2048:
-            self.response = self._http_response(
-                '413 Payload Too Large', 'text/plain', b'Request too large\n')
+        if content_length < 0 or content_length > MAX_BODY_BYTES:
+            # JSON, not text: the settings page reads r.json() on failure, so a
+            # text/plain 413 would surface as nothing at all.
+            self.response = self._json_response(
+                '413 Payload Too Large', {"error": "Request too large"})
             return False
         return len(self.request) >= marker + 4 + content_length
 
@@ -397,8 +466,9 @@ class WebUI:
                 return
             self._touch_client()
             self.request.extend(data)
-            if len(self.request) > 3072:
-                self.response = self._http_response('413 Payload Too Large', 'text/plain', b'Request too large\n')
+            if len(self.request) > MAX_REQUEST_BYTES:
+                self.response = self._json_response(
+                    '413 Payload Too Large', {"error": "Request too large"})
             elif self._request_ready():
                 try:
                     self._finish_request()

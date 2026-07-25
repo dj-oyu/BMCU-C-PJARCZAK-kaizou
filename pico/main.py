@@ -11,6 +11,7 @@ from machine import UART, Pin
 
 from bambuddy_config import BambuddyConfig
 from bambuddy_transport import BambuddyOutbox
+from bambuddy_https import BambuddyNdjsonClient
 from bambuddy_ws import BambuddyWebSocketClient
 from bmcu_control import ControlGateway
 from bmcu_link import BMCUMonitor
@@ -107,6 +108,21 @@ def reconcile_bambuddy():
     bambuddy_control = None
     if bambuddy_settings.enabled:
         capabilities = ["telemetry", "multi_link", "bounded_replay"]
+        if bambuddy_settings.scheme in ("https", "http"):
+            # The NDJSON fallback cannot carry commands (TRANSPORT.md sec. 6),
+            # so no CONTROL gateway and no control capability are announced.
+            bambuddy_client = BambuddyNdjsonClient(
+                bambuddy_outbox,
+                bambuddy_settings.url,
+                bambuddy_settings.token,
+                firmware=getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3"),
+                capabilities=capabilities,
+                clock_us=monotonic_us.now,
+                tls_ca=bambuddy_settings.tls_ca,
+                tls_insecure=bambuddy_settings.tls_insecure,
+            )
+            bambuddy_revision = bambuddy_settings.revision
+            return
         if bambuddy_settings.control_enabled and bambuddy_settings.control_key:
             bambuddy_control = ControlGateway(
                 bridge_id, bambuddy_outbox.pico_boot_session,
@@ -122,6 +138,8 @@ def reconcile_bambuddy():
             capabilities=capabilities,
             clock_us=monotonic_us.now,
             control=bambuddy_control,
+            tls_ca=bambuddy_settings.tls_ca,
+            tls_insecure=bambuddy_settings.tls_insecure,
         )
     bambuddy_revision = bambuddy_settings.revision
 
@@ -131,11 +149,19 @@ if not link_configs:
     link_configs = ({"id": "bmcu-a", "uart": config.UART_ID,
                      "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN},)
 
+# One loop pass can be stretched by a single TLS handshake step (an RSA
+# verification can hold the CPU for hundreds of milliseconds), and the default
+# 256-byte UART ring overflows in ~22 ms at 115200 baud. Size the ring for that
+# worst case instead of corrupting the BMCU link whenever wss:// or https:// is
+# commissioned. 2048 bytes buy ~178 ms of headroom.
+DEFAULT_UART_RXBUF = getattr(config, "UART_RXBUF", 2048)
+
 monitors = []
 for link in link_configs:
     link_id = link["id"]
     uart = UART(link["uart"], baudrate=link.get("baudrate", config.UART_BAUDRATE),
-                bits=8, parity=0, stop=1, tx=Pin(link["tx"]), rx=Pin(link["rx"]))
+                bits=8, parity=0, stop=1, tx=Pin(link["tx"]), rx=Pin(link["rx"]),
+                rxbuf=link.get("rxbuf", DEFAULT_UART_RXBUF))
     monitors.append(BMCUMonitor(uart, publish, link_id=link_id))
 
 monitor_by_id = {monitor.link_id: monitor for monitor in monitors}
@@ -190,21 +216,29 @@ wifi = WiFiStation(secrets, publish_wifi)
 def transport_state():
     if bambuddy_client is not None:
         result = bambuddy_client.status()
-        if bambuddy_control is not None:
-            result["control"] = bambuddy_control.status()
-        return result
-    return {
-        "state": "disabled",
-        "last_error": None,
-        "queue_depth": len(bambuddy_outbox.queue),
-        "dropped_count": bambuddy_outbox.queue.dropped_count,
-        "pico_boot_session": bambuddy_outbox.pico_boot_session,
-    }
+    else:
+        result = {
+            "state": "disabled",
+            "last_error": None,
+            "queue_depth": len(bambuddy_outbox.queue),
+            "dropped_count": bambuddy_outbox.queue.dropped_count,
+            "pico_boot_session": bambuddy_outbox.pico_boot_session,
+        }
+    # Stored control_enabled/control_key_set describe intent. The https:// and
+    # http:// NDJSON fallback carries no commands, so report whether a CONTROL
+    # gateway actually exists rather than letting an operator believe a remote
+    # soft-reset path is armed when it is inert.
+    result["control_active"] = bambuddy_control is not None
+    if bambuddy_control is not None:
+        result["control"] = bambuddy_control.status()
+    return result
 
 
 def commissioning_state():
     result = bambuddy_settings.public()
-    result["transport"] = transport_state()
+    transport = transport_state()
+    result["transport"] = transport
+    result["control_active"] = transport["control_active"]
     return result
 
 

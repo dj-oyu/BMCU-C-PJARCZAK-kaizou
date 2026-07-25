@@ -8,16 +8,24 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PICO = ROOT / "pico"
-sys.path.insert(0, str(PICO))
 
 
 def load(name):
+    """Load a pico module by name, registering it for its dependents.
+
+    ``pico/`` is deliberately never put on ``sys.path``: the gitignored
+    ``pico/secrets.py`` would otherwise shadow the CPython stdlib ``secrets``
+    module for the whole CI process.
+    """
     spec = importlib.util.spec_from_file_location(name, PICO / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
+load("bambuddy_session")
+load("bambuddy_ws")
 config_module = load("bambuddy_config")
 web_module = load("web_ui")
 

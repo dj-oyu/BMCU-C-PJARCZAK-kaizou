@@ -159,7 +159,14 @@ button); values from different BMCUs are never combined.
 Telemetry HTTP endpoints are deliberately read-only. The write endpoints are
 the CSRF-protected Bambuddy commissioning configuration at
 `POST /api/bambuddy/config` and the guarded, CSRF-protected
-`POST /api/devices/<link-id>/soft-reset`. Telemetry endpoints are:
+`POST /api/devices/<link-id>/soft-reset`.
+
+`GET /api/bambuddy/config` reports `control_active` next to the stored
+`control_enabled` and `control_key_set`. The stored pair is intent; only
+`control_active` says whether a CONTROL gateway actually exists. Commissioning
+an `https://` or `http://` URL selects the NDJSON fallback, which carries no
+commands, so remote soft reset stays inert on those schemes no matter what is
+stored. Telemetry endpoints are:
 
 - `GET /api/devices` — the aggregate the local page polls: bridge ID, Wi-Fi,
   Bambuddy transport state, Pico runtime summary, and the full state plus

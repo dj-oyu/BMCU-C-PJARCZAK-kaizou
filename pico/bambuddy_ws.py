@@ -21,6 +21,9 @@ try:
 except ImportError:
     import os
 
+from bambuddy_session import (accepted_only_watermarks, enrich_rejected,
+                              hello_persisted_by_ack)
+
 
 _GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _WOULD_BLOCK = (11, 35, 57, 107, 115, 10035, 10057)
@@ -42,21 +45,25 @@ def ticks_add(value, delta):
     return time.ticks_add(value, delta) if hasattr(time, "ticks_add") else value + delta
 
 
-def parse_ws_url(url):
+DEFAULT_PORTS = {"ws": 80, "wss": 443, "http": 80, "https": 443}
+
+
+def parse_endpoint_url(url, schemes=("ws",)):
+    """Parse a bounded endpoint URL, rejecting header injection and userinfo."""
     if not isinstance(url, str) or "://" not in url:
-        raise ValueError("invalid WebSocket URL")
+        raise ValueError("invalid endpoint URL")
     if "\r" in url or "\n" in url:
-        raise ValueError("invalid characters in WebSocket URL")
+        raise ValueError("invalid characters in endpoint URL")
     scheme, rest = url.split("://", 1)
-    if scheme != "ws":
-        raise ValueError("only trusted-LAN ws:// is currently supported")
+    if scheme not in schemes:
+        raise ValueError("unsupported endpoint scheme: " + scheme)
     authority, slash, path = rest.partition("/")
     if not authority:
-        raise ValueError("WebSocket host is required")
+        raise ValueError("endpoint host is required")
     if "@" in authority:
         raise ValueError("userinfo is not allowed")
     host = authority
-    port = 80
+    port = DEFAULT_PORTS.get(scheme, 80)
     if authority.startswith("["):
         end = authority.find("]")
         if end < 0:
@@ -70,9 +77,13 @@ def parse_ws_url(url):
         host, port_text = authority.rsplit(":", 1)
         port = int(port_text)
     if not host or not 0 < port < 65536:
-        raise ValueError("invalid WebSocket endpoint")
+        raise ValueError("invalid endpoint")
     return {"scheme": scheme, "host": host, "port": port,
             "path": "/" + path if slash else "/"}
+
+
+def parse_ws_url(url):
+    return parse_endpoint_url(url, ("ws",))
 
 
 def _b64(data):
@@ -174,10 +185,13 @@ class BambuddyWebSocketClient:
 
     def __init__(self, outbox, url, token, firmware="unknown", capabilities=None,
                  batch_limit=16, ack_timeout_ms=10000, socket_factory=None,
-                 random_bytes=None, clock_us=None, control=None):
+                 random_bytes=None, clock_us=None, control=None,
+                 tls_ca=None, tls_insecure=False):
         self.outbox = outbox
         self.control = control
-        self.endpoint = parse_ws_url(url)
+        self.endpoint = parse_endpoint_url(url, ("ws", "wss"))
+        self.tls_ca = tls_ca
+        self.tls_insecure = tls_insecure
         self.token = token
         self.firmware = firmware
         self.capabilities = capabilities or []
@@ -202,11 +216,15 @@ class BambuddyWebSocketClient:
         self._backoff_index = 0
         self._retry_at = 0
 
-        self._resend_not_before = 0
+        # None (not 0) is the disarmed sentinel for every deadline below:
+        # ticks_add wraps into [0, 2**30) on MicroPython, so a deadline that
+        # legitimately lands on 0 would otherwise silently disable its guard.
+        self._resend_not_before = None
         self._hello_envelope = None
         self._hello_persisted = False
-        self._ping_at = 0
-        self._pong_deadline = 0
+        self._ping_at = None
+        self._pong_deadline = None
+        self._connect_deadline = None
 
     def _default_socket(self, host, port):
         address = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0][-1]
@@ -218,6 +236,13 @@ class BambuddyWebSocketClient:
             if not _would_block(exc):
                 sock.close()
                 raise
+        if self.endpoint["scheme"] == "wss":
+            from bambuddy_tls import wrap_tls
+            try:
+                return wrap_tls(sock, host, self.tls_ca, self.tls_insecure)
+            except Exception:
+                sock.close()
+                raise
         return sock
 
     def _request(self):
@@ -227,7 +252,7 @@ class BambuddyWebSocketClient:
         if self.token:
             target += separator + "token=" + _quote(self.token)
         host = endpoint["host"]
-        if endpoint["port"] != 80:
+        if endpoint["port"] != DEFAULT_PORTS.get(endpoint["scheme"], 80):
             host += ":" + str(endpoint["port"])
         lines = [
             "GET " + target + " HTTP/1.1",
@@ -241,12 +266,15 @@ class BambuddyWebSocketClient:
         ]
         return "\r\n".join(lines).encode()
 
-    def _connect(self):
+    def _connect(self, now_ms=0):
         self.sock = self.socket_factory(self.endpoint["host"], self.endpoint["port"])
         self._key = _b64(self.random_bytes(16))
         self._handshake_out = self._request()
         self._handshake_in = bytearray()
         self._parser = ServerFrameParser()
+        # A server that accepts TCP (or a TLS peer that never finishes its
+        # handshake) must not wedge the adapter in 'authenticate' forever.
+        self._connect_deadline = ticks_add(now_ms, 20000)
         self.state = "authenticate"
 
     def _close(self):
@@ -263,8 +291,9 @@ class BambuddyWebSocketClient:
         if self._hello_persisted:
             self._hello_envelope = None
             self._hello_persisted = False
-        self._ping_at = 0
-        self._pong_deadline = 0
+        self._ping_at = None
+        self._pong_deadline = None
+        self._connect_deadline = None
 
     def _fail(self, now_ms, reason):
         self.last_error = str(reason)
@@ -296,7 +325,10 @@ class BambuddyWebSocketClient:
                 return None
             raise
 
-    def _poll_handshake(self):
+    def _poll_handshake(self, now_ms=0):
+        if (self._connect_deadline is not None and
+                ticks_diff(now_ms, self._connect_deadline) >= 0):
+            raise OSError("Bambuddy connect timeout")
         if self._handshake_out:
             self._send_buffer = self._handshake_out
             self._handshake_out = b""
@@ -326,6 +358,7 @@ class BambuddyWebSocketClient:
         if fields.get("sec-websocket-accept") != websocket_accept(self._key):
             raise ValueError("invalid WebSocket accept")
         remainder = bytes(self._handshake_in[marker + 4:])
+        self._connect_deadline = None
         self.state = "online"
         if remainder:
             self._handle_frames(remainder)
@@ -356,45 +389,11 @@ class BambuddyWebSocketClient:
                                          mask=self.random_bytes(4))
 
     def _enrich_ack(self, message):
-        if self._inflight is None:
-            return message
-        enriched = dict(message)
-        rejected = []
-        for item in message.get("rejected", []):
-            candidate = dict(item)
-            index = candidate.get("index")
-            if isinstance(index, int) and 0 <= index < len(self._inflight):
-                link = self._inflight[index]["link"]
-                sent_sequence = link["transport_sequence"]
-                parsed_sequence = candidate.get("transport_sequence")
-                if parsed_sequence is None or parsed_sequence == sent_sequence:
-                    candidate["link_id"] = link["id"]
-                    candidate["pico_boot_session"] = link["pico_boot_session"]
-                    candidate["transport_sequence"] = sent_sequence
-            rejected.append(candidate)
-        enriched["rejected"] = rejected
-        return enriched
+        return enrich_rejected(message, self._inflight)
 
     def _accepted_watermarks(self, message):
-        """Adapt Bambuddy accepted-only ACKs into durable per-link watermarks."""
-        if (self._inflight is None or message.get("persisted") or message.get("rejected")):
-            return message
-        accepted = message.get("accepted")
-        if not isinstance(accepted, int) or accepted < len(self._inflight):
-            return message
-        watermarks = {}
-        for envelope in self._inflight:
-            link = envelope["link"]
-            key = (link["id"], link["pico_boot_session"])
-            sequence = link["transport_sequence"]
-            watermarks[key] = max(sequence, watermarks.get(key, -1))
-        adapted = dict(message)
-        adapted["persisted"] = [{
-            "link_id": key[0],
-            "pico_boot_session": key[1],
-            "transport_sequence": sequence,
-        } for key, sequence in watermarks.items()]
-        return adapted
+        return accepted_only_watermarks(message, self._inflight)
+
     def _handle_message(self, payload):
         message = json.loads(payload.decode())
         if message.get("type") == "error":
@@ -411,18 +410,9 @@ class BambuddyWebSocketClient:
             return
         hello_ack = (self._hello_envelope is not None and self._hello_sent and
                      not self._hello_acked)
-        if (hello_ack and message.get("accepted", 0) > 0 and
-                not message.get("rejected")):
+        if self._hello_envelope is not None and hello_persisted_by_ack(
+                message, self._hello_envelope["link"], hello_ack):
             self._hello_persisted = True
-        if self._hello_envelope is not None:
-            hello_link = self._hello_envelope["link"]
-            for item in message.get("persisted", []):
-                if (item.get("link_id") == hello_link["id"] and
-                        item.get("pico_boot_session") ==
-                        hello_link["pico_boot_session"] and
-                        item.get("transport_sequence", -1) >=
-                        hello_link["transport_sequence"]):
-                    self._hello_persisted = True
         if hello_ack:
             self._hello_acked = True
             self._hello_at = 0
@@ -432,7 +422,7 @@ class BambuddyWebSocketClient:
         if result["persisted"] == 0 and result["rejected"] == 0:
             self._resend_not_before = ticks_add(self._inflight_at, 1000)
         else:
-            self._resend_not_before = 0
+            self._resend_not_before = None
             # WebSocket/HELLO success alone does not prove telemetry health.
             # Reset retry backoff only after a batch makes durable progress.
             self._backoff_index = 0
@@ -468,13 +458,13 @@ class BambuddyWebSocketClient:
         if data:
             self._handle_frames(data)
             self._ping_at = ticks_add(now_ms, 30000)
-            self._pong_deadline = 0
+            self._pong_deadline = None
         if self._send_buffer:
             return
-        if (self._pong_deadline and
+        if (self._pong_deadline is not None and
                 ticks_diff(now_ms, self._pong_deadline) >= 0):
             raise OSError("WebSocket liveness timeout")
-        if not self._ping_at:
+        if self._ping_at is None:
             self._ping_at = ticks_add(now_ms, 30000)
         elif ticks_diff(now_ms, self._ping_at) >= 0:
             self._send_buffer = client_frame(
@@ -498,7 +488,7 @@ class BambuddyWebSocketClient:
             if ticks_diff(now_ms, self._inflight_at) >= self.ack_timeout_ms:
                 raise OSError("Bambuddy ACK timeout")
             return
-        if (self._resend_not_before and
+        if (self._resend_not_before is not None and
                 ticks_diff(now_ms, self._resend_not_before) < 0):
             return
         batch = self.outbox.queue.batch(self.batch_limit, now_ms)
@@ -520,13 +510,13 @@ class BambuddyWebSocketClient:
             if ticks_diff(now_ms, self._retry_at) < 0:
                 return
             try:
-                self._connect()
+                self._connect(now_ms)
             except Exception as exc:
                 self._fail(now_ms, exc)
                 return
         try:
             if self.state == "authenticate":
-                self._poll_handshake()
+                self._poll_handshake(now_ms)
             elif self.state == "online":
                 self._poll_online(now_ms)
         except Exception as exc:
