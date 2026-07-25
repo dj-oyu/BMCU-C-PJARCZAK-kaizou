@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import pathlib
 import sys
@@ -6,9 +7,18 @@ import unittest
 
 
 PICO_DIR = pathlib.Path(__file__).parents[1] / "pico"
-sys.path.insert(0, str(PICO_DIR))
 
-from runtime_log import PicoRuntimeLog, guarded_call
+# ``pico/`` is deliberately never put on ``sys.path``: the gitignored
+# ``pico/secrets.py`` would otherwise shadow the CPython stdlib ``secrets``
+# module for the whole CI process.
+_SPEC = importlib.util.spec_from_file_location(
+    "runtime_log", PICO_DIR / "runtime_log.py")
+runtime_log = importlib.util.module_from_spec(_SPEC)
+sys.modules["runtime_log"] = runtime_log
+_SPEC.loader.exec_module(runtime_log)
+
+PicoRuntimeLog = runtime_log.PicoRuntimeLog
+guarded_call = runtime_log.guarded_call
 
 
 class RuntimeLogTests(unittest.TestCase):

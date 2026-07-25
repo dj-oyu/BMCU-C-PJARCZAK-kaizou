@@ -1,21 +1,31 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PICO = ROOT / "pico"
 
 
 def load(name, path):
+    """Load a pico module by path, registering it for its dependents.
+
+    ``pico/`` is deliberately never put on ``sys.path``: the gitignored
+    ``pico/secrets.py`` would otherwise shadow the CPython stdlib ``secrets``
+    module for the whole CI process.
+    """
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-core = load("bambuddy_transport", ROOT / "pico" / "bambuddy_transport.py")
-ws = load("bambuddy_ws", ROOT / "pico" / "bambuddy_ws.py")
+core = load("bambuddy_transport", PICO / "bambuddy_transport.py")
+load("bambuddy_session", PICO / "bambuddy_session.py")
+ws = load("bambuddy_ws", PICO / "bambuddy_ws.py")
 
 
 def server_frame(payload, opcode=1):
@@ -161,6 +171,36 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(client.state, "backoff")
         self.assertIn("liveness", client.last_error)
 
+
+    def test_connect_deadline_landing_on_zero_still_fires(self):
+        # ticks_add wraps into [0, 2**30) on MicroPython, so 0 is a perfectly
+        # legal deadline. A falsy-zero sentinel would silently disarm the 20 s
+        # connect watchdog roughly once every 12.4 days of uptime.
+        fake = FakeSocket()
+        client = self.client(socket_factory=lambda _host, _port: fake)
+        client.poll(-20000, True)
+        self.assertEqual(client.state, "authenticate")
+        self.assertEqual(client._connect_deadline, 0)
+        client.poll(-1, True)
+        self.assertEqual(client.state, "authenticate")
+        client.poll(0, True)
+        self.assertEqual(client.state, "backoff")
+        self.assertIn("connect timeout", client.last_error)
+        self.assertTrue(fake.closed)
+
+    def test_pong_deadline_landing_on_zero_still_fires(self):
+        fake = FakeSocket()
+        client = self.client(socket_factory=lambda _host, _port: fake)
+        client.sock = fake
+        client.state = "online"
+        client._hello_sent = True
+        client._hello_acked = True
+        client._ping_at = -10000
+        client.poll(-10000, True)
+        self.assertEqual(client._pong_deadline, 0)
+        client.poll(0, True)
+        self.assertEqual(client.state, "backoff")
+        self.assertIn("liveness", client.last_error)
 
     def test_handshake_is_validated_and_token_is_only_in_request(self):
         key = ws._b64(self.random(16))

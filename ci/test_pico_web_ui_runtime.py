@@ -1,12 +1,25 @@
+import importlib.util
 import pathlib
 import sys
 import unittest
 
 
 PICO_DIR = pathlib.Path(__file__).parents[1] / "pico"
-sys.path.insert(0, str(PICO_DIR))
 
-from web_ui import PAGE, WebUI, _JsonChunks, _Response, _write_json
+# ``pico/`` is deliberately never put on ``sys.path``: the gitignored
+# ``pico/secrets.py`` would otherwise shadow the CPython stdlib ``secrets``
+# module for the whole CI process.
+_SPEC = importlib.util.spec_from_file_location(
+    "web_ui", PICO_DIR / "web_ui.py")
+web_ui = importlib.util.module_from_spec(_SPEC)
+sys.modules["web_ui"] = web_ui
+_SPEC.loader.exec_module(web_ui)
+
+PAGE = web_ui.PAGE
+WebUI = web_ui.WebUI
+_JsonChunks = web_ui._JsonChunks
+_Response = web_ui._Response
+_write_json = web_ui._write_json
 
 
 class RequestClient:
