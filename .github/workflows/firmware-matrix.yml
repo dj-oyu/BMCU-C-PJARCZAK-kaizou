@@ -4,14 +4,28 @@ on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/firmware-matrix.yml"
+      - "platformio.ini"
+      - "version"
+      - "src/**"
+      - "ci/firmware_matrix.json"
+      - "ci/firmware_matrix.py"
+      - "ci/test_firmware_matrix.py"
+      - "which_to_choose_*.txt"
   workflow_dispatch:
+    inputs:
+      release_label:
+        description: Optional label used in release asset filenames
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   group: firmware-matrix-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   plan:
@@ -68,7 +82,7 @@ jobs:
           name: firmware-shard-${{ matrix.profile }}-autoload${{ matrix.autoload }}-rgb${{ matrix.rgb }}
           path: dist/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
 
   package:
     needs: build
@@ -90,10 +104,16 @@ jobs:
           mkdir -p dist/guides
           cp which_to_choose_*.txt dist/guides/
           cp docs/FIRMWARE_BUILD_MATRIX.md dist/
-      - name: Upload complete firmware set
+      - name: Prepare release assets
+        run: >-
+          python ci/firmware_matrix.py package-release
+          --root dist
+          --output release-assets
+          --label "${{ inputs.release_label }}"
+      - name: Upload release-ready assets
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-all-${{ github.sha }}
-          path: dist/
+          name: release-ready-${{ github.sha }}
+          path: release-assets/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
