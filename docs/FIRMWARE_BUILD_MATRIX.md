@@ -3,8 +3,9 @@
 Status: canonical table for local and GitHub Actions builds
 
 The machine-readable source is [`ci/firmware_matrix.json`](../ci/firmware_matrix.json). The builder validates
-that table before compiling. A push to `main`, including a merged pull request, runs
-`.github/workflows/firmware-matrix.yml` and produces every supported binary.
+that table before compiling. A firmware-related push to `main`, including a merged pull request, runs
+`.github/workflows/firmware-matrix.yml` and produces every supported binary. Documentation-only and unrelated
+changes do not start the expensive full matrix. A manual run can supply an optional release filename label.
 
 ## Parameters
 
@@ -62,8 +63,20 @@ Each row is one parallel Actions job and produces 65 binaries.
 | **Total** | — | — | **780** |
 
 The workflow limits execution to six simultaneous jobs to reduce repeated toolchain downloads while retaining
-parallelism. Each shard is independently downloadable for diagnostics. After all shards pass, the package job
-downloads them, verifies every SHA-256/CRC32/size entry, and uploads one `firmware-all-<git-sha>` artifact.
+parallelism. A newer push cancels an obsolete in-progress matrix. Each shard is retained for one day for
+diagnostics. After all shards pass, the package job downloads them, verifies every SHA-256/CRC32/size entry,
+and uploads one `release-ready-<git-sha>` artifact, also retained for one day.
+
+The release-ready artifact contains nine files:
+
+- one ZIP with all 780 binaries;
+- one ZIP for each of the standard A1, high-force P1S, and soft-load A1 profiles;
+- JSON, CSV, and text manifests;
+- generated release notes;
+- `SHA256SUMS.txt` covering the other eight files.
+
+Download this short-lived Actions artifact and attach its files to a GitHub Release. Release assets are the
+long-term download location; generated binaries should not be committed to the repository.
 
 ## Artifact layout
 
@@ -108,4 +121,11 @@ Build all 780 supported variants locally:
 
 ```bash
 ./build_all_firmwares.sh firmware-build
+```
+
+Prepare the same release assets after a complete build:
+
+```bash
+python3 ci/firmware_matrix.py package-release \
+  --root firmware-build --output release-assets --label V10.5-custom
 ```

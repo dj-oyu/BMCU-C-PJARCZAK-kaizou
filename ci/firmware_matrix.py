@@ -9,14 +9,22 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import zipfile
 import zlib
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "ci" / "firmware_matrix.json"
+RELEASE_PROFILE_SLUGS = {
+    "standard": "standard-A1",
+    "high_force": "high-force-P1S",
+    "soft_load": "soft-load-A1",
+}
+ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 def load_config() -> dict:
@@ -199,6 +207,101 @@ def merge_manifests(root: Path) -> list[dict]:
     return entries
 
 
+def sanitize_release_label(value: str) -> str:
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    if not label:
+        raise SystemExit("release label must contain a letter, number, dot, underscore, or hyphen")
+    return label[:80]
+
+
+def default_release_label() -> str:
+    if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ.get("GITHUB_REF_NAME"):
+        return sanitize_release_label(os.environ["GITHUB_REF_NAME"])
+    sha = os.environ.get("GITHUB_SHA", "")
+    return f"main-{sha[:8]}" if sha else "local"
+
+
+def write_deterministic_zip(destination: Path, root: Path, files: list[Path]) -> None:
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+            relative = path.relative_to(root).as_posix()
+            info = zipfile.ZipInfo(relative, ZIP_TIMESTAMP)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+
+def package_release(root: Path, output: Path, label: str | None = None,
+                    expected_count: int | None = None) -> list[Path]:
+    root = root.resolve()
+    output = output.resolve()
+    entries = merge_manifests(root)
+    if expected_count is not None and len(entries) != expected_count:
+        raise SystemExit(f"expected {expected_count} firmware binaries, found {len(entries)}")
+    if output.exists() and any(output.iterdir()):
+        raise SystemExit(f"release output directory is not empty: {output}")
+    output.mkdir(parents=True, exist_ok=True)
+
+    release_label = sanitize_release_label(label) if label and label.strip() else default_release_label()
+    prefix = f"BMCU-firmware-{release_label}"
+    common_files = [
+        path for path in (
+            root / "manifest.json",
+            root / "manifest.csv",
+            root / "manifest.txt",
+            root / "FIRMWARE_BUILD_MATRIX.md",
+        ) if path.is_file()
+    ]
+    common_files.extend(path for path in (root / "guides").glob("*") if path.is_file())
+    firmware_files = [root / entry["path"] for entry in entries]
+
+    assets = []
+    all_zip = output / f"{prefix}-all.zip"
+    write_deterministic_zip(all_zip, root, firmware_files + common_files)
+    assets.append(all_zip)
+    for profile_id, profile_slug in RELEASE_PROFILE_SLUGS.items():
+        profile_files = [
+            root / entry["path"] for entry in entries if entry["profile"] == profile_id
+        ]
+        if not profile_files:
+            raise SystemExit(f"no firmware binaries found for release profile: {profile_id}")
+        destination = output / f"{prefix}-{profile_slug}.zip"
+        write_deterministic_zip(destination, root, profile_files + common_files[3:])
+        assets.append(destination)
+
+    for suffix in ("json", "csv", "txt"):
+        source = root / f"manifest.{suffix}"
+        destination = output / f"{prefix}-manifest.{suffix}"
+        shutil.copy2(source, destination)
+        assets.append(destination)
+
+    config = load_config()
+    commit = os.environ.get("GITHUB_SHA", "local build")
+    notes = output / f"{prefix}-release-notes.md"
+    distances = ", ".join(config["ams_retract_m"])
+    notes.write_text(
+        f"# BMCU firmware {release_label}\n\n"
+        f"- Source commit: `{commit}`\n"
+        f"- Firmware binaries: {len(entries)}\n"
+        f"- Load profiles: standard A1, high-force P1S, soft-load A1\n"
+        f"- AMS retraction distances (m): {distances}\n\n"
+        "Choose a load-profile ZIP, then select autoload, filament RGB, AMS address, "
+        "and retraction distance from its folder hierarchy. The `all` ZIP contains "
+        "every supported variant and the complete manifests.\n",
+        encoding="utf-8",
+    )
+    assets.append(notes)
+
+    checksums = output / f"{prefix}-SHA256SUMS.txt"
+    with checksums.open("w", encoding="utf-8", newline="\n") as stream:
+        for asset in sorted(assets, key=lambda item: item.name):
+            sha256, _, _ = file_metadata(asset)
+            stream.write(f"{sha256}  {asset.name}\n")
+    assets.append(checksums)
+    print(f"prepared {len(assets)} release assets in {output}")
+    return assets
+
+
 def build_all(config: dict, output: Path) -> None:
     for shard in matrix_shards(config):
         build_shard(config, shard["profile"], shard["autoload"], shard["rgb"], output)
@@ -236,6 +339,11 @@ def main() -> int:
     command = commands.add_parser("merge")
     command.add_argument("--root", type=Path, required=True)
 
+    command = commands.add_parser("package-release")
+    command.add_argument("--root", type=Path, required=True)
+    command.add_argument("--output", type=Path, required=True)
+    command.add_argument("--label")
+
     args = parser.parse_args()
     config = load_config()
     shards = matrix_shards(config)
@@ -253,6 +361,8 @@ def main() -> int:
         build_all(config, args.output)
     elif args.command == "merge":
         merge_manifests(args.root)
+    elif args.command == "package-release":
+        package_release(args.root, args.output, args.label, expected_count=variant_count)
     return 0
 
 
