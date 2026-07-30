@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from pathlib import Path
 import unittest
@@ -7,6 +8,23 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("pico_monitor_link", ROOT / "pico" / "bmcu_link.py")
 link = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(link)
+
+
+def load_device_state():
+    """Compile ``device_state`` out of ``pico/main.py`` in isolation.
+
+    ``pico/main.py`` cannot be imported on CPython (machine, network, …), but
+    the published device payload is a contract worth pinning, so the one
+    function is lifted from the module AST and executed on its own.
+    """
+    source = (ROOT / "pico" / "main.py").read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "device_state":
+            namespace = {"bridge_id": "bridge-test"}
+            module = ast.Module(body=[node], type_ignores=[])
+            exec(compile(module, "pico/main.py", "exec"), namespace)
+            return namespace["device_state"]
+    raise AssertionError("pico/main.py no longer defines device_state()")
 
 
 class FakeUART:
@@ -157,6 +175,68 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.printer_tx["tx_dma_error"], 18)
         self.assertEqual(self.monitor.printer_tx["tx_timeout"], 19)
         self.assertEqual(self.monitor.printer_tx["tx_no_response_expected"], 20)
+
+    def feed_ams_snapshot(self, snapshot_id=31, assert_atomic=False):
+        service = b"".join(value.to_bytes(4, "little")
+                           for value in (1500, 64000, 2000, 9000))
+        registration = (b"".join(value.to_bytes(2, "little")
+                                 for value in (11, 22, 33, 44, 55, 66, 77)) +
+                        bytes((0x1B, 0)))
+        records = ((link.FULL_RECORD_AMS_SERVICE, service),
+                   (link.FULL_RECORD_AMS_REGISTRATION, registration))
+        for index, (record_type, data) in enumerate(records):
+            payload = (snapshot_id.to_bytes(2, "little") + bytes((
+                index, len(records), record_type, 0)) +
+                (400).to_bytes(4, "little") + data)
+            self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2, payload), 250)
+            if assert_atomic and index == 0:
+                self.assertIsNone(self.monitor.ams_service)
+                self.assertIsNone(self.monitor.ams_registration)
+
+    def test_ams_service_records_are_installed_with_a_complete_snapshot(self):
+        self.hello()
+        self.feed_ams_snapshot(assert_atomic=True)
+        self.assertEqual(self.monitor.ams_service, {
+            "gap_now_ms": 1500, "gap_max_ms": 64000,
+            "gap_max_since_confirm_ms": 2000, "ms_since_confirm": 9000,
+        })
+        installed = self.monitor.ams_registration
+        self.assertEqual((installed["count_motion"], installed["count_stu_motion"],
+                          installed["count_mc_online"]), (11, 22, 33))
+        self.assertEqual((installed["registration_query_count"],
+                          installed["would_reoffer_count"]), (44, 55))
+        self.assertEqual((installed["confirm_count"], installed["reset_count"],
+                          installed["flags"]), (66, 77, 0x1B))
+        self.assertTrue(installed["registered"])
+        self.assertTrue(installed["confirm_settled"])
+        self.assertFalse(installed["service_stale"])
+        self.assertTrue(installed["reoffer_armed"])
+        self.assertTrue(installed["have_service"])
+
+    def test_ams_families_are_cleared_by_an_ams_less_snapshot(self):
+        # A snapshot without the AMS records means the firmware did not report
+        # them; serving the previous snapshot's numbers would hand the operator
+        # stale values on exactly the lines the 409D runbook reads.
+        self.hello()
+        self.feed_ams_snapshot()
+        self.assertIsNotNone(self.monitor.ams_service)
+        self.assertIsNotNone(self.monitor.ams_registration)
+        self.monitor._handle_frame(frame(link.FULL_STATUS_RECORD, 2,
+                                         snapshot_payload(32, 0, 1)), 260)
+        self.assertTrue(self.monitor.snapshot)
+        self.assertIsNone(self.monitor.ams_service)
+        self.assertIsNone(self.monitor.ams_registration)
+
+    def test_device_state_publishes_the_decoded_ams_families(self):
+        self.hello()
+        self.feed_ams_snapshot()
+        state = load_device_state()(self.monitor)
+        self.assertIn("ams_service", state)
+        self.assertIn("ams_registration", state)
+        self.assertEqual(state["ams_service"], self.monitor.ams_service)
+        self.assertEqual(state["ams_registration"], self.monitor.ams_registration)
+        self.assertEqual(state["ams_service"]["gap_max_ms"], 64000)
+        self.assertEqual(state["ams_registration"]["registration_query_count"], 44)
 
     def test_soft_reset_guard_requires_complete_idle_snapshot(self):
         self.assertEqual(self.monitor.soft_reset_guard_error(),

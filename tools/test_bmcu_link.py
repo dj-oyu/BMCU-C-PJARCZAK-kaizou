@@ -39,6 +39,22 @@ class T(unittest.TestCase):
   event=EventRecord(99,RecordType.PRINTER_LONG_TRANSACTION,RecordSeverity.WARNING,RecordSource.PRINTER_BUS,8,data)
   r=decode_printer_long_transaction(event)
   self.assertEqual((r.frame_type,r.request_length,r.response_length,r.payload_hash),(0x040e,17,0,0x6b))
+ def test_ams_service_gap(self):
+  data=(1500).to_bytes(4,'little')+(64000).to_bytes(4,'little')+(2000).to_bytes(4,'little')+(9000).to_bytes(4,'little')
+  r=decode_ams_service_gap(data)
+  self.assertEqual((r.gap_now_ms,r.gap_max_ms,r.gap_max_since_confirm_ms,r.ms_since_confirm),(1500,64000,2000,9000))
+ def test_ams_registration(self):
+  data=b''.join(v.to_bytes(2,'little') for v in (11,22,33,44,55,66,77))+bytes([0x1B,0])
+  r=decode_ams_registration(data)
+  self.assertEqual((r.count_motion,r.count_stu_motion,r.count_mc_online),(11,22,33))
+  self.assertEqual((r.registration_query_count,r.would_reoffer_count),(44,55))
+  self.assertEqual((r.confirm_count,r.reset_count,r.flags),(66,77,0x1B))
+  self.assertTrue(r.registered); self.assertTrue(r.confirm_settled)
+  self.assertFalse(r.service_stale)
+  self.assertTrue(r.reoffer_armed); self.assertTrue(r.have_service)
+ def test_rejects_bad_ams_record_length(self):
+  with self.assertRaises(LinkError): decode_ams_service_gap(bytes(15))
+  with self.assertRaises(LinkError): decode_ams_registration(bytes(17))
  def test_rejects_bad_record_bounds(self):
   with self.assertRaises(LinkError): decode_full_status_record(b'\x00'*26)
 if __name__=='__main__': unittest.main()

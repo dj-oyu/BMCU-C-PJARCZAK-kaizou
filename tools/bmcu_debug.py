@@ -313,6 +313,30 @@ def format_full_status_record(record):
         overrun, wraps, max_pending, compat_copy = struct.unpack("<IIII", data)
         return (f"PRINTER_RX_DMA overrun={overrun} wraps={wraps} "
                 f"max_pending={max_pending} compat_copy={compat_copy}")
+    if record.record_type == FULL_RECORD_PRINTER_TX_CORE:
+        started, completed, response_busy, response_missing = struct.unpack("<IIII", data)
+        return (f"PRINTER_TX started={started} completed={completed} "
+                f"response_busy={response_busy} response_missing={response_missing}")
+    if record.record_type == FULL_RECORD_PRINTER_TX_FAULT:
+        invalid_length, dma_error, timeout, no_response = struct.unpack("<IIII", data)
+        return (f"PRINTER_TX_FAULT invalid_length={invalid_length} dma_error={dma_error} "
+                f"timeout={timeout} no_response_expected={no_response}")
+    if record.record_type == FULL_RECORD_AMS_SERVICE:
+        gap = decode_ams_service_gap(data)
+        return (f"AMS_SERVICE gap_now_ms={gap.gap_now_ms} gap_max_ms={gap.gap_max_ms} "
+                f"gap_max_since_confirm_ms={gap.gap_max_since_confirm_ms} "
+                f"ms_since_confirm={gap.ms_since_confirm}")
+    if record.record_type == FULL_RECORD_AMS_REGISTRATION:
+        reg = decode_ams_registration(data)
+        return (
+            f"AMS_REG motion={reg.count_motion} stu={reg.count_stu_motion} "
+            f"mc_online={reg.count_mc_online} queries={reg.registration_query_count} "
+            f"would_reoffer={reg.would_reoffer_count} confirms={reg.confirm_count} "
+            f"resets={reg.reset_count} flags=0x{reg.flags:02X} "
+            f"registered={int(reg.registered)} confirm_settled={int(reg.confirm_settled)} "
+            f"stale={int(reg.service_stale)} armed={int(reg.reoffer_armed)} "
+            f"have_service={int(reg.have_service)}"
+        )
     if record.record_type == FULL_RECORD_COUNTERS:
         tx_drop, rx_drop, crc_error, frame_error = struct.unpack("<IIII", data)
         return (

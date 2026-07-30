@@ -46,7 +46,9 @@
       "7": "printer_rx_loss",
       "8": "printer_rx_dma",
       "9": "printer_tx_core",
-      "10": "printer_tx_fault"
+      "10": "printer_tx_fault",
+      "11": "ams_service",
+      "12": "ams_registration"
     },
     "ack_result": {
       "0": "ok",
@@ -120,6 +122,10 @@
       "8": "diagnostic_counter",
       "9": "printer_long_transaction",
       "10": "reset_state"
+    },
+    "diag_counter": {
+      "1": "ams_service_gap_ms",
+      "2": "ams_would_reoffer"
     },
     "reset_state": {
       "1": "scheduled",

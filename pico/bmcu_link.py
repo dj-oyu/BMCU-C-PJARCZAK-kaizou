@@ -33,6 +33,8 @@ FULL_RECORD_PRINTER_RX_LOSS = 7
 FULL_RECORD_PRINTER_RX_DMA = 8
 FULL_RECORD_PRINTER_TX_CORE = 9
 FULL_RECORD_PRINTER_TX_FAULT = 10
+FULL_RECORD_AMS_SERVICE = 11
+FULL_RECORD_AMS_REGISTRATION = 12
 RECORD_PRINTER_LONG_TRANSACTION = 9
 RECORD_RESET_STATE = 10
 
@@ -146,6 +148,8 @@ class BMCUMonitor:
         self.printer_auth = None
         self.printer_rx = None
         self.printer_tx = None
+        self.ams_service = None
+        self.ams_registration = None
         self.soft_reset = None
         self._snapshot_parts = None
         self._snapshot_count = 0
@@ -260,6 +264,8 @@ class BMCUMonitor:
         self.printer_auth = None
         self.printer_rx = None
         self.printer_tx = None
+        self.ams_service = None
+        self.ams_registration = None
         self._snapshot_parts = None
         self._snapshot_id = None
         self._snapshot_count = 0
@@ -347,6 +353,8 @@ class BMCUMonitor:
             self.printer_auth = None
             self.printer_rx = None
             self.printer_tx = None
+            self.ams_service = None
+            self.ams_registration = None
             self._snapshot_parts = None
             self._snapshot_retries = 0
             self.link_state = "resyncing"
@@ -535,6 +543,30 @@ class BMCUMonitor:
                 "tx_timeout": _u32(record_data, 8),
                 "tx_no_response_expected": _u32(record_data, 12),
             }
+        if record_type == FULL_RECORD_AMS_SERVICE:
+            message["ams_service_data"] = {
+                "gap_now_ms": _u32(record_data, 0),
+                "gap_max_ms": _u32(record_data, 4),
+                "gap_max_since_confirm_ms": _u32(record_data, 8),
+                "ms_since_confirm": _u32(record_data, 12),
+            }
+        if record_type == FULL_RECORD_AMS_REGISTRATION:
+            flags = record_data[14]
+            message["ams_registration_data"] = {
+                "count_motion": _u16(record_data, 0),
+                "count_stu_motion": _u16(record_data, 2),
+                "count_mc_online": _u16(record_data, 4),
+                "registration_query_count": _u16(record_data, 6),
+                "would_reoffer_count": _u16(record_data, 8),
+                "confirm_count": _u16(record_data, 10),
+                "reset_count": _u16(record_data, 12),
+                "flags": flags,
+                "registered": bool(flags & (1 << 0)),
+                "confirm_settled": bool(flags & (1 << 1)),
+                "service_stale": bool(flags & (1 << 2)),
+                "reoffer_armed": bool(flags & (1 << 3)),
+                "have_service": bool(flags & (1 << 4)),
+            }
         if count == 0 or index >= count:
             message["snapshot_error"] = "invalid_index"
             self._snapshot_parts = None
@@ -565,6 +597,8 @@ class BMCUMonitor:
             printer_auth = None
             printer_rx = {}
             printer_tx = {}
+            ams_service = None
+            ams_registration = None
             self._snapshot_deadline_ms = None
             self._snapshot_retry_ms = None
             self._snapshot_retries = 0
@@ -583,8 +617,14 @@ class BMCUMonitor:
                 tx_data = part.get("printer_tx_data")
                 if tx_data is not None:
                     printer_tx.update(tx_data)
+                if part.get("ams_service_data") is not None:
+                    ams_service = part["ams_service_data"]
+                if part.get("ams_registration_data") is not None:
+                    ams_registration = part["ams_registration_data"]
             self.channels = channels
             self.printer_auth = printer_auth
             self.printer_rx = printer_rx or None
             self.printer_tx = printer_tx or None
+            self.ams_service = ams_service
+            self.ams_registration = ams_registration
             message["snapshot_complete"] = True

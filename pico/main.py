@@ -269,6 +269,8 @@ def device_state(monitor):
         "printer_tx": monitor.printer_tx,
         "soft_reset": monitor.soft_reset,
         "sensors": monitor.sensors,
+        "ams_service": monitor.ams_service,
+        "ams_registration": monitor.ams_registration,
         "decoder_crc_errors": monitor.decoder.crc_errors,
         "decoder_frame_errors": monitor.decoder.frame_errors,
     }

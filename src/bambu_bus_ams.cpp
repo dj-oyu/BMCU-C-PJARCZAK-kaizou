@@ -8,6 +8,7 @@
 #include "crc_bus.h"
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "bmcu_ams_service_watch.h"
 #include "printer_bus_result.h"
 #include "Motion_control.h"
 
@@ -114,6 +115,7 @@ static inline void online_detect_reset(void)
     have_registered = false;
     online_detect_prefix_now = 0x0Cu;
     online_detect_phase = 0u;
+    bmcu_link_ams_registration_reset();
 }
 
 bambubus_package_type get_packge_type(unsigned char *buf, int length)
@@ -582,6 +584,12 @@ static uint8_t before_on_use_sniff_7f_channel = 0xFFu;
 
 void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
 {
+    // Observe-only: counted on address match alone, before the TX-busy guard and
+    // before the online/set_motion filters, so our own state can never fabricate
+    // apparent printer silence. See docs/HMS_0500_409D_CAPTURE_RUNBOOK.md.
+    if (package_recv->ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+        bmcu_link_ams_service_frame(bmcu_ams_service::kServiceMotion);
+
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();
 
@@ -759,6 +767,10 @@ static const bambubus_ams_stu_motion_package_struct _bambubus_ams_stu_motion_pac
 };
 void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_recv)
 {
+    // Observe-only; same placement rationale as get_package_motion.
+    if (package_recv->ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+        bmcu_link_ams_service_frame(bmcu_ams_service::kServiceStuMotion);
+
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();
 
@@ -872,6 +884,10 @@ static inline void online_detect_build_packet(const uint8_t ams_num, const uint8
 bool get_package_online_detect(unsigned char *buf, int length)
 {
     (void)length;
+    // Observe-only: every registration query the printer emits is counted, including
+    // the ones the have_registered latch below answers with silence.
+    if (buf[5] == 0x00u) bmcu_link_ams_registration_query();
+
     if (bus_port_to_host.send_data_len != 0) return true;
 
     const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
@@ -917,6 +933,7 @@ bool get_package_online_detect(unsigned char *buf, int length)
 
     have_registered = true;
     online_detect_phase = 3u;
+    bmcu_link_ams_registration_confirm(); // observe-only
 
     uint8_t *out = bus_port_to_host.tx_build_buf();
     memcpy(out, online_detect_res, 29);
@@ -930,6 +947,10 @@ void get_package_long_packge_MC_online(unsigned char *buf, int length)
     (void)length;
 
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+
+    // Observe-only; same placement rationale as get_package_motion.
+    if (printer_data_long.data_length >= 1u && printer_data_long.datas[0] == fixed_ams_num)
+        bmcu_link_ams_service_frame(bmcu_ams_service::kServiceMcOnline);
 
     if (printer_data_long.data_length < 1u) return;
     if (!ams[bambubus_ams_map[fixed_ams_num]].online) return;
@@ -1225,6 +1246,9 @@ bambubus_package_type bambubus_run()
 
     static uint32_t last_hb_deadline = 0u;
     const uint32_t now = time_ticks32();
+    // Observe-only: keeps the poll cadence far below the ~238 s SysTick wrap even
+    // during total printer silence, which is exactly the case being measured.
+    bmcu_link_ams_service_poll();
 
     int rx_len = 0;
     _bus_data_type t = _bus_data_type::none;

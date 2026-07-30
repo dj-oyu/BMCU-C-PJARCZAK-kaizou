@@ -8,6 +8,9 @@ CAP_STATUS_EVENTS=1<<0; CAP_LED_OVERRIDE=1<<1; CAP_PING_PONG=1<<2; CAP_RAW_HW_TI
 FULL_SECTION_GLOBAL=1<<0; FULL_SECTION_CHANNELS=1<<1; FULL_SECTION_PRINTER_BUS=1<<2; FULL_SECTION_COUNTERS=1<<3; FULL_SECTION_ALL=0x0f
 FULL_RECORD_GLOBAL=1; FULL_RECORD_CHANNEL=2; FULL_RECORD_PRINTER_BUS=3; FULL_RECORD_COUNTERS=4; FULL_RECORD_PRINTER_AUTH=5
 FULL_RECORD_PRINTER_RX_CORE=6; FULL_RECORD_PRINTER_RX_LOSS=7; FULL_RECORD_PRINTER_RX_DMA=8
+FULL_RECORD_PRINTER_TX_CORE=9; FULL_RECORD_PRINTER_TX_FAULT=10
+FULL_RECORD_AMS_SERVICE=11; FULL_RECORD_AMS_REGISTRATION=12
+DIAG_COUNTER_AMS_SERVICE_GAP_MS=1; DIAG_COUNTER_AMS_WOULD_REOFFER=2
 ACK_OK=0; ACK_BAD_VALUE=1; ACK_UNSUPPORTED=2; ACK_BUSY=3; ACK_BAD_STATE=4; ACK_DENIED=5; ACK_EXPIRED=6; ACK_DUPLICATE=7; ACK_INTERNAL=8
 class RecordType(IntEnum):
  BOOT=1; PRINTER_LINK=2; PRINTER_TRANSACTION=3; STATE_CHANGE=4; SENSOR=5; COMMAND_RESULT=6; SAFETY_DECISION=7; DIAGNOSTIC_COUNTER=8; PRINTER_LONG_TRANSACTION=9
@@ -29,6 +32,21 @@ class EventRecord: hw_tick32:int; record_type:int; severity:int; source:int; pay
 class PrinterAuthTrace: last_type:int; count_040d:int; count_040e:int; payload_length:int; hw_tick32:int; outcome:int; reason:int; response_length:int; payload_hash:int
 @dataclass(frozen=True)
 class PrinterLongTransaction: frame_type:int; owner:int; outcome:int; reason:int; request_length:int; response_length:int; payload_hash:int
+@dataclass(frozen=True)
+class AmsServiceGap: gap_now_ms:int; gap_max_ms:int; gap_max_since_confirm_ms:int; ms_since_confirm:int
+@dataclass(frozen=True)
+class AmsRegistration:
+ count_motion:int; count_stu_motion:int; count_mc_online:int; registration_query_count:int; would_reoffer_count:int; confirm_count:int; reset_count:int; flags:int
+ @property
+ def registered(self): return bool(self.flags&(1<<0))
+ @property
+ def confirm_settled(self): return bool(self.flags&(1<<1))
+ @property
+ def service_stale(self): return bool(self.flags&(1<<2))
+ @property
+ def reoffer_armed(self): return bool(self.flags&(1<<3))
+ @property
+ def have_service(self): return bool(self.flags&(1<<4))
 def crc16_ccitt_false(data):
  c=0xffff
  for v in data:
@@ -63,6 +81,13 @@ def decode_printer_auth_trace(data):
  if len(data)!=16: raise LinkError('PRINTER_AUTH record data must be 16 bytes')
  frame_type,count_040d,count_040e,payload_length,hw_tick32,outcome,reason,response_length,payload_hash=struct.unpack('<HHHHIBBBB',data)
  return PrinterAuthTrace(frame_type,count_040d,count_040e,payload_length,hw_tick32,outcome,reason,response_length,payload_hash)
+def decode_ams_service_gap(data):
+ if len(data)!=16: raise LinkError('AMS_SERVICE record data must be 16 bytes')
+ return AmsServiceGap(*struct.unpack('<IIII',data))
+def decode_ams_registration(data):
+ if len(data)!=16: raise LinkError('AMS_REGISTRATION record data must be 16 bytes')
+ motion,stu,mc,queries,would,confirms,resets,flags,_reserved=struct.unpack('<HHHHHHHBB',data)
+ return AmsRegistration(motion,stu,mc,queries,would,confirms,resets,flags)
 def decode_printer_long_transaction(event):
  if event.record_type!=RecordType.PRINTER_LONG_TRANSACTION or event.payload_length!=8: raise LinkError('event is not a PRINTER_LONG_TRANSACTION')
  frame_type,owner,outcome,reason,request_length,response_length,payload_hash=struct.unpack('<HBBBBBB',event.data)
