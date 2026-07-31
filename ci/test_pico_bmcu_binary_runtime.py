@@ -408,6 +408,21 @@ class TCPClientTests(unittest.TestCase):
         client.poll(now[0])
         self.assertEqual(client.state, tcp.BACKOFF)
 
+    def test_device_key_update_reconnects_without_reboot(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
+            ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+
+        client.set_device_key(b"n" * 32, 123)
+
+        self.assertEqual(client.device_key, b"n" * 32)
+        self.assertEqual(client.state, tcp.BACKOFF)
+        self.assertEqual(client.last_error, "device key updated")
+        with self.assertRaises(ValueError):
+            client.set_device_key(b"short", 124)
+
     def test_disconnect_discards_session_bound_control_result(self):
         client = tcp.BMB1TCPClient(
             BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",

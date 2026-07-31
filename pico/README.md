@@ -14,8 +14,8 @@ Copy `config_example.py` to `config.py` and configure:
 - `UART_RXBUF` for per-link receive headroom (4096 bytes by default);
 - `BMCU_BINARY_HOST` and `BMCU_BINARY_PORT`;
 - `BMCU_BINARY_DEVICE_ID`;
-- `BMCU_BINARY_DEVICE_KEY`, a provisioned 256-bit key encoded as 64 hex
-  characters;
+- `BMCU_BINARY_DEVICE_KEY`, an optional bootstrap 256-bit key encoded as 64 hex
+  characters (the local UI can provision or replace it);
 - journal and queue sizes when the defaults are unsuitable.
 
 Wi-Fi credentials remain in separately provisioned `secrets.py`.
@@ -42,6 +42,13 @@ The root page is static and fetches binary snapshots/deltas:
 - `/api/logs.bin`
 
 JavaScript performs BMB1 and TLV decoding with `DataView`.
+
+The **Device authentication** card can generate a cryptographically random
+256-bit key, copy it once for Bambuddy, accept an existing 64-hex-character
+key, and persist it without rebooting. The saved key is write-only: the read
+API exposes only configured state and a 48-bit SHA-256 fingerprint. Mutation
+requires a non-simple content type and action header so a cross-origin form
+cannot silently replace the key. The UI is intended only for a trusted LAN.
 
 ## Deployment and tests
 

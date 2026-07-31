@@ -3,10 +3,7 @@
 import gc
 import machine
 import time
-try:
-    import ubinascii as binascii
-except ImportError:
-    import binascii
+
 try:
     import uos as os
 except ImportError:
@@ -19,6 +16,7 @@ from bambuddy_binary_tcp import BMB1TCPClient
 from bmcu_binary_outbox import BMB1Outbox
 from bmcu_journal import BMJ1Journal, JournalReplayCursor
 from bmcu_link import BMCUMonitor, drain_monitors
+from device_key_store import DeviceKeyAPI, DeviceKeyStore
 from device_metrics import DeviceMetrics
 from runtime_log import PicoRuntimeLog
 from web_ui import WebUI
@@ -121,6 +119,14 @@ for link_index, item in enumerate(link_configs):
         uart, link_id=item["id"], link_index=link_index,
         on_valid_frame=enqueue_raw_metric, uart_capacity=rxbuf))
 
+# A blocking Wi-Fi stack call can span more than 100 ms. Reserve enough work
+# to drain two full-rate UARTs on the following loop while retaining fairness.
+uart_drain_budget = max(
+    int(getattr(config, "BMCU_UART_DRAIN_BUDGET", 4096)),
+    2048 * len(monitors))
+uart_drain_chunk = max(
+    int(getattr(config, "BMCU_UART_DRAIN_CHUNK", 512)), 256)
+
 
 def binary_control(link_index, command, arguments):
     if command != C.CONTROL_SOFT_RESET or link_index >= len(monitors):
@@ -135,14 +141,14 @@ def binary_control(link_index, command, arguments):
     return b"accepted"
 
 
-key_hex = getattr(config, "BMCU_BINARY_DEVICE_KEY", "")
-if len(key_hex) != 64:
-    raise ValueError("BMCU_BINARY_DEVICE_KEY must be 64 hex characters")
+key_store = DeviceKeyStore(getattr(config, "BMCU_BINARY_DEVICE_KEY", ""))
+if key_store.load_error:
+    runtime_log.warning("settings", key_store.load_error)
 client = BMB1TCPClient(
     outbox, getattr(config, "BMCU_BINARY_HOST", ""),
     int(getattr(config, "BMCU_BINARY_PORT", 8766)),
     getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
-    binascii.unhexlify(key_hex),
+    key_store.key if key_store.configured else bytes(32),
     getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
     tuple((index, item["id"].encode())
           for index, item in enumerate(link_configs)),
@@ -150,6 +156,15 @@ client = BMB1TCPClient(
     clock_us=monotonic_us.now,
     send_metric=metrics.observe_transport_send,
     ticks_diff=time.ticks_diff, ticks_add=time.ticks_add)
+
+
+def apply_device_key(key):
+    client.set_device_key(key, time.ticks_ms())
+
+
+key_api = DeviceKeyAPI(
+    key_store, apply_device_key,
+    on_update=lambda: runtime_log.info("settings", "device key updated"))
 
 
 def wifi_event(message):
@@ -215,7 +230,8 @@ def binary_api(path):
 web = WebUI(
     binary_api, getattr(config, "WEB_PORT", 80),
     error_handler=lambda component, error:
-        runtime_log.exception("web." + component, error))
+        runtime_log.exception("web." + component, error),
+    settings_provider=key_api.handle)
 wifi.start(time.ticks_ms())
 web.start()
 
@@ -239,9 +255,7 @@ def service_once(now_ms):
     last_loop_us = current_us
     try:
         next_uart_index, _ = drain_monitors(
-            monitors, now_ms,
-            getattr(config, "BMCU_UART_DRAIN_BUDGET", 1024),
-            getattr(config, "BMCU_UART_DRAIN_CHUNK", 128),
+            monitors, now_ms, uart_drain_budget, uart_drain_chunk,
             next_uart_index)
     except Exception as error:
         record_exception("bmcu.drain", error)
@@ -249,10 +263,11 @@ def service_once(now_ms):
         wifi.poll(now_ms)
     except Exception as error:
         record_exception("wifi.poll", error)
-    try:
-        client.poll(now_ms, wifi.state == "online")
-    except Exception as error:
-        record_exception("bambuddy.binary", error)
+    if key_store.configured:
+        try:
+            client.poll(now_ms, wifi.state == "online")
+        except Exception as error:
+            record_exception("bambuddy.binary", error)
     uart_idle = not any(monitor.uart.any() for monitor in monitors)
     if uart_idle:
         try:

@@ -310,6 +310,17 @@ class BMB1TCPClient:
         self.state = CHALLENGE_WAIT
         self.state_deadline_ms = self.ticks_add(self.clock_ms(), 5000)
 
+    def set_device_key(self, device_key, now_ms):
+        """Replace the authentication key and reconnect without a reboot."""
+        if len(device_key) != 32:
+            raise ValueError("device key must be 32 bytes")
+        self.device_key = bytes(device_key)
+        if self.sock is not None:
+            self._close(now_ms, "device key updated")
+        else:
+            self.state = WIFI_WAIT
+            self.next_action_ms = 0
+
     def poll(self, now_ms, wifi_online=True):
         if not wifi_online:
             if self.sock is not None:

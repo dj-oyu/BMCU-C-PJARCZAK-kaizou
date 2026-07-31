@@ -8,6 +8,8 @@ except ImportError:
     import uerrno as errno
 
 MAX_REQUEST_BYTES = 2048
+MAX_BODY_BYTES = 256
+MAX_SEND_BYTES = 256
 BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
 
 
@@ -24,11 +26,11 @@ PAGE = b"""<!doctype html>
 <title>Dual BMCU Loader Monitor</title>
 <style>
 :root{color-scheme:dark;--bg:#081019;--panel:#111d2b;--panel2:#17263a;--line:#29415c;--text:#edf6ff;--muted:#91a6bb;--a:#54c8ff;--b:#b88cff;--ok:#47d7a0;--warn:#ffc75a;--bad:#ff6f7d}
-*{box-sizing:border-box}body{max-width:1180px;margin:auto;padding:20px;font:14px/1.45 system-ui;background:radial-gradient(circle at top,#10233a 0,var(--bg) 42%);color:var(--text)}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:24px}.kicker{margin:0;color:var(--a);font-size:.72rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase}h1{margin:.15rem 0;font-size:clamp(1.6rem,4vw,2.5rem)}h2{margin:24px 0 10px;font-size:1rem;color:#c9d9e8;text-transform:uppercase;letter-spacing:.08em}h3{margin:0;font-size:1.15rem}.muted{color:var(--muted)}.badge,.pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;background:#0c1724;font-size:.76rem;font-weight:700}.ok{color:var(--ok);border-color:#26785d}.warn{color:var(--warn);border-color:#816624}.bad{color:var(--bad);border-color:#813543}.loaders{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.loader{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,var(--panel2),var(--panel));padding:16px;box-shadow:0 18px 48px #0005}.loader:before{content:'';position:absolute;inset:0 auto 0 0;width:4px;background:var(--accent)}.loader-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:13px}.loader-name{display:flex;align-items:center;gap:8px}.dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent)}.summary-grid,.comm-grid,.bridge-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.summary-grid{margin-bottom:12px}.metric{min-width:0;border:1px solid #233a53;border-radius:10px;background:#0d1825;padding:9px}.metric span{display:block;color:var(--muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em}.metric strong{display:block;overflow:hidden;text-overflow:ellipsis;font-size:1rem;margin-top:2px}.slots{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.slot{border:1px solid #29415c;border-radius:12px;background:#0d1825;padding:10px;min-height:118px}.slot.selected{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}.slot.offline{opacity:.58}.slot-title{display:flex;justify-content:space-between;font-weight:750;margin-bottom:7px}.slot dl{display:grid;grid-template-columns:auto 1fr;gap:3px 7px;margin:0}.slot dt{color:var(--muted)}.slot dd{margin:0;text-align:right}.comm-grid{margin-top:12px}.bridge-grid{grid-template-columns:repeat(4,minmax(130px,1fr))}pre{max-height:230px;overflow:auto;white-space:pre-wrap;border:1px solid var(--line);border-radius:12px;background:#07101a;padding:12px;color:#b9cbe0;font-size:.75rem}.empty{border:1px dashed var(--line);border-radius:12px;padding:24px;text-align:center;color:var(--muted)}
+*{box-sizing:border-box}body{max-width:1180px;margin:auto;padding:20px;font:14px/1.45 system-ui;background:radial-gradient(circle at top,#10233a 0,var(--bg) 42%);color:var(--text)}header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:24px}.kicker{margin:0;color:var(--a);font-size:.72rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase}h1{margin:.15rem 0;font-size:clamp(1.6rem,4vw,2.5rem)}h2{margin:24px 0 10px;font-size:1rem;color:#c9d9e8;text-transform:uppercase;letter-spacing:.08em}h3{margin:0;font-size:1.15rem}.muted{color:var(--muted)}.badge,.pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:.35rem .65rem;background:#0c1724;font-size:.76rem;font-weight:700}.ok{color:var(--ok);border-color:#26785d}.warn{color:var(--warn);border-color:#816624}.bad{color:var(--bad);border-color:#813543}.loaders{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.loader{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,var(--panel2),var(--panel));padding:16px;box-shadow:0 18px 48px #0005}.loader:before{content:'';position:absolute;inset:0 auto 0 0;width:4px;background:var(--accent)}.loader-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:13px}.loader-name{display:flex;align-items:center;gap:8px}.dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent)}.summary-grid,.comm-grid,.bridge-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.summary-grid{margin-bottom:12px}.metric{min-width:0;border:1px solid #233a53;border-radius:10px;background:#0d1825;padding:9px}.metric span{display:block;color:var(--muted);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em}.metric strong{display:block;overflow:hidden;text-overflow:ellipsis;font-size:1rem;margin-top:2px}.slots{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.slot{border:1px solid #29415c;border-radius:12px;background:#0d1825;padding:10px;min-height:118px}.slot.selected{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}.slot.offline{opacity:.58}.slot-title{display:flex;justify-content:space-between;font-weight:750;margin-bottom:7px}.slot dl{display:grid;grid-template-columns:auto 1fr;gap:3px 7px;margin:0}.slot dt{color:var(--muted)}.slot dd{margin:0;text-align:right}.comm-grid{margin-top:12px}.bridge-grid{grid-template-columns:repeat(4,minmax(130px,1fr))}pre{max-height:230px;overflow:auto;white-space:pre-wrap;border:1px solid var(--line);border-radius:12px;background:#07101a;padding:12px;color:#b9cbe0;font-size:.75rem}.empty{border:1px dashed var(--line);border-radius:12px;padding:24px;text-align:center;color:var(--muted)}.key-card{border:1px solid var(--line);border-radius:16px;background:linear-gradient(145deg,var(--panel2),var(--panel));padding:16px}.key-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.key-card label{display:block;margin:14px 0 6px;color:var(--muted);font-size:.78rem}.key-row{display:flex;gap:8px}.key-row input{min-width:0;flex:1;border:1px solid #36516f;border-radius:10px;background:#07101a;color:var(--text);padding:11px 12px;font:13px ui-monospace,monospace;letter-spacing:.04em}.key-row input:focus{outline:2px solid var(--a);outline-offset:1px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #36516f;border-radius:9px;background:#172a40;color:var(--text);padding:9px 12px;font-weight:700;cursor:pointer}button.primary{background:#14759a;border-color:var(--a)}button:disabled{opacity:.55;cursor:wait}.key-note{margin:8px 0 0;font-size:.78rem}
 @media(max-width:850px){.loaders{grid-template-columns:1fr}.summary-grid,.comm-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:520px){body{padding:14px}header{display:block}header>.badge{margin-top:10px}.slots{grid-template-columns:repeat(2,1fr)}.bridge-grid{grid-template-columns:repeat(2,1fr)}}
 </style>
 <header><div><p class=kicker>Pico 2 W / BMB1 live diagnostics</p><h1>Dual BMCU Loader Monitor</h1><p id=summary class=muted>Connecting to the Pico...</p></div><span id=health class=badge>Connecting</span></header>
-<main><section><h2>Loaders</h2><div id=loaders class=loaders><div class=empty>Waiting for BMCU STATUS...</div></div></section><section><h2>Bridge health</h2><div id=bridge class=bridge-grid></div></section><section><h2>Recent device log</h2><pre id=logs>No runtime log</pre></section></main>
+<main><section><h2>Loaders</h2><div id=loaders class=loaders><div class=empty>Waiting for BMCU STATUS...</div></div></section><section><h2>Bridge health</h2><div id=bridge class=bridge-grid></div></section><section><h2>Device authentication</h2><article class=key-card><div class=key-top><div><h3>BMB1 device key</h3><div class=muted>Generate or paste a 256-bit key, copy it to Bambuddy, then save it on this Pico.</div></div><span id=key-state class=badge>Checking</span></div><label for=device-key>64 hexadecimal characters</label><div class=key-row><input id=device-key type=password maxlength=64 inputmode=text autocomplete=new-password spellcheck=false placeholder="Generate a new key or paste an existing key"><button id=show-key type=button>Show</button></div><div class=actions><button id=generate-key type=button>Generate new</button><button id=copy-key type=button>Copy</button><button id=save-key class=primary type=button>Save &amp; reconnect</button></div><p id=key-fingerprint class="muted key-note">Fingerprint: --</p><p id=key-message class="muted key-note">Stored keys are write-only and cannot be read back.</p></article></section><section><h2>Recent device log</h2><pre id=logs>No runtime log</pre></section></main>
 <script>
 const $=id=>document.getElementById(id),td=new TextDecoder(),u64=(v,o)=>v.getBigUint64(o).toString(),n=x=>Number(x===undefined?0:x),fmt=x=>n(x).toLocaleString(),bit=(m,i)=>((m>>i)&1)!==0;
 function frames(b){let v=new DataView(b),a=[],o=0;while(o+32<=b.byteLength){if(v.getUint32(o)!==0x424d4231||v.getUint8(o+4)!==1)break;let z=v.getUint32(o+8);if(z>4096||o+32+z>b.byteLength)break;a.push({t:v.getUint8(o+5),l:v.getUint8(o+28),v:new DataView(b,o+32,z)});o+=32+z}return a}
@@ -41,7 +43,13 @@ function loaderCard(link,s,m){let c=comm(link,m),name='bmcu-'+String.fromCharCod
 function bridgeCards(m){let cards=[['Uptime',Math.floor(n(m[1])/1000)+' s',''],['Heap free',fmt(m[4])+' B',n(m[4])<20000?'warn':''],['Wi-Fi RSSI',m[17]===undefined?'--':m[17]+' dBm',''],['Loop p99',fmt(m[14])+' us',n(m[14])>100000?'warn':''],['Exceptions',fmt(m[48]),n(m[48])?'bad':'ok'],['BMB1 queue',fmt(m[32]),n(m[32])>128?'warn':''],['Transport drops',fmt(m[33]),n(m[33])?'warn':'ok'],['TCP reconnects',fmt(m[27]),'']];return cards.map(x=>metric(x[0],x[1],x[2])).join('')}
 function logLine(v){if(v.byteLength<22)return null;let q=BigInt(u64(v,0)),up=u64(v,8),sev=v.getUint8(16),cn=v.getUint8(17),mn=v.getUint16(18),o=22,component=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,cn));o+=cn;let message=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,mn));return{q,text:'['+up+' ms] '+sev+' '+component+': '+message}}
 async function get(path){let r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);return frames(await r.arrayBuffer())}
-let last=0n,logText='';async function refresh(){try{let cur=await get('/api/current.bin'),diag=await get('/api/diagnostics.bin'),m={};for(let f of diag)if(f.t===19)Object.assign(m,tlvs(f.v));let states={};for(let f of cur)if(f.t===16)states[f.l]=status(f.v);let links=[0,1].filter(i=>states[i]||m[64+i*8]!==undefined);if(!links.length)links=[0,1];$('loaders').innerHTML=links.map(i=>loaderCard(i,states[i]||null,m)).join('');$('bridge').innerHTML=bridgeCards(m);let receiving=links.filter(i=>states[i]).length,all=receiving===links.length;$('health').textContent=receiving+' / '+links.length+' receiving';$('health').className='badge '+(all?'ok':receiving?'warn':'bad');$('summary').textContent='Live binary STATUS and per-UART health / refresh 3 s';let logs=await get('/api/logs.bin?after='+last.toString()+'&limit=24'),lines=[];for(let f of logs)if(f.t===20){let x=logLine(f.v);if(x){if(x.q>last)last=x.q;lines.push(x.text)}}if(lines.length){logText=(lines.join('\\n')+'\\n'+logText).slice(0,12000);$('logs').textContent=logText}}catch(e){$('health').textContent='Refresh failed';$('health').className='badge bad';$('summary').textContent='Web UI error: '+e}}refresh();setInterval(refresh,3000)
+function keyMessage(text,cls='muted'){let e=$('key-message');e.textContent=text;e.className=cls+' key-note'}
+async function loadKeyStatus(){try{let r=await fetch('/api/device-key/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);let values={};for(let line of (await r.text()).trim().split('\\n')){let i=line.indexOf('=');if(i>0)values[line.slice(0,i)]=line.slice(i+1)}let configured=values.configured==='1';$('key-state').textContent=configured?'Configured':'Not configured';$('key-state').className='badge '+(configured?'ok':'bad');$('key-fingerprint').textContent='Fingerprint: '+(values.fingerprint||'--')}catch(e){$('key-state').textContent='Unavailable';$('key-state').className='badge bad';keyMessage('Cannot read key status: '+e,'bad');setTimeout(loadKeyStatus,1000)}}
+function generateKey(){let bytes=new Uint8Array(32);crypto.getRandomValues(bytes);$('device-key').value=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');$('device-key').type='text';$('show-key').textContent='Hide';keyMessage('New key generated. Copy it before saving; it cannot be retrieved later.','warn')}
+async function copyKey(){let field=$('device-key'),value=field.value.trim();if(!/^[0-9a-fA-F]{64}$/.test(value)){keyMessage('Enter or generate exactly 64 hexadecimal characters.','bad');return}try{await navigator.clipboard.writeText(value)}catch(e){field.type='text';field.select();document.execCommand('copy')}keyMessage('Key copied. Store the same value in Bambuddy before or after saving.','ok')}
+async function saveKey(){let field=$('device-key'),value=field.value.trim().toLowerCase(),button=$('save-key');if(!/^[0-9a-f]{64}$/.test(value)){keyMessage('Enter or generate exactly 64 hexadecimal characters.','bad');return}button.disabled=true;try{let r=await fetch('/api/device-key',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-BMCU-Key-Action':'update'},body:value});if(!r.ok)throw Error((await r.text()).trim()||'HTTP '+r.status);field.value='';field.type='password';$('show-key').textContent='Show';keyMessage('Saved. BMB1 is reconnecting with the new key.','ok');await loadKeyStatus()}catch(e){keyMessage('Save failed: '+e,'bad')}finally{button.disabled=false}}
+$('generate-key').onclick=generateKey;$('copy-key').onclick=copyKey;$('save-key').onclick=saveKey;$('show-key').onclick=()=>{let field=$('device-key'),show=field.type==='password';field.type=show?'text':'password';$('show-key').textContent=show?'Hide':'Show'};
+let last=0n,logText='';async function refresh(){try{let cur=await get('/api/current.bin'),diag=await get('/api/diagnostics.bin'),m={};for(let f of diag)if(f.t===19)Object.assign(m,tlvs(f.v));let states={};for(let f of cur)if(f.t===16)states[f.l]=status(f.v);let links=[0,1].filter(i=>states[i]||m[64+i*8]!==undefined);if(!links.length)links=[0,1];$('loaders').innerHTML=links.map(i=>loaderCard(i,states[i]||null,m)).join('');$('bridge').innerHTML=bridgeCards(m);let receiving=links.filter(i=>states[i]).length,all=receiving===links.length;$('health').textContent=receiving+' / '+links.length+' receiving';$('health').className='badge '+(all?'ok':receiving?'warn':'bad');$('summary').textContent='Live binary STATUS and per-UART health / refresh 3 s';let logs=await get('/api/logs.bin?after='+last.toString()+'&limit=24'),lines=[];for(let f of logs)if(f.t===20){let x=logLine(f.v);if(x){if(x.q>last)last=x.q;lines.push(x.text)}}if(lines.length){logText=(lines.join('\\n')+'\\n'+logText).slice(0,12000);$('logs').textContent=logText}}catch(e){$('health').textContent='Refresh failed';$('health').className='badge bad';$('summary').textContent='Web UI error: '+e}}async function start(){await loadKeyStatus();await refresh();setInterval(refresh,3000)}start()
 </script>"""
 
 
@@ -54,13 +62,14 @@ class _Response:
             self.parts.append(body)
         self.offset = 0
 
-    def current(self):
+    def current(self, maximum=None):
         while self.parts and self.offset >= len(self.parts[0]):
             self.parts.pop(0)
             self.offset = 0
         if not self.parts:
             return b""
-        return memoryview(self.parts[0])[self.offset:]
+        value = memoryview(self.parts[0])[self.offset:]
+        return value[:maximum] if maximum and len(value) > maximum else value
 
     def consume(self, count):
         while count and self.parts:
@@ -80,9 +89,11 @@ class _Response:
 
 
 class WebUI:
-    def __init__(self, binary_provider, port=80, error_handler=None):
+    def __init__(self, binary_provider, port=80, error_handler=None,
+                 settings_provider=None):
         self.binary_provider = binary_provider
         self.error_handler = error_handler
+        self.settings_provider = settings_provider
         self.port = port
         self.server = None
         self.servers = []
@@ -117,15 +128,57 @@ class WebUI:
         size = sum(len(item) for item in body) if isinstance(
             body, (list, tuple)) else len(body)
         header = ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n" %
+                  "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+                  "Referrer-Policy: no-referrer\r\nConnection: close\r\n\r\n" %
                   (status, content_type, size)).encode()
         return _Response(header, body)
 
+    def _request_parts(self):
+        raw = bytes(self.request)
+        marker = raw.find(b"\r\n\r\n")
+        if marker < 0:
+            return None
+        lines = raw[:marker].split(b"\r\n")
+        request_line = lines[0].split() if lines else ()
+        method = request_line[0] if request_line else b""
+        path = request_line[1] if len(request_line) > 1 else b""
+        headers = {}
+        for line in lines[1:]:
+            if b":" not in line:
+                continue
+            name, value = line.split(b":", 1)
+            headers[name.strip().lower().decode()] = value.strip().decode()
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            length = -1
+        return method, path, headers, raw[marker + 4:], length
+
+    def _request_complete(self):
+        parts = self._request_parts()
+        if parts is None:
+            return False
+        length = parts[4]
+        return length < 0 or length > MAX_BODY_BYTES or len(parts[3]) >= length
+
     def _finish_request(self):
-        line = bytes(self.request).split(b"\r\n", 1)[0].split()
-        method = line[0] if line else b""
-        path = line[1] if len(line) > 1 else b""
-        if method != b"GET":
+        method, path, headers, body, length = self._request_parts()
+        if length < 0:
+            self.response = self._http_response(
+                "400 Bad Request", "text/plain", b"invalid content length\n")
+            return
+        if length > MAX_BODY_BYTES:
+            self.response = self._http_response(
+                "413 Payload Too Large", "text/plain", b"body too large\n")
+            return
+        body = body[:length]
+        if path.startswith(b"/api/device-key") and self.settings_provider:
+            result = self.settings_provider(
+                method.decode(), path.decode(), headers, body)
+            self.response = self._http_response(*result) if result else \
+                self._http_response("404 Not Found", "text/plain",
+                                    b"Not found\n")
+        elif method != b"GET":
             self.response = self._http_response(
                 "405 Method Not Allowed", "text/plain", b"GET only\n")
         elif path == b"/":
@@ -169,7 +222,7 @@ class WebUI:
             return
         if self.client and self.response is not None:
             try:
-                sent = self.client.send(self.response.current())
+                sent = self.client.send(self.response.current(MAX_SEND_BYTES))
             except OSError as error:
                 if _would_block(error):
                     return
@@ -200,7 +253,7 @@ class WebUI:
             if len(self.request) > MAX_REQUEST_BYTES:
                 self.response = self._http_response(
                     "413 Payload Too Large", "text/plain", b"Too large\n")
-            elif b"\r\n\r\n" in self.request:
+            elif self._request_complete():
                 try:
                     self._finish_request()
                 except Exception as error:

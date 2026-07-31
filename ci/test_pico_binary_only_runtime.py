@@ -59,16 +59,20 @@ class BinaryOnlyRuntimeTests(unittest.TestCase):
             if isinstance(ancestor, ast.If):
                 self.assertNotIn("uart_idle", ast.unparse(ancestor.test))
             ancestor = parents.get(ancestor)
+
     def test_default_config_has_two_links_and_4k_uart_headroom(self):
         namespace = {}
         source = (PICO / "config_example.py").read_text(encoding="utf-8")
         exec(compile(source, "config_example.py", "exec"), namespace)
 
         self.assertEqual(namespace["UART_RXBUF"], 4096)
+        self.assertEqual(namespace["BMCU_UART_DRAIN_BUDGET"], 4096)
+        self.assertEqual(namespace["BMCU_UART_DRAIN_CHUNK"], 512)
         self.assertEqual(
             [(item["uart"], item["tx"], item["rx"])
              for item in namespace["BMCU_LINKS"]],
             [(0, 0, 1), (1, 4, 5)])
+
     def test_metric_window_is_fixed_and_reports_tail_quantiles(self):
         window = device_metrics.MetricWindow()
         for value in (1, 2, 3, 4, 1000):
