@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import struct
 import sys
 import unittest
 
@@ -89,15 +90,32 @@ class BinaryOnlyRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(window.average(), 64)
         self.assertLessEqual(window.average(), 128)
 
+    def test_rp2_temperature_conversion_uses_documented_transfer_function(self):
+        reading_at_27c = 706000 * 65535 // 3300000
+        measured = device_metrics.rp2_temperature_milli_c(reading_at_27c)
+        self.assertGreaterEqual(measured, 26900)
+        self.assertLessEqual(measured, 27100)
+
     def test_diagnostic_is_bounded_typed_tlv(self):
         metrics = device_metrics.DeviceMetrics()
         for value in range(1, 50):
             metrics.observe_loop_gap(value)
-        payload = metrics.snapshot(123, [Monitor()])
+        payload = metrics.snapshot(
+            123, [Monitor()], wifi_rssi=-47,
+            temperature_milli_c=31500)
         items = list(binary.parse_tlvs(payload))
         tags = {item[0] for item in items}
         self.assertIn(C.DIAG_LOOP_GAP_P95_US, tags)
         self.assertIn(C.DIAG_UART0_DRAIN_BYTES, tags)
+        self.assertIn(C.DIAG_TEMPERATURE_MILLI_C, tags)
+        self.assertIn(C.DIAG_WIFI_RSSI_DBM, tags)
+        signed_values = {
+            tag: struct.unpack(">i", bytes(value))[0]
+            for tag, value_type, value in items
+            if value_type == C.VALUE_INT32
+        }
+        self.assertEqual(signed_values[C.DIAG_TEMPERATURE_MILLI_C], 31500)
+        self.assertEqual(signed_values[C.DIAG_WIFI_RSSI_DBM], -47)
         self.assertIn(C.DIAG_UART0_OVERFLOW_COUNT, tags)
         self.assertLessEqual(len(payload), C.MAX_PAYLOAD_SIZE)
         outbox = BMB1Outbox(9, durable_slots=2, large_slots=2)

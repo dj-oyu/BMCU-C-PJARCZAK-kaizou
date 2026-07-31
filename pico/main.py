@@ -18,7 +18,7 @@ from bmcu_binary_outbox import BMB1Outbox
 from bmcu_journal import BMJ1Journal, JournalReplayCursor
 from bmcu_link import BMCUMonitor, drain_monitors
 from device_key_store import DeviceKeyAPI, DeviceKeyStore
-from device_metrics import DeviceMetrics
+from device_metrics import DeviceMetrics, rp2_temperature_milli_c
 from runtime_log import PicoRuntimeLog
 from transport_settings import TransportSettingsAPI, TransportSettingsStore
 from web_ui import WebUI
@@ -193,18 +193,39 @@ def wifi_event(message):
 
 
 wifi = WiFiStation(secrets, wifi_event)
+try:
+    temperature_adc = machine.ADC(getattr(machine.ADC, "CORE_TEMP", 4))
+except Exception:
+    temperature_adc = None
+cached_wifi_rssi = None
+cached_temperature_milli_c = None
 diagnostic_frame = bytearray(C.MAX_MESSAGE_SIZE)
 
 
-def diagnostic_message():
-    rssi = None
+def refresh_platform_metrics():
+    global cached_wifi_rssi, cached_temperature_milli_c
     try:
-        rssi = wifi.wlan.status("rssi")
+        cached_wifi_rssi = int(wifi.wlan.status("rssi"))
     except Exception:
-        pass
+        cached_wifi_rssi = None
+    if temperature_adc is None:
+        cached_temperature_milli_c = None
+        return
+    try:
+        total = 0
+        for _ in range(4):
+            total += temperature_adc.read_u16()
+        cached_temperature_milli_c = rp2_temperature_milli_c(total // 4)
+    except Exception:
+        cached_temperature_milli_c = None
+
+
+def diagnostic_message():
     payload = metrics.snapshot(
-        time.ticks_ms(), monitors, outbox, client, journal, rssi,
-        runtime_log.exception_count)
+        time.ticks_ms(), monitors, outbox, client, journal,
+        wifi_rssi=cached_wifi_rssi,
+        exception_count=runtime_log.exception_count,
+        temperature_milli_c=cached_temperature_milli_c)
     size = binary.write_diagnostic(
         diagnostic_frame, 0, 0, 0, boot_id, payload)
     return memoryview(diagnostic_frame)[:size]
@@ -303,9 +324,12 @@ def service_once(now_ms):
         record_exception("web.poll", error)
     if last_diagnostic_ms is None or ticks_diff(
             now_ms, last_diagnostic_ms) >= 15000:
+        refresh_platform_metrics()
         payload = metrics.snapshot(
-            now_ms, monitors, outbox, client, journal, None,
-            runtime_log.exception_count)
+            now_ms, monitors, outbox, client, journal,
+            wifi_rssi=cached_wifi_rssi,
+            exception_count=runtime_log.exception_count,
+            temperature_milli_c=cached_temperature_milli_c)
         outbox.enqueue_payload(
             C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, monotonic_us.now(),
             payload, False)
