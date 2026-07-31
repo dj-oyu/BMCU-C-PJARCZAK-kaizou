@@ -116,7 +116,8 @@ class BinaryCodecTests(unittest.TestCase):
 
     def test_control_result_and_protocol_error_bounds(self):
         size = binary.write_control_result(
-            self.out, 0, 0, 4, 7, 0, b"ok", b"H" * 32)
+            self.out, 0, 0, 0, 4, C.GLOBAL_SCOPE, 7, 0, b"ok",
+            b"H" * 32)
         self.assertEqual(size, C.HEADER_SIZE + 46)
         size = binary.write_protocol_error(self.out, 0, 4, 2, b"bad")
         self.assertEqual(size, C.HEADER_SIZE + 7)
@@ -183,14 +184,101 @@ class FixtureTests(unittest.TestCase):
                          C.CONTROL_SOFT_RESET)
 
     def test_manifest_hashes(self):
-        fixture_dir = os.path.join(ROOT, "tests", "fixtures")
-        with open(os.path.join(fixture_dir, "bmcu_binary_manifest.json"),
+        fixture_dir = os.path.join(ROOT, "tests", "fixtures", "bmcu_binary")
+        with open(os.path.join(fixture_dir, "manifest.json"),
                   encoding="utf-8") as handle:
             manifest = json.load(handle)
-        for name, metadata in manifest["fixtures"].items():
+        self.assertEqual(len(manifest["files"]), 18)
+        for name, metadata in manifest["files"].items():
             with open(os.path.join(fixture_dir, name), "rb") as handle:
-                digest = hashlib.sha256(handle.read()).hexdigest()
+                raw = handle.read()
+                digest = hashlib.sha256(raw).hexdigest()
+            self.assertEqual(len(raw), metadata["bytes"])
             self.assertEqual(digest, metadata["sha256"])
+
+    def load_messages(self, name):
+        fixture_dir = os.path.join(ROOT, "tests", "fixtures", "bmcu_binary")
+        with open(os.path.join(fixture_dir, name), "rb") as handle:
+            raw = handle.read()
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 2))
+        parser.feed(raw)
+        messages = []
+        while True:
+            message = parser.next_message()
+            if message is None:
+                break
+            messages.append(message)
+        return raw, messages, parser
+
+    def test_supported_canonical_fixtures_parse_semantically(self):
+        _, messages, _ = self.load_messages("server_challenge.bin")
+        self.assertEqual(bytes(binary.parse_challenge(messages[0])),
+                         bytes(range(32, 64)))
+        _, messages, _ = self.load_messages("ack.bin")
+        self.assertEqual(binary.parse_ack(messages[0])[:3],
+                         (0x0102030405060708, 42, 0))
+        _, messages, _ = self.load_messages("ack_reject.bin")
+        self.assertEqual(binary.parse_ack(messages[0])[:3],
+                         (0x0102030405060708, 41, 1))
+        _, messages, _ = self.load_messages("link_state.bin")
+        self.assertEqual(binary.parse_link_state(messages[0]),
+                         (123456, C.LINK_ONLINE, 0))
+        _, messages, _ = self.load_messages("transport_drop.bin")
+        self.assertEqual(binary.parse_transport_drop(messages[0]),
+                         (123500, 3, 6, 4, C.DROP_RAM_QUEUE_FULL))
+        for name in ("bmcu_status.bin", "bmcu_event.bin",
+                     "bmcu_full_status.bin", "bmcu_unknown.bin"):
+            _, messages, _ = self.load_messages(name)
+            received, wire = binary.parse_bmcu_frame(messages[0])
+            self.assertTrue(received >= 100001)
+            self.assertEqual(bytes(wire[:2]), b"\xa5\x5a")
+        _, messages, _ = self.load_messages("control.bin")
+        self.assertEqual(binary.parse_control(messages[0])[:4],
+                         (77, 500000, 5000, C.CONTROL_SOFT_RESET))
+        _, messages, _ = self.load_messages("control_result.bin")
+        result = binary.parse_control_result(messages[0])
+        self.assertEqual((result[0], result[1], bytes(result[2])),
+                         (77, C.RESULT_OK, b"accepted"))
+        _, messages, _ = self.load_messages("diagnostic_unknown_tags.bin")
+        self.assertEqual([item[0] for item in
+                          binary.parse_tlvs(messages[0].payload)], [240, 241])
+        for name in ("pico_log_utf8.bin", "pico_log_max.bin",
+                     "recovered_replay.bin"):
+            _, messages, _ = self.load_messages(name)
+            self.assertEqual(len(binary.parse_log(messages[0])), 6)
+        _, messages, _ = self.load_messages("concatenated.bin")
+        self.assertEqual([item.message_type for item in messages],
+                         [C.LINK_STATE, C.ACK])
+
+    def test_hello_and_truncated_fixture(self):
+        raw, messages, _ = self.load_messages("hello.bin")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].message_type, C.HELLO)
+        truncated, messages, parser = self.load_messages("truncated_header.bin")
+        self.assertEqual(len(truncated), 17)
+        self.assertEqual(messages, [])
+        self.assertEqual(parser.buffered, 17)
+
+    def test_every_supported_fixture_matches_expected_type(self):
+        expected = {
+            "ack.bin": C.ACK, "ack_reject.bin": C.ACK,
+            "bmcu_event.bin": C.BMCU_FRAME,
+            "bmcu_full_status.bin": C.BMCU_FRAME,
+            "bmcu_status.bin": C.BMCU_FRAME,
+            "bmcu_unknown.bin": C.BMCU_FRAME,
+            "control.bin": C.CONTROL,
+            "control_result.bin": C.CONTROL_RESULT,
+            "diagnostic_unknown_tags.bin": C.PICO_DIAGNOSTIC,
+            "hello.bin": C.HELLO, "link_state.bin": C.LINK_STATE,
+            "pico_log_max.bin": C.PICO_LOG,
+            "pico_log_utf8.bin": C.PICO_LOG,
+            "recovered_replay.bin": C.PICO_LOG,
+            "server_challenge.bin": C.SERVER_CHALLENGE,
+            "transport_drop.bin": C.TRANSPORT_DROP,
+        }
+        for name, message_type in expected.items():
+            _, messages, _ = self.load_messages(name)
+            self.assertEqual(messages[0].message_type, message_type)
 
 
 if __name__ == "__main__":

@@ -174,16 +174,17 @@ def write_hello(out, offset, flags, pico_boot_id, device_id, firmware, links,
     return C.HEADER_SIZE + payload_length
 
 
-def write_control_result(out, offset, flags, pico_boot_id, command_sequence,
-                         result, detail, auth_hmac):
+def write_control_result(out, offset, flags, transport_sequence, pico_boot_id,
+                         link_index, command_sequence, result, detail,
+                         auth_hmac):
     if len(detail) > C.MAX_CONTROL_RESULT_DETAIL_BYTES:
         raise CodecError("CONTROL_RESULT detail too large")
     if len(auth_hmac) != 32:
         raise CodecError("CONTROL_RESULT HMAC must be 32 bytes")
     payload_length = 12 + len(detail) + 32
     _check_space(out, offset, C.HEADER_SIZE + payload_length)
-    write_header(out, offset, C.CONTROL_RESULT, flags, payload_length, 0,
-                 pico_boot_id, C.GLOBAL_SCOPE)
+    write_header(out, offset, C.CONTROL_RESULT, flags, payload_length,
+                 transport_sequence, pico_boot_id, link_index)
     pos = offset + C.HEADER_SIZE
     struct.pack_into(">QBBH", out, pos, command_sequence, result, 0,
                      len(detail))
@@ -277,8 +278,6 @@ class StreamParser:
             raise CodecError("payload too large")
         if flags & ~C.KNOWN_FLAGS:
             raise CodecError("reserved flag set")
-        if reserved != b"\0\0\0":
-            raise CodecError("reserved header bytes must be zero")
         total = C.HEADER_SIZE + payload_length
         if self.buffered < total:
             return None
@@ -338,3 +337,84 @@ def parse_control(message):
         raise CodecError("invalid CONTROL length")
     return (command_sequence, issued_at_us, ttl_ms, command,
             payload[22:22 + argument_length], payload[22 + argument_length:])
+
+
+def parse_link_state(message):
+    if message.message_type != C.LINK_STATE or len(message.payload) != 12:
+        raise CodecError("invalid LINK_STATE")
+    observed, state, reason, reserved = struct.unpack_from(
+        ">QBBH", message.payload, 0)
+    if reserved:
+        raise CodecError("invalid LINK_STATE reserved value")
+    return observed, state, reason
+
+
+def parse_transport_drop(message):
+    if message.message_type != C.TRANSPORT_DROP or len(message.payload) != 32:
+        raise CodecError("invalid TRANSPORT_DROP")
+    observed, first, last, count, reason, reserved = struct.unpack_from(
+        ">QQQIB3s", message.payload, 0)
+    if reserved != b"\0\0\0":
+        raise CodecError("invalid TRANSPORT_DROP reserved value")
+    return observed, first, last, count, reason
+
+
+def parse_bmcu_frame(message):
+    if message.message_type != C.BMCU_FRAME or len(message.payload) < 10:
+        raise CodecError("invalid BMCU_FRAME")
+    received_at_us, wire_length = struct.unpack_from(">QH", message.payload, 0)
+    if len(message.payload) != 10 + wire_length:
+        raise CodecError("invalid BMCU wire length")
+    return received_at_us, message.payload[10:]
+
+
+def parse_tlvs(payload):
+    """Yield ``(tag, value_type, value_view)`` while checking every bound."""
+    pos = 0
+    while pos < len(payload):
+        if len(payload) - pos < 4:
+            raise CodecError("truncated TLV")
+        tag, value_type, size = struct.unpack_from(">BBH", payload, pos)
+        pos += 4
+        if size > len(payload) - pos:
+            raise CodecError("truncated TLV value")
+        yield tag, value_type, payload[pos:pos + size]
+        pos += size
+
+
+def parse_log(message):
+    payload = message.payload
+    if message.message_type != C.PICO_LOG or len(payload) < 22:
+        raise CodecError("invalid PICO_LOG")
+    log_sequence, uptime_ms, severity, component_length, message_length, \
+        detail_length = struct.unpack_from(">QQBBHH", payload, 0)
+    if component_length > C.MAX_LOG_COMPONENT_BYTES:
+        raise CodecError("PICO_LOG component too large")
+    if message_length > C.MAX_LOG_MESSAGE_BYTES:
+        raise CodecError("PICO_LOG message too large")
+    if detail_length > C.MAX_LOG_DETAIL_BYTES:
+        raise CodecError("PICO_LOG detail too large")
+    expected = 22 + component_length + message_length + detail_length
+    if len(payload) != expected:
+        raise CodecError("invalid PICO_LOG length")
+    pos = 22
+    component = payload[pos:pos + component_length]
+    pos += component_length
+    text = payload[pos:pos + message_length]
+    pos += message_length
+    return (log_sequence, uptime_ms, severity, component, text,
+            payload[pos:pos + detail_length])
+
+
+def parse_control_result(message):
+    payload = message.payload
+    if message.message_type != C.CONTROL_RESULT or len(payload) < 44:
+        raise CodecError("invalid CONTROL_RESULT")
+    command_sequence, result, reserved, detail_length = struct.unpack_from(
+        ">QBBH", payload, 0)
+    if reserved or detail_length > C.MAX_CONTROL_RESULT_DETAIL_BYTES:
+        raise CodecError("invalid CONTROL_RESULT fields")
+    if len(payload) != 12 + detail_length + 32:
+        raise CodecError("invalid CONTROL_RESULT length")
+    return (command_sequence, result, payload[12:12 + detail_length],
+            payload[12 + detail_length:])

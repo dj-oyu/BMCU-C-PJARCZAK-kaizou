@@ -1,0 +1,83 @@
+{
+  "format": "bmcu-binary-fixtures-v1",
+  "files": {
+    "ack.bin": {
+      "bytes": 52,
+      "sha256": "374f6f8365a8e0a57c583d579ff1663242d230b9ea262b353eb45568387df300"
+    },
+    "ack_reject.bin": {
+      "bytes": 61,
+      "sha256": "c449f7c40395062d7dc2995edb0daeacfbbfadb180d5d10e5ee27a05c0be49c3"
+    },
+    "bmcu_event.bin": {
+      "bytes": 67,
+      "sha256": "182c3166b5eb23f71a475262c9c28c3ada115af89ec9810a03dab1b349dc1c69"
+    },
+    "bmcu_full_status.bin": {
+      "bytes": 77,
+      "sha256": "8f39d74a72c0905bb4adde5a3706be77007acd25108347546aa4aa10d3787ffd"
+    },
+    "bmcu_status.bin": {
+      "bytes": 78,
+      "sha256": "598d5b0f44d9639d3038ef937ce26cf271588039f7adb3076bf9da3e0f7f6e8c"
+    },
+    "bmcu_unknown.bin": {
+      "bytes": 53,
+      "sha256": "7f76d0a52c03c7b59ed5e66cb17ecacf0257ccd78a1fee171d68c1fa07bad4c9"
+    },
+    "concatenated.bin": {
+      "bytes": 96,
+      "sha256": "8b8ddf8b56164f59c3be404116d86120b60c4bbcba7ea1cdec3873df000b3776"
+    },
+    "control.bin": {
+      "bytes": 87,
+      "sha256": "a19bf50fe27900590130997581830b0f2cfffb7f0b142115b78e942103d84d69"
+    },
+    "control_result.bin": {
+      "bytes": 84,
+      "sha256": "61d5deba70ff579d1a963a2b98bf7b1d86d702996c9bb18ae739c5ad8ebbc3ec"
+    },
+    "diagnostic_unknown_tags.bin": {
+      "bytes": 47,
+      "sha256": "3d1c4e5728eaae5623f9e02e14084d1cb83762825cf518250bc8f3bb664e5b33"
+    },
+    "hello.bin": {
+      "bytes": 116,
+      "sha256": "824b215bf40b4e8ced8d78f76224717da4d04740095a98291b3552729522605f"
+    },
+    "link_state.bin": {
+      "bytes": 44,
+      "sha256": "70a3fda19e157d13cd768e3709ad964871e97793082d996dd749f66868dd7916"
+    },
+    "pico_log_max.bin": {
+      "bytes": 926,
+      "sha256": "83acbd21b3bb8dc6435f24bed65c1b69cb350aa78e82bf4df93bf4963747409d"
+    },
+    "pico_log_utf8.bin": {
+      "bytes": 75,
+      "sha256": "69144e056f46e180e43fc89c2314a8ee469ba1c9caec06c22d2e9bb3cd886b48"
+    },
+    "recovered_replay.bin": {
+      "bytes": 73,
+      "sha256": "6148d004bbe09a11f851bf9517b90dc539e78baaf03af41e25e97a3d0339cee8"
+    },
+    "server_challenge.bin": {
+      "bytes": 64,
+      "sha256": "ef6b63044dcd9876ca473d2094616d4046524dd2b155033f970603a789595d33"
+    },
+    "transport_drop.bin": {
+      "bytes": 64,
+      "sha256": "32870753c9ddf37dfe13a4c7e1afc6c7b65f872701854421f8bd5b473fd096ca"
+    },
+    "truncated_header.bin": {
+      "bytes": 17,
+      "sha256": "3a1fab201fa51c52296d4db57307a487bd40afee60782ee2e3f571b0c5f9bf46"
+    }
+  },
+  "auth": {
+    "device_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "challenge_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "pico_boot_id": 72623859790382856,
+    "hello_hmac_hex": "ac4f9669c7ea3a713080f029913cd27663547fbecdde4795f12549fe8251d236"
+  }
+}
