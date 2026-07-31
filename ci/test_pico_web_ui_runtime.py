@@ -40,6 +40,17 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertNotIn(b"/api/devices", page)
         self.assertIn(b"getBigUint64(o).toString()", page)
 
+    def test_page_separates_two_bmcu_links_and_uart_health(self):
+        page = web_ui.PAGE
+
+        self.assertIn(b"Dual BMCU Loader Monitor", page)
+        self.assertIn(b"getUint8(o+28)", page)
+        self.assertIn(b"bmcu-", page)
+        self.assertIn(b"GP0 TX / GP1 RX", page)
+        self.assertIn(b"GP4 TX / GP5 RX", page)
+        self.assertIn(b"Sequence gaps", page)
+        self.assertIn(b"Overflows", page)
+        self.assertLess(len(page), 12000)
     def test_embedded_javascript_has_valid_syntax(self):
         source = web_ui.PAGE.decode().split("<script>", 1)[1].split(
             "</script>", 1)[0]

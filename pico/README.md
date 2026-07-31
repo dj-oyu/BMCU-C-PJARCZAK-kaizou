@@ -9,7 +9,9 @@ binary. There is no JSON WebSocket or HTTPS NDJSON compatibility mode.
 
 Copy `config_example.py` to `config.py` and configure:
 
-- `BMCU_LINKS` for UART IDs and pins;
+- `BMCU_LINKS` for UART IDs and pins (the default maps `bmcu-a` to GP0/GP1
+  and `bmcu-b` to GP4/GP5);
+- `UART_RXBUF` for per-link receive headroom (4096 bytes by default);
 - `BMCU_BINARY_HOST` and `BMCU_BINARY_PORT`;
 - `BMCU_BINARY_DEVICE_ID`;
 - `BMCU_BINARY_DEVICE_KEY`, a provisioned 256-bit key encoded as 64 hex

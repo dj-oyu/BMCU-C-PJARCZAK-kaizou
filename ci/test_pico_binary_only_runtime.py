@@ -30,6 +30,45 @@ class Monitor:
 
 
 class BinaryOnlyRuntimeTests(unittest.TestCase):
+    def test_device_metrics_avoids_cpython_only_int_bit_length(self):
+        source = (PICO / "device_metrics.py").read_text(encoding="utf-8")
+
+        self.assertNotIn(".bit_length(", source)
+
+    def test_web_poll_is_not_gated_by_uart_idle(self):
+        import ast
+
+        source = (PICO / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        service = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "service_once")
+        parents = {
+            child: parent for parent in ast.walk(service)
+            for child in ast.iter_child_nodes(parent)
+        }
+        web_calls = [
+            node for node in ast.walk(service)
+            if isinstance(node, ast.Call) and
+            isinstance(node.func, ast.Attribute) and
+            isinstance(node.func.value, ast.Name) and
+            node.func.value.id == "web" and node.func.attr == "poll"]
+        self.assertEqual(len(web_calls), 1)
+        ancestor = parents.get(web_calls[0])
+        while ancestor is not None:
+            if isinstance(ancestor, ast.If):
+                self.assertNotIn("uart_idle", ast.unparse(ancestor.test))
+            ancestor = parents.get(ancestor)
+    def test_default_config_has_two_links_and_4k_uart_headroom(self):
+        namespace = {}
+        source = (PICO / "config_example.py").read_text(encoding="utf-8")
+        exec(compile(source, "config_example.py", "exec"), namespace)
+
+        self.assertEqual(namespace["UART_RXBUF"], 4096)
+        self.assertEqual(
+            [(item["uart"], item["tx"], item["rx"])
+             for item in namespace["BMCU_LINKS"]],
+            [(0, 0, 1), (1, 4, 5)])
     def test_metric_window_is_fixed_and_reports_tail_quantiles(self):
         window = device_metrics.MetricWindow()
         for value in (1, 2, 3, 4, 1000):

@@ -32,9 +32,13 @@ except ImportError:
         UART_TX_PIN = 0
         UART_RX_PIN = 1
         UART_BAUDRATE = 115200
+        UART_RXBUF = 4096
         WEB_PORT = 80
         DEBUG_USB = False
-        BMCU_LINKS = None
+        BMCU_LINKS = (
+            {"id": "bmcu-a", "uart": 0, "tx": 0, "rx": 1},
+            {"id": "bmcu-b", "uart": 1, "tx": 4, "rx": 5},
+        )
 
 try:
     import secrets
@@ -249,16 +253,19 @@ def service_once(now_ms):
         client.poll(now_ms, wifi.state == "online")
     except Exception as error:
         record_exception("bambuddy.binary", error)
-    if not any(monitor.uart.any() for monitor in monitors):
+    uart_idle = not any(monitor.uart.any() for monitor in monitors)
+    if uart_idle:
         try:
             journal.flush_one(monotonic_us.now())
         except Exception as error:
             journal.failure_count += 1
             record_exception("journal.flush", error)
-        try:
-            web.poll()
-        except Exception as error:
-            record_exception("web.poll", error)
+    # One non-blocking HTTP accept/read/write step per loop. Gating this on
+    # every UART being empty starves the UI when two BMCUs stream continuously.
+    try:
+        web.poll()
+    except Exception as error:
+        record_exception("web.poll", error)
     if last_diagnostic_ms is None or ticks_diff(
             now_ms, last_diagnostic_ms) >= 15000:
         payload = metrics.snapshot(
@@ -269,7 +276,7 @@ def service_once(now_ms):
             payload, False)
         last_diagnostic_ms = now_ms
     if (last_gc_ms is None or ticks_diff(now_ms, last_gc_ms) >= 60000) and \
-            not any(monitor.uart.any() for monitor in monitors):
+            uart_idle:
         started = monotonic_us.now()
         gc.collect()
         metrics.observe_gc(monotonic_us.now() - started)

@@ -10,6 +10,15 @@ import bmcu_binary as binary
 import bmcu_binary_constants as C
 
 
+def _bit_length(value):
+    """Return the positive integer bit length on MicroPython and CPython."""
+    length = 0
+    while value:
+        length += 1
+        value >>= 1
+    return length
+
+
 class MetricWindow:
     """Approximate quantiles with fixed power-of-two microsecond buckets."""
 
@@ -22,7 +31,7 @@ class MetricWindow:
     def add(self, value):
         value = max(0, int(value))
         bucket = min(len(self.buckets) - 1,
-                     value.bit_length() if value else 0)
+                     _bit_length(value))
         self.buckets[bucket] += 1
         self.count += 1
         self.total += value

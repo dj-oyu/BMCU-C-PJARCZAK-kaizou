@@ -7,8 +7,8 @@ UART_RX_PIN = 1
 UART_BAUDRATE = 115200
 # Default UART RX ring size in bytes, overridable per link with "rxbuf".
 # The MicroPython default of 256 bytes overflows in ~22 ms at 115200 baud,
-# and provides margin while bounded TCP/journal/UI work is serviced.
-UART_RXBUF = 2048
+# and provides margin for two links while bounded TCP/journal/UI work is serviced.
+UART_RXBUF = 4096
 WEB_PORT = 80
 BRIDGE_ID = "pico-bmcu-bridge"
 PICO_FIRMWARE_VERSION = "alpha.3"
