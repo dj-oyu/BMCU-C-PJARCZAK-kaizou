@@ -19,6 +19,7 @@ from bmcu_link import BMCUMonitor, drain_monitors
 from device_key_store import DeviceKeyAPI, DeviceKeyStore
 from device_metrics import DeviceMetrics
 from runtime_log import PicoRuntimeLog
+from transport_settings import TransportSettingsAPI, TransportSettingsStore
 from web_ui import WebUI
 from wifi import WiFiStation
 
@@ -142,11 +143,14 @@ def binary_control(link_index, command, arguments):
 
 
 key_store = DeviceKeyStore(getattr(config, "BMCU_BINARY_DEVICE_KEY", ""))
-if key_store.load_error:
-    runtime_log.warning("settings", key_store.load_error)
+transport_store = TransportSettingsStore(
+    getattr(config, "BMCU_BINARY_HOST", ""),
+    getattr(config, "BMCU_BINARY_PORT", 8766))
+for load_error in (key_store.load_error, transport_store.load_error):
+    if load_error:
+        runtime_log.warning("settings", load_error)
 client = BMB1TCPClient(
-    outbox, getattr(config, "BMCU_BINARY_HOST", ""),
-    int(getattr(config, "BMCU_BINARY_PORT", 8766)),
+    outbox, transport_store.host, transport_store.port,
     getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
     key_store.key if key_store.configured else bytes(32),
     getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
@@ -165,6 +169,21 @@ def apply_device_key(key):
 key_api = DeviceKeyAPI(
     key_store, apply_device_key,
     on_update=lambda: runtime_log.info("settings", "device key updated"))
+
+
+def apply_transport_endpoint(host, port):
+    client.set_endpoint(host, port, time.ticks_ms())
+
+
+transport_api = TransportSettingsAPI(
+    transport_store, apply_transport_endpoint,
+    on_update=lambda: runtime_log.info(
+        "settings", "transport endpoint updated"))
+
+
+def settings_api(method, path, headers, body):
+    return key_api.handle(method, path, headers, body) or \
+        transport_api.handle(method, path, headers, body)
 
 
 def wifi_event(message):
@@ -231,7 +250,7 @@ web = WebUI(
     binary_api, getattr(config, "WEB_PORT", 80),
     error_handler=lambda component, error:
         runtime_log.exception("web." + component, error),
-    settings_provider=key_api.handle)
+    settings_provider=settings_api)
 wifi.start(time.ticks_ms())
 web.start()
 
@@ -263,7 +282,7 @@ def service_once(now_ms):
         wifi.poll(now_ms)
     except Exception as error:
         record_exception("wifi.poll", error)
-    if key_store.configured:
+    if key_store.configured and transport_store.configured:
         try:
             client.poll(now_ms, wifi.state == "online")
         except Exception as error:

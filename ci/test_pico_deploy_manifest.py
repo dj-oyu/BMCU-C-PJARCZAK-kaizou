@@ -92,7 +92,8 @@ class DeployManifestTests(unittest.TestCase):
         required = reachable_from("main", local_modules())
         for module in ("bambuddy_binary_tcp", "bmcu_binary_outbox",
                        "bmcu_journal", "device_key_store",
-                       "device_metrics", "runtime_log"):
+                       "device_metrics", "runtime_log",
+                       "transport_settings"):
             self.assertIn(module, required,
                           module + " is expected to be reachable from main.py")
 

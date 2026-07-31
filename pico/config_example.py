@@ -21,8 +21,8 @@ BMCU_LINKS = (
 # Legacy UART_* values remain the single-link fallback when BMCU_LINKS is empty.
 
 DEBUG_USB = False
-# BMB1 transport target. The device key may be provisioned here once or
-# generated/pasted later in the local UI; UI storage takes precedence.
+# BMB1 bootstrap settings. Host, port, and device key can be replaced later in
+# the local UI; persisted UI values take precedence over this file.
 BMCU_BINARY_HOST = "192.168.1.10"
 BMCU_BINARY_PORT = 8766
 BMCU_BINARY_DEVICE_ID = "pico-bmcu-bridge"

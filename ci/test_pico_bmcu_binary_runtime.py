@@ -423,6 +423,22 @@ class TCPClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.set_device_key(b"short", 124)
 
+    def test_endpoint_update_reconnects_without_reboot(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "old.local", 1000, b"d", b"k" * 32, b"1",
+            ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+
+        client.set_endpoint("bambuddy.local", 8766, 123)
+
+        self.assertEqual(client.host, "bambuddy.local")
+        self.assertEqual(client.port, 8766)
+        self.assertEqual(client.state, tcp.BACKOFF)
+        self.assertEqual(client.last_error, "transport endpoint updated")
+        with self.assertRaises(ValueError):
+            client.set_endpoint("", 0, 124)
+
     def test_disconnect_discards_session_bound_control_result(self):
         client = tcp.BMB1TCPClient(
             BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",

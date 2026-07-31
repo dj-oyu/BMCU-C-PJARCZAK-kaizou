@@ -321,6 +321,18 @@ class BMB1TCPClient:
             self.state = WIFI_WAIT
             self.next_action_ms = 0
 
+    def set_endpoint(self, host, port, now_ms):
+        """Replace the TCP endpoint and reconnect without a reboot."""
+        if not host or int(port) < 1 or int(port) > 65535:
+            raise ValueError("invalid endpoint")
+        self.host = host
+        self.port = int(port)
+        if self.sock is not None:
+            self._close(now_ms, "transport endpoint updated")
+        else:
+            self.state = WIFI_WAIT
+            self.next_action_ms = 0
+
     def poll(self, now_ms, wifi_online=True):
         if not wifi_online:
             if self.sock is not None:

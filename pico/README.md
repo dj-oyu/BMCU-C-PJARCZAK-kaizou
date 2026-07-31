@@ -43,12 +43,15 @@ The root page is static and fetches binary snapshots/deltas:
 
 JavaScript performs BMB1 and TLV decoding with `DataView`.
 
-The **Device authentication** card can generate a cryptographically random
-256-bit key, copy it once for Bambuddy, accept an existing 64-hex-character
-key, and persist it without rebooting. The saved key is write-only: the read
-API exposes only configured state and a 48-bit SHA-256 fingerprint. Mutation
-requires a non-simple content type and action header so a cross-origin form
-cannot silently replace the key. The UI is intended only for a trusted LAN.
+The **Connection settings** section manages the Bambuddy BMB1 host and TCP port
+alongside device authentication. Host and port changes are persisted and cause
+an immediate reconnect without rebooting. The device-key card can generate a
+cryptographically random 256-bit key, copy it once for Bambuddy, accept an
+existing 64-hex-character key, and persist it without rebooting. The saved key
+is write-only: the read API exposes only configured state and a 48-bit SHA-256
+fingerprint. Mutations require a non-simple content type and action header so a
+cross-origin form cannot silently replace settings. The UI is intended only
+for a trusted LAN.
 
 ## Deployment and tests
 

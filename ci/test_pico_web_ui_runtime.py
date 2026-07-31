@@ -50,7 +50,7 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertIn(b"GP4 TX / GP5 RX", page)
         self.assertIn(b"Sequence gaps", page)
         self.assertIn(b"Overflows", page)
-        self.assertLess(len(page), 15000)
+        self.assertLess(len(page), 18000)
 
     def test_page_has_write_only_device_key_component(self):
         page = web_ui.PAGE
@@ -60,6 +60,15 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertIn(b"/api/device-key/status", page)
         self.assertIn(b"'X-BMCU-Key-Action':'update'", page)
         self.assertIn(b"cannot be read back", page)
+
+    def test_page_has_bambuddy_endpoint_component(self):
+        page = web_ui.PAGE
+
+        self.assertIn(b"Bambuddy endpoint", page)
+        self.assertIn(b"Host or IPv4 address", page)
+        self.assertIn(b"TCP port", page)
+        self.assertIn(b"/api/transport/status", page)
+        self.assertIn(b"'X-BMCU-Settings-Action':'update'", page)
 
     def test_embedded_javascript_has_valid_syntax(self):
         source = web_ui.PAGE.decode().split("<script>", 1)[1].split(
@@ -116,6 +125,27 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("POST", "/api/device-key"))
         self.assertEqual(calls[0][2]["x-bmcu-key-action"], "update")
         self.assertEqual(calls[0][3], b"a" * 64)
+        self.assertIn(b"204 No Content", web.response)
+
+    def test_transport_post_is_routed_to_settings_provider(self):
+        calls = []
+
+        def settings(*args):
+            calls.append(args)
+            return "204 No Content", "text/plain", b""
+
+        body = b"bambuddy.local\n8766"
+        web = web_ui.WebUI(lambda _: None, settings_provider=settings)
+        web.client = Client(
+            b"POST /api/transport HTTP/1.1\r\n"
+            b"Content-Type: application/octet-stream\r\n"
+            b"X-BMCU-Settings-Action: update\r\n"
+            b"Content-Length: 19\r\n\r\n" + body)
+
+        web.poll()
+
+        self.assertEqual(calls[0][0:2], ("POST", "/api/transport"))
+        self.assertEqual(calls[0][3], body)
         self.assertIn(b"204 No Content", web.response)
 
     def test_device_key_body_is_bounded(self):
