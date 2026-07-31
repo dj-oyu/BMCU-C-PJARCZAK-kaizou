@@ -112,6 +112,16 @@ class ByteRing:
             released += 1
         return released
 
+    def release_one(self):
+        if not self.count:
+            return False
+        self.lengths[self.head] = 0
+        self.protected[self.head] = False
+        self.replace_keys[self.head] = -1
+        self.head = (self.head + 1) % self.capacity
+        self.count -= 1
+        return True
+
     def iter_records(self):
         for logical in range(self.count):
             index = self._index(logical)

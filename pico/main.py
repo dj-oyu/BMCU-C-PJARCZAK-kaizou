@@ -13,8 +13,12 @@ from bambuddy_config import BambuddyConfig
 from bambuddy_transport import BambuddyOutbox
 from bambuddy_https import BambuddyNdjsonClient
 from bambuddy_ws import BambuddyWebSocketClient
+from bambuddy_binary_tcp import BMB1TCPClient
+from bmcu_binary_outbox import BMB1Outbox
+import bmcu_binary_constants as binary_constants
+from bmcu_journal import BMJ1Journal, recover_directory
 from bmcu_control import ControlGateway
-from bmcu_link import BMCUMonitor
+from bmcu_link import BMCUMonitor, drain_monitors
 from runtime_log import PicoRuntimeLog
 from wifi import WiFiStation
 from web_ui import WebUI
@@ -30,6 +34,7 @@ except ImportError:
         WEB_PORT = 80
         DEBUG_USB = False
         BMCU_LINKS = None
+        BMCU_BINARY_ENABLED = False
 
 try:
     import secrets
@@ -80,6 +85,32 @@ runtime_log.info("boot", "Pico application started", {
 
 def publish(message):
     # UART callbacks only build and enqueue. Socket I/O runs later in the loop.
+    if binary_outbox is not None and (
+            message.get("type") in (
+                "link_state", "resync", "protocol_error", "hello") or
+            message.get("snapshot_complete")):
+        link_index = binary_link_indexes.get(message.get("link_id"))
+        if link_index is not None:
+            state_name = message.get("state")
+            if message.get("type") == "resync":
+                state_name = "resyncing"
+            elif message.get("type") == "hello":
+                state_name = "resyncing"
+            elif message.get("type") == "protocol_error":
+                state_name = "incompatible"
+            elif message.get("snapshot_complete"):
+                state_name = "online"
+            states = {
+                "resyncing": binary_constants.LINK_RESYNCING,
+                "online": binary_constants.LINK_ONLINE,
+                "stale": binary_constants.LINK_STALE,
+                "offline": binary_constants.LINK_OFFLINE,
+                "incompatible": binary_constants.LINK_INCOMPATIBLE,
+            }
+            state = states.get(state_name, binary_constants.LINK_UNKNOWN)
+            binary_outbox.enqueue_link_state(
+                link_index, monotonic_us.now(), state,
+                binary_constants.LINK_REASON_UNSPECIFIED)
     if bambuddy_settings.enabled:
         bambuddy_outbox.publish(
             message, time.ticks_ms(), monotonic_us.now())
@@ -106,6 +137,9 @@ def reconcile_bambuddy():
         bambuddy_client.stop()
         bambuddy_client = None
     bambuddy_control = None
+    if binary_enabled:
+        bambuddy_revision = bambuddy_settings.revision
+        return
     if bambuddy_settings.enabled:
         capabilities = ["telemetry", "multi_link", "bounded_replay"]
         if bambuddy_settings.scheme in ("https", "http"):
@@ -148,6 +182,9 @@ link_configs = getattr(config, "BMCU_LINKS", None)
 if not link_configs:
     link_configs = ({"id": "bmcu-a", "uart": config.UART_ID,
                      "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN},)
+binary_link_indexes = {
+    item["id"]: index for index, item in enumerate(link_configs)
+}
 
 # One loop pass can be stretched by a single TLS handshake step (an RSA
 # verification can hold the CPU for hundreds of milliseconds), and the default
@@ -156,15 +193,74 @@ if not link_configs:
 # commissioned. 2048 bytes buy ~178 ms of headroom.
 DEFAULT_UART_RXBUF = getattr(config, "UART_RXBUF", 2048)
 
+binary_enabled = bool(getattr(config, "BMCU_BINARY_ENABLED", False))
+binary_outbox = None
+binary_client = None
+binary_journal = None
+if binary_enabled:
+    try:
+        import uos as _binary_os
+    except ImportError:
+        import os as _binary_os
+    try:
+        import ubinascii as _binary_binascii
+    except ImportError:
+        import binascii as _binary_binascii
+    boot_bytes = _binary_os.urandom(8)
+    binary_boot_id = int.from_bytes(boot_bytes, "big")
+    binary_outbox = BMB1Outbox(
+        binary_boot_id, link_count=len(link_configs),
+        durable_slots=getattr(config, "BMCU_BINARY_QUEUE_SLOTS", 128))
+    journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
+    recover_directory(journal_path, binary_outbox.restore)
+    binary_journal = BMJ1Journal(
+        journal_path, binary_boot_id, monotonic_us.now(),
+        staging_slots=getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4))
+    binary_outbox.journal = binary_journal
+    key_hex = getattr(config, "BMCU_BINARY_DEVICE_KEY", "")
+    if len(key_hex) != 64:
+        raise ValueError("BMCU_BINARY_DEVICE_KEY must be 64 hex characters")
+    binary_client = BMB1TCPClient(
+        binary_outbox,
+        getattr(config, "BMCU_BINARY_HOST", ""),
+        int(getattr(config, "BMCU_BINARY_PORT", 8766)),
+        getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
+        _binary_binascii.unhexlify(key_hex),
+        getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
+        tuple((index, item["id"].encode())
+              for index, item in enumerate(link_configs)),
+        clock_ms=time.ticks_ms)
+
 monitors = []
-for link in link_configs:
+for link_index, link in enumerate(link_configs):
     link_id = link["id"]
     uart = UART(link["uart"], baudrate=link.get("baudrate", config.UART_BAUDRATE),
                 bits=8, parity=0, stop=1, tx=Pin(link["tx"]), rx=Pin(link["rx"]),
                 rxbuf=link.get("rxbuf", DEFAULT_UART_RXBUF))
-    monitors.append(BMCUMonitor(uart, publish, link_id=link_id))
+    monitors.append(BMCUMonitor(
+        uart, publish, link_id=link_id, link_index=link_index,
+        on_valid_frame=(binary_outbox.enqueue_raw
+                        if binary_outbox is not None else None)))
 
 monitor_by_id = {monitor.link_id: monitor for monitor in monitors}
+
+
+def binary_control_executor(link_index, command, arguments):
+    global reset_operation_nonce
+    if command != 1 or link_index >= len(monitors):
+        raise ValueError("unsupported")
+    monitor = monitors[link_index]
+    guard_error = monitor.soft_reset_guard_error()
+    if guard_error is not None:
+        raise ValueError(guard_error)
+    reason = arguments[0] if len(arguments) else 0
+    reset_operation_nonce = (reset_operation_nonce + 1) & 0xffffffff or 1
+    monitor.request_soft_reset(reset_operation_nonce, reason, 5000)
+    return b"accepted"
+
+
+if binary_client is not None:
+    binary_client.control_handler = binary_control_executor
 
 
 def control_executor(link_id, command, payload):
@@ -214,7 +310,15 @@ wifi = WiFiStation(secrets, publish_wifi)
 
 
 def transport_state():
-    if bambuddy_client is not None:
+    if binary_client is not None:
+        result = {
+            "state": binary_client.state,
+            "last_error": binary_client.last_error,
+            "queue_depth": binary_outbox.queue_depth,
+            "dropped_count": binary_outbox.forced_drop_count,
+            "pico_boot_session": binary_outbox.pico_boot_id,
+        }
+    elif bambuddy_client is not None:
         result = bambuddy_client.status()
     else:
         result = {
@@ -359,6 +463,7 @@ def recover_web():
 last_transport_state = None
 last_transport_log_ms = None
 last_transport_error = None
+next_uart_index = 0
 
 
 def record_exception(component, error):
@@ -370,12 +475,16 @@ def record_exception(component, error):
 
 def service_once(now_ms):
     global last_transport_state, last_transport_log_ms, last_transport_error
+    global next_uart_index
     # Keep BMCU UART service ahead of Wi-Fi, WebSocket, and HTTP work.
-    for monitor in monitors:
-        try:
-            monitor.poll(now_ms)
-        except Exception as error:
-            record_exception("bmcu." + monitor.link_id + ".poll", error)
+    try:
+        next_uart_index, _ = drain_monitors(
+            monitors, now_ms,
+            byte_budget=getattr(config, "BMCU_UART_DRAIN_BUDGET", 1024),
+            chunk_size=getattr(config, "BMCU_UART_DRAIN_CHUNK", 128),
+            start_index=next_uart_index)
+    except Exception as error:
+        record_exception("bmcu.drain", error)
     try:
         wifi.poll(now_ms)
     except Exception as error:
@@ -384,7 +493,12 @@ def service_once(now_ms):
         reconcile_bambuddy()
     except Exception as error:
         record_exception("bambuddy.reconcile", error)
-    if bambuddy_client is not None:
+    if binary_client is not None:
+        try:
+            binary_client.poll(now_ms, wifi.state == "online")
+        except Exception as error:
+            record_exception("bambuddy.binary.poll", error)
+    elif bambuddy_client is not None:
         try:
             service_control_transitions()
             bambuddy_client.poll(now_ms, wifi.state == "online")
@@ -405,6 +519,12 @@ def service_once(now_ms):
                 last_transport_log_ms = now_ms
                 last_transport_error = current_error
             last_transport_state = current_transport_state
+    if (binary_journal is not None and
+            not any(monitor.uart.any() for monitor in monitors)):
+        try:
+            binary_journal.flush_one(monotonic_us.now())
+        except Exception as error:
+            record_exception("bmcu.journal.flush", error)
     try:
         web.poll()
     except Exception as error:

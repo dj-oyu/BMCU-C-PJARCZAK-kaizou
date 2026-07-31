@@ -132,16 +132,22 @@ def write_log(out, offset, flags, transport_sequence, pico_boot_id,
 
 
 def write_hello(out, offset, flags, pico_boot_id, device_id, firmware, links,
-                oldest_sequence, newest_sequence, auth_hmac):
+                replay_boot_ranges, auth_hmac):
     if len(device_id) > C.MAX_DEVICE_ID_BYTES:
         raise CodecError("device id too large")
     if len(firmware) > C.MAX_FIRMWARE_BYTES:
         raise CodecError("firmware too large")
     if len(links) > C.MAX_LINK_COUNT:
         raise CodecError("too many links")
+    if (not replay_boot_ranges or
+            len(replay_boot_ranges) > C.MAX_REPLAY_BOOT_RANGES):
+        raise CodecError("invalid replay boot range count")
+    if replay_boot_ranges[0][0] != pico_boot_id:
+        raise CodecError("current boot range must be first")
     if len(auth_hmac) != 32:
         raise CodecError("HELLO HMAC must be 32 bytes")
-    payload_length = 1 + len(device_id) + 1 + len(firmware) + 1 + 16 + 32
+    payload_length = (1 + len(device_id) + 1 + len(firmware) + 1 + 1 +
+                      len(replay_boot_ranges) * 24 + 32)
     for link_index, link_id in links:
         if link_index < 0 or link_index >= C.MAX_LINK_COUNT:
             raise CodecError("link index out of range")
@@ -168,8 +174,12 @@ def write_hello(out, offset, flags, pico_boot_id, device_id, firmware, links,
         pos += 2
         memoryview(out)[pos:pos + len(link_id)] = link_id
         pos += len(link_id)
-    struct.pack_into(">QQ", out, pos, oldest_sequence, newest_sequence)
-    pos += 16
+    out[pos] = len(replay_boot_ranges)
+    pos += 1
+    for boot_id, oldest_sequence, newest_sequence in replay_boot_ranges:
+        struct.pack_into(">QQQ", out, pos, boot_id, oldest_sequence,
+                         newest_sequence)
+        pos += 24
     memoryview(out)[pos:pos + 32] = auth_hmac
     return C.HEADER_SIZE + payload_length
 
@@ -308,6 +318,54 @@ def parse_hello_accepted(message):
     if message.message_type != C.HELLO_ACCEPTED or len(message.payload) != 16:
         raise CodecError("invalid HELLO_ACCEPTED")
     return struct.unpack_from(">QII", message.payload, 0)
+
+
+def parse_hello(message):
+    if message.message_type != C.HELLO:
+        raise CodecError("not HELLO")
+    payload = message.payload
+    pos = 0
+
+    def field(maximum):
+        nonlocal pos
+        if pos >= len(payload):
+            raise CodecError("truncated HELLO")
+        size = payload[pos]
+        pos += 1
+        if size > maximum or size > len(payload) - pos:
+            raise CodecError("invalid HELLO field")
+        result = payload[pos:pos + size]
+        pos += size
+        return result
+
+    device_id = field(C.MAX_DEVICE_ID_BYTES)
+    firmware = field(C.MAX_FIRMWARE_BYTES)
+    if pos >= len(payload):
+        raise CodecError("truncated HELLO links")
+    link_count = payload[pos]
+    pos += 1
+    if link_count > C.MAX_LINK_COUNT:
+        raise CodecError("too many HELLO links")
+    links = []
+    for _ in range(link_count):
+        if pos >= len(payload):
+            raise CodecError("truncated HELLO link")
+        link_index = payload[pos]
+        pos += 1
+        links.append((link_index, field(C.MAX_LINK_ID_BYTES)))
+    if pos >= len(payload):
+        raise CodecError("truncated replay boot table")
+    boot_count = payload[pos]
+    pos += 1
+    if not boot_count or boot_count > C.MAX_REPLAY_BOOT_RANGES:
+        raise CodecError("invalid replay boot count")
+    if len(payload) - pos != boot_count * 24 + 32:
+        raise CodecError("invalid HELLO replay table")
+    ranges = []
+    for _ in range(boot_count):
+        ranges.append(struct.unpack_from(">QQQ", payload, pos))
+        pos += 24
+    return device_id, firmware, tuple(links), tuple(ranges), payload[pos:]
 
 
 def parse_ack(message):

@@ -42,8 +42,8 @@
       "sha256": "3d1c4e5728eaae5623f9e02e14084d1cb83762825cf518250bc8f3bb664e5b33"
     },
     "hello.bin": {
-      "bytes": 116,
-      "sha256": "824b215bf40b4e8ced8d78f76224717da4d04740095a98291b3552729522605f"
+      "bytes": 149,
+      "sha256": "313bed7ec034bcd14dc688647d843c2382c2c455bf56f156bb679f91c2bdda17"
     },
     "link_state.bin": {
       "bytes": 44,
@@ -71,13 +71,13 @@
     },
     "truncated_header.bin": {
       "bytes": 17,
-      "sha256": "3a1fab201fa51c52296d4db57307a487bd40afee60782ee2e3f571b0c5f9bf46"
+      "sha256": "561b4c5817c6749abae1a2ef2890da0e29276f3fd4600a65cb39a0aaf15d182e"
     }
   },
   "auth": {
     "device_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "challenge_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
     "pico_boot_id": 72623859790382856,
-    "hello_hmac_hex": "ac4f9669c7ea3a713080f029913cd27663547fbecdde4795f12549fe8251d236"
+    "hello_hmac_hex": "620b8765152873f320bd1c0bc6e7b223597603d18a768e2458890070f8831c21"
   }
 }

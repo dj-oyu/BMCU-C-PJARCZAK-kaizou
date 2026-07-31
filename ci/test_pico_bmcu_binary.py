@@ -254,6 +254,16 @@ class FixtureTests(unittest.TestCase):
         raw, messages, _ = self.load_messages("hello.bin")
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0].message_type, C.HELLO)
+        device, firmware, links, ranges, mac = binary.parse_hello(messages[0])
+        self.assertEqual(bytes(device), b"pico-fixture")
+        self.assertEqual(bytes(firmware), b"1.0.0")
+        self.assertEqual([(index, bytes(name)) for index, name in links],
+                         [(0, b"bmcu-a"), (1, b"bmcu-b")])
+        self.assertEqual(ranges, (
+            (0x0102030405060708, 7, 42),
+            (0x8877665544332211, 2, 9),
+        ))
+        self.assertEqual(len(mac), 32)
         truncated, messages, parser = self.load_messages("truncated_header.bin")
         self.assertEqual(len(truncated), 17)
         self.assertEqual(messages, [])

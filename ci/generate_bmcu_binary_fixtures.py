@@ -35,12 +35,17 @@ def bmcu(kind, sequence, payload):
     return b"\xA5\x5A" + body + crc16(body).to_bytes(2, "little")
 
 
-def auth_transcript(device_id, firmware, links, oldest, newest):
+def auth_transcript(device_id, firmware, links, replay_boot_ranges):
     result = bytes((len(device_id),)) + device_id
     result += bytes((len(firmware),)) + firmware + bytes((len(links),))
     for index, link_id in links:
         result += bytes((index, len(link_id))) + link_id
-    return result + oldest.to_bytes(8, "big") + newest.to_bytes(8, "big")
+    result += bytes((len(replay_boot_ranges),))
+    for boot_id, oldest, newest in replay_boot_ranges:
+        result += (boot_id.to_bytes(8, "big") +
+                   oldest.to_bytes(8, "big") +
+                   newest.to_bytes(8, "big"))
+    return result
 
 
 def hmac256(key, *parts):
@@ -56,7 +61,12 @@ def main():
     device_id, firmware = b"pico-fixture", b"1.0.0"
     links = ((0, b"bmcu-a"), (1, b"bmcu-b"))
     oldest, newest = 7, 42
-    transcript = auth_transcript(device_id, firmware, links, oldest, newest)
+    replay_boot_ranges = (
+        (boot, oldest, newest),
+        (0x8877665544332211, 2, 9),
+    )
+    transcript = auth_transcript(
+        device_id, firmware, links, replay_boot_ranges)
     hello_mac = hmac256(
         key, b"BMB1-AUTH", challenge, boot.to_bytes(8, "big"), transcript)
 
@@ -65,8 +75,8 @@ def main():
             binary.write_message, C.SERVER_CHALLENGE, 0, 0, 0,
             0, challenge),
         "hello.bin": encoded(
-            binary.write_hello, 0, boot, device_id, firmware, links, oldest,
-            newest, hello_mac),
+            binary.write_hello, 0, boot, device_id, firmware, links,
+            replay_boot_ranges, hello_mac),
         "link_state.bin": encoded(
             binary.write_link_state, 0, 8, boot, 0, 123456, C.LINK_ONLINE, 0),
         "transport_drop.bin": encoded(

@@ -154,10 +154,17 @@ repeated:
   u8 link_index
   u8 link_id_length
   bytes link_id, UTF-8, maximum 31 bytes
-u64  oldest_available_sequence
-u64  newest_available_sequence
+u8   replay_boot_count, maximum 8 in v1
+repeated:
+  u64 boot_id
+  u64 oldest_available_sequence
+  u64 newest_available_sequence
 bytes hmac_sha256, 32 bytes
 ```
+
+The current boot ID must appear in the replay table. A boot with no durable
+records uses zero for both range values. Restored journal boots are included
+while any record from that boot remains available for replay.
 
 The HMAC input is the exact concatenation:
 
@@ -166,8 +173,13 @@ The HMAC input is the exact concatenation:
 device_id_length || device_id ||
 firmware_length || firmware ||
 link table ||
-oldest_available_sequence || newest_available_sequence
+replay_boot_count || replay boot range table
 ```
+
+For a newly observed boot, Bambuddy initializes contiguous ACK tracking
+immediately before `oldest_available_sequence`; it must never wait for a
+prefix the Pico has declared unavailable. A zero range starts at watermark
+zero. A range whose oldest value is greater than its newest value is invalid.
 
 CONTROL messages use a session key derived as:
 
@@ -253,6 +265,20 @@ u8  argument_length
 bytes arguments, maximum 128 bytes
 bytes hmac_sha256
 ```
+
+`issued_at_us` is session-relative, with zero defined as the instant Bambuddy
+sends `HELLO_ACCEPTED`. The Pico establishes its local monotonic epoch when the
+complete `HELLO_ACCEPTED` is received and rejects a command when its local
+elapsed microseconds exceed `issued_at_us + ttl_ms * 1000`. A new authenticated
+session resets this epoch and the CONTROL replay window. Wall clocks are never
+used for CONTROL expiry.
+
+`issued_at_us` uses a session-relative clock. Time zero is the instant
+Bambuddy sends `HELLO_ACCEPTED`; the Pico records its local monotonic time when
+the complete `HELLO_ACCEPTED` is received. A command is expired when the
+Pico's elapsed session time is greater than
+`issued_at_us + ttl_ms * 1000`. The command replay window and clock epoch reset
+only after a newly authenticated session is accepted.
 
 The Pico rejects an expired, replayed, unauthenticated, unknown, or unsafe
 command and returns a `CONTROL_RESULT`. No motor, slot, or filament movement
@@ -427,6 +453,12 @@ u64 received_at_us
 bytes record payload
 u32 record_crc32
 ```
+
+`record_length` is the total record size, including the 24-byte record header,
+payload, and trailing 4-byte CRC. Its valid range is therefore 28 through
+4124 bytes in v1. The payload is the BMB1 payload only, not a complete nested
+BMB1 message. Replay reconstructs the BMB1 header from the segment boot ID and
+the record type, flags, link index, and transport sequence.
 
 The journal writer buffers records in preallocated RAM and writes a bounded
 chunk only after UART servicing. A flash write must never be performed inline
@@ -628,6 +660,13 @@ Raw BMCU bytes may be stored alongside decoded fields to allow later decoder
 correction. Database uniqueness must enforce the replay identity. UI WebSocket
 broadcasts are produced after persistence and are not part of the Pico
 transport contract.
+
+Database schemas must preserve the complete unsigned 64-bit wire domain on
+both SQLite and PostgreSQL. The v1 Bambuddy representation uses lowercase
+16-digit hexadecimal text for boot IDs and zero-padded 20-digit decimal text
+for transport sequences and ACK watermarks. Fixed width preserves numeric
+ordering in indexed text comparisons; arithmetic and contiguity checks convert
+the validated value to a Python integer.
 
 ## 14. Failure behavior
 

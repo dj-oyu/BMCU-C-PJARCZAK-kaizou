@@ -21,3 +21,15 @@ BMCU_LINKS = (
 # Legacy UART_* values remain the single-link fallback when BMCU_LINKS is empty.
 
 DEBUG_USB = False
+# Optional BMB1 transport. Existing JSON transport remains active unless this
+# feature switch is enabled.
+BMCU_BINARY_ENABLED = False
+BMCU_BINARY_HOST = "192.168.1.10"
+BMCU_BINARY_PORT = 8766
+BMCU_BINARY_DEVICE_ID = "pico-bmcu-bridge"
+BMCU_BINARY_DEVICE_KEY = ""
+BMCU_BINARY_JOURNAL_PATH = "bmcu_history"
+BMCU_BINARY_QUEUE_SLOTS = 128
+BMCU_BINARY_JOURNAL_STAGING_SLOTS = 4
+BMCU_UART_DRAIN_BUDGET = 1024
+BMCU_UART_DRAIN_CHUNK = 128

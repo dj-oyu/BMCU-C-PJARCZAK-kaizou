@@ -74,7 +74,7 @@ class FrameDecoder:
         self.crc_errors = 0
         self.frame_errors = 0
 
-    def feed(self, data):
+    def feed(self, data, on_valid_wire=None):
         if len(data) > MAX_DECODER_BUFFER:
             self.frame_errors += 1
             data = data[-MAX_DECODER_BUFFER:]
@@ -109,10 +109,14 @@ class FrameDecoder:
                 self.crc_errors += 1
                 self._buffer = self._buffer[1:]
                 continue
-            frames.append({
+            wire = bytes(self._buffer[:wire_length])
+            frame = {
                 "version": body[0], "kind": body[1], "sequence": _u16(body, 2),
                 "payload": bytes(body[5:]),
-            })
+            }
+            if on_valid_wire is not None:
+                on_valid_wire(memoryview(wire), frame)
+            frames.append(frame)
             self._buffer = self._buffer[wire_length:]
         return frames
 
@@ -133,11 +137,14 @@ class BMCUMonitor:
     OUTSTANDING_GET_STATUS_TTL_MS = 3000
 
 
-    def __init__(self, uart, on_message=None, link_id="bmcu-a"):
+    def __init__(self, uart, on_message=None, link_id="bmcu-a",
+                 link_index=0, on_valid_frame=None):
         self.uart = uart
         self.on_message = on_message
         self.decoder = FrameDecoder()
         self.link_id = link_id
+        self.link_index = link_index
+        self.on_valid_frame = on_valid_frame
         self.next_sequence = 1
         self.last_valid_ms = None
         self.last_ping_ms = None
@@ -308,14 +315,26 @@ class BMCUMonitor:
         self._last_hw_tick32 = tick32
         message["hw_tick64"] = self._hw_tick_epoch + tick32
 
-    def poll(self, now_ms):
-        available = min(self.uart.any(), MAX_DECODER_BUFFER)
+    def poll_uart(self, now_ms, max_bytes=MAX_DECODER_BUFFER):
+        available = min(self.uart.any(), max_bytes)
         self._clock_ms = now_ms
         if available:
             data = self.uart.read(available)
             if data:
-                for frame in self.decoder.feed(data):
+                received_at_us = now_ms * 1000
+
+                def accepted(wire, metadata):
+                    if self.on_valid_frame is not None:
+                        self.on_valid_frame(
+                            self.link_index, received_at_us, wire, metadata)
+
+                for frame in self.decoder.feed(data, accepted):
                     self._handle_frame(frame, now_ms)
+                return len(data)
+        return 0
+
+    def service_maintenance(self, now_ms):
+        self._clock_ms = now_ms
         self._service_snapshot_timeout(now_ms)
         if self.is_stale(now_ms) and self.link_state not in ("stale", "incompatible"):
             self.link_state = "stale"
@@ -323,6 +342,9 @@ class BMCUMonitor:
             self._last_unsolicited_sequence = None
             self._emit({"type": "link_state", "state": "stale"})
 
+    def poll(self, now_ms):
+        self.poll_uart(now_ms)
+        self.service_maintenance(now_ms)
 
     def is_stale(self, now_ms):
         if self.last_valid_ms is None:
@@ -407,7 +429,6 @@ class BMCUMonitor:
         else:
             message.update({"type": "unknown_or_invalid", "payload": payload})
         self._emit(message)
-
     @staticmethod
     def _decode_status(data):
         return {"hw_tick32": _u32(data, 0), "tx_drop": _u16(data, 4), "rx_drop": _u16(data, 6),
@@ -628,3 +649,26 @@ class BMCUMonitor:
             self.ams_service = ams_service
             self.ams_registration = ams_registration
             message["snapshot_complete"] = True
+
+
+def drain_monitors(monitors, now_ms, byte_budget=1024, chunk_size=128,
+                   start_index=0):
+    """Fairly drain multiple UARTs within one explicit byte budget."""
+    if not monitors or byte_budget <= 0:
+        return start_index, 0
+    index = start_index % len(monitors)
+    drained = 0
+    idle = 0
+    while drained < byte_budget and idle < len(monitors):
+        monitor = monitors[index]
+        amount = monitor.poll_uart(
+            now_ms, min(chunk_size, byte_budget - drained))
+        index = (index + 1) % len(monitors)
+        if amount:
+            drained += amount
+            idle = 0
+        else:
+            idle += 1
+    for monitor in monitors:
+        monitor.service_maintenance(now_ms)
+    return index, drained
