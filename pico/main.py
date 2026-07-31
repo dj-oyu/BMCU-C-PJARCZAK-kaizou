@@ -1,27 +1,28 @@
-"""Pico W and Pico 2 W entry point for the BMCU H1 monitor link."""
+"""Pico W / Pico 2 W BMCU monitor with binary-only production paths."""
 
-import time
 import gc
 import machine
+import time
 try:
-    import ujson as json
+    import ubinascii as binascii
 except ImportError:
-    import json
+    import binascii
+try:
+    import uos as os
+except ImportError:
+    import os
 from machine import UART, Pin
 
-from bambuddy_config import BambuddyConfig
-from bambuddy_transport import BambuddyOutbox
-from bambuddy_https import BambuddyNdjsonClient
-from bambuddy_ws import BambuddyWebSocketClient
+import bmcu_binary as binary
+import bmcu_binary_constants as C
 from bambuddy_binary_tcp import BMB1TCPClient
 from bmcu_binary_outbox import BMB1Outbox
-import bmcu_binary_constants as binary_constants
 from bmcu_journal import BMJ1Journal, recover_directory
-from bmcu_control import ControlGateway
 from bmcu_link import BMCUMonitor, drain_monitors
+from device_metrics import DeviceMetrics
 from runtime_log import PicoRuntimeLog
-from wifi import WiFiStation
 from web_ui import WebUI
+from wifi import WiFiStation
 
 try:
     import config
@@ -34,7 +35,6 @@ except ImportError:
         WEB_PORT = 80
         DEBUG_USB = False
         BMCU_LINKS = None
-        BMCU_BINARY_ENABLED = False
 
 try:
     import secrets
@@ -43,8 +43,6 @@ except ImportError:
 
 
 class MonotonicMicros:
-    """Extends wrapping MicroPython ticks_us into a boot-scoped monotonic u64."""
-
     def __init__(self):
         self.previous = time.ticks_us()
         self.total = 0
@@ -58,412 +56,165 @@ class MonotonicMicros:
         return self.total
 
 
-def json_safe(value):
-    if isinstance(value, bytes):
-        return value.hex()
-    if isinstance(value, dict):
-        return {key: json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [json_safe(item) for item in value]
-    return value
+def ticks_diff(left, right):
+    return time.ticks_diff(left, right) if hasattr(
+        time, "ticks_diff") else left - right
 
 
 bridge_id = getattr(
-    config, "BRIDGE_ID", getattr(secrets, "MDNS_HOSTNAME", "pico-bmcu-bridge"))
-bambuddy_settings = BambuddyConfig(secrets)
-bambuddy_outbox = BambuddyOutbox(bridge_id)
-bambuddy_client = None
-bambuddy_control = None
-bambuddy_revision = -1
+    config, "BRIDGE_ID", getattr(secrets, "MDNS_HOSTNAME",
+                                 "pico-bmcu-bridge"))
 monotonic_us = MonotonicMicros()
-reset_operation_nonce = time.ticks_ms() & 0xffffffff
-runtime_log = PicoRuntimeLog(time.ticks_ms)
-runtime_log.info("boot", "Pico application started", {
-    "reset_cause": machine.reset_cause(),
-})
+boot_id = int.from_bytes(os.urandom(8), "big")
+link_configs = getattr(config, "BMCU_LINKS", None) or ({
+    "id": "bmcu-a", "uart": config.UART_ID,
+    "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN,
+},)
+journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
+outbox = BMB1Outbox(
+    boot_id, len(link_configs),
+    getattr(config, "BMCU_BINARY_QUEUE_SLOTS", 128))
+recover_directory(journal_path, outbox.restore)
+journal = BMJ1Journal(
+    journal_path, boot_id, monotonic_us.now(),
+    getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4))
+outbox.journal = journal
 
 
-def publish(message):
-    # UART callbacks only build and enqueue. Socket I/O runs later in the loop.
-    if binary_outbox is not None and (
-            message.get("type") in (
-                "link_state", "resync", "protocol_error", "hello") or
-            message.get("snapshot_complete")):
-        link_index = binary_link_indexes.get(message.get("link_id"))
-        if link_index is not None:
-            state_name = message.get("state")
-            if message.get("type") == "resync":
-                state_name = "resyncing"
-            elif message.get("type") == "hello":
-                state_name = "resyncing"
-            elif message.get("type") == "protocol_error":
-                state_name = "incompatible"
-            elif message.get("snapshot_complete"):
-                state_name = "online"
-            states = {
-                "resyncing": binary_constants.LINK_RESYNCING,
-                "online": binary_constants.LINK_ONLINE,
-                "stale": binary_constants.LINK_STALE,
-                "offline": binary_constants.LINK_OFFLINE,
-                "incompatible": binary_constants.LINK_INCOMPATIBLE,
-            }
-            state = states.get(state_name, binary_constants.LINK_UNKNOWN)
-            binary_outbox.enqueue_link_state(
-                link_index, monotonic_us.now(), state,
-                binary_constants.LINK_REASON_UNSPECIFIED)
-    if bambuddy_settings.enabled:
-        bambuddy_outbox.publish(
-            message, time.ticks_ms(), monotonic_us.now())
-    if getattr(config, "DEBUG_USB", False):
-        print(json.dumps(json_safe(message)))
+def log_sink(record_type, flags, link_index, received_at_us, payload,
+             journal_record):
+    outbox.enqueue_payload(
+        record_type, flags, link_index, received_at_us, payload,
+        journal_record)
 
 
-def publish_wifi(message):
-    if message.get("type") == "wifi_state":
-        details = {"state": message.get("state")}
-        if message.get("ip"):
-            details["ip"] = message["ip"]
-        if message.get("error"):
-            details["error"] = str(message["error"])[:160]
-        runtime_log.info("wifi", "state changed", details)
-    publish(message)
-
-
-def reconcile_bambuddy():
-    global bambuddy_client, bambuddy_control, bambuddy_revision
-    if bambuddy_revision == bambuddy_settings.revision:
-        return
-    if bambuddy_client is not None:
-        bambuddy_client.stop()
-        bambuddy_client = None
-    bambuddy_control = None
-    if binary_enabled:
-        bambuddy_revision = bambuddy_settings.revision
-        return
-    if bambuddy_settings.enabled:
-        capabilities = ["telemetry", "multi_link", "bounded_replay"]
-        if bambuddy_settings.scheme in ("https", "http"):
-            # The NDJSON fallback cannot carry commands (TRANSPORT.md sec. 6),
-            # so no CONTROL gateway and no control capability are announced.
-            bambuddy_client = BambuddyNdjsonClient(
-                bambuddy_outbox,
-                bambuddy_settings.url,
-                bambuddy_settings.token,
-                firmware=getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3"),
-                capabilities=capabilities,
-                clock_us=monotonic_us.now,
-                tls_ca=bambuddy_settings.tls_ca,
-                tls_insecure=bambuddy_settings.tls_insecure,
-            )
-            bambuddy_revision = bambuddy_settings.revision
-            return
-        if bambuddy_settings.control_enabled and bambuddy_settings.control_key:
-            bambuddy_control = ControlGateway(
-                bridge_id, bambuddy_outbox.pico_boot_session,
-                bambuddy_settings.control_key,
-                bambuddy_settings.control_enabled,
-                list(monitor_by_id), control_executor)
-            capabilities.append("control:soft_reset")
-        bambuddy_client = BambuddyWebSocketClient(
-            bambuddy_outbox,
-            bambuddy_settings.url,
-            bambuddy_settings.token,
-            firmware=getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3"),
-            capabilities=capabilities,
-            clock_us=monotonic_us.now,
-            control=bambuddy_control,
-            tls_ca=bambuddy_settings.tls_ca,
-            tls_insecure=bambuddy_settings.tls_insecure,
-        )
-    bambuddy_revision = bambuddy_settings.revision
-
-
-link_configs = getattr(config, "BMCU_LINKS", None)
-if not link_configs:
-    link_configs = ({"id": "bmcu-a", "uart": config.UART_ID,
-                     "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN},)
-binary_link_indexes = {
-    item["id"]: index for index, item in enumerate(link_configs)
-}
-
-# One loop pass can be stretched by a single TLS handshake step (an RSA
-# verification can hold the CPU for hundreds of milliseconds), and the default
-# 256-byte UART ring overflows in ~22 ms at 115200 baud. Size the ring for that
-# worst case instead of corrupting the BMCU link whenever wss:// or https:// is
-# commissioned. 2048 bytes buy ~178 ms of headroom.
-DEFAULT_UART_RXBUF = getattr(config, "UART_RXBUF", 2048)
-
-binary_enabled = bool(getattr(config, "BMCU_BINARY_ENABLED", False))
-binary_outbox = None
-binary_client = None
-binary_journal = None
-if binary_enabled:
-    try:
-        import uos as _binary_os
-    except ImportError:
-        import os as _binary_os
-    try:
-        import ubinascii as _binary_binascii
-    except ImportError:
-        import binascii as _binary_binascii
-    boot_bytes = _binary_os.urandom(8)
-    binary_boot_id = int.from_bytes(boot_bytes, "big")
-    binary_outbox = BMB1Outbox(
-        binary_boot_id, link_count=len(link_configs),
-        durable_slots=getattr(config, "BMCU_BINARY_QUEUE_SLOTS", 128))
-    journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
-    recover_directory(journal_path, binary_outbox.restore)
-    binary_journal = BMJ1Journal(
-        journal_path, binary_boot_id, monotonic_us.now(),
-        staging_slots=getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4))
-    binary_outbox.journal = binary_journal
-    key_hex = getattr(config, "BMCU_BINARY_DEVICE_KEY", "")
-    if len(key_hex) != 64:
-        raise ValueError("BMCU_BINARY_DEVICE_KEY must be 64 hex characters")
-    binary_client = BMB1TCPClient(
-        binary_outbox,
-        getattr(config, "BMCU_BINARY_HOST", ""),
-        int(getattr(config, "BMCU_BINARY_PORT", 8766)),
-        getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
-        _binary_binascii.unhexlify(key_hex),
-        getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
-        tuple((index, item["id"].encode())
-              for index, item in enumerate(link_configs)),
-        clock_ms=time.ticks_ms)
+runtime_log = PicoRuntimeLog(
+    time.ticks_ms, pico_boot_id=boot_id, sink=log_sink)
+runtime_log.info("boot", "Pico application started")
+metrics = DeviceMetrics()
 
 monitors = []
-for link_index, link in enumerate(link_configs):
-    link_id = link["id"]
-    uart = UART(link["uart"], baudrate=link.get("baudrate", config.UART_BAUDRATE),
-                bits=8, parity=0, stop=1, tx=Pin(link["tx"]), rx=Pin(link["rx"]),
-                rxbuf=link.get("rxbuf", DEFAULT_UART_RXBUF))
+
+
+def enqueue_raw_metric(link_index, received_at_us, wire, metadata):
+    started = monotonic_us.now()
+    result = outbox.enqueue_raw(
+        link_index, received_at_us, wire, metadata)
+    metrics.observe_transport_encode(monotonic_us.now() - started)
+    return result
+
+
+for link_index, item in enumerate(link_configs):
+    rxbuf = item.get("rxbuf", getattr(config, "UART_RXBUF", 2048))
+    uart = UART(
+        item["uart"], baudrate=item.get("baudrate", config.UART_BAUDRATE),
+        bits=8, parity=0, stop=1, tx=Pin(item["tx"]), rx=Pin(item["rx"]),
+        rxbuf=rxbuf)
     monitors.append(BMCUMonitor(
-        uart, publish, link_id=link_id, link_index=link_index,
-        on_valid_frame=(binary_outbox.enqueue_raw
-                        if binary_outbox is not None else None)))
-
-monitor_by_id = {monitor.link_id: monitor for monitor in monitors}
+        uart, link_id=item["id"], link_index=link_index,
+        on_valid_frame=enqueue_raw_metric, uart_capacity=rxbuf))
 
 
-def binary_control_executor(link_index, command, arguments):
-    global reset_operation_nonce
-    if command != 1 or link_index >= len(monitors):
+def binary_control(link_index, command, arguments):
+    if command != C.CONTROL_SOFT_RESET or link_index >= len(monitors):
         raise ValueError("unsupported")
     monitor = monitors[link_index]
-    guard_error = monitor.soft_reset_guard_error()
-    if guard_error is not None:
-        raise ValueError(guard_error)
+    guard = monitor.soft_reset_guard_error()
+    if guard:
+        raise ValueError(guard)
     reason = arguments[0] if len(arguments) else 0
-    reset_operation_nonce = (reset_operation_nonce + 1) & 0xffffffff or 1
-    monitor.request_soft_reset(reset_operation_nonce, reason, 5000)
+    operation_id = (time.ticks_ms() & 0xFFFFFFFF) or 1
+    monitor.request_soft_reset(operation_id, reason, 5000)
     return b"accepted"
 
 
-if binary_client is not None:
-    binary_client.control_handler = binary_control_executor
+key_hex = getattr(config, "BMCU_BINARY_DEVICE_KEY", "")
+if len(key_hex) != 64:
+    raise ValueError("BMCU_BINARY_DEVICE_KEY must be 64 hex characters")
+client = BMB1TCPClient(
+    outbox, getattr(config, "BMCU_BINARY_HOST", ""),
+    int(getattr(config, "BMCU_BINARY_PORT", 8766)),
+    getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
+    binascii.unhexlify(key_hex),
+    getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
+    tuple((index, item["id"].encode())
+          for index, item in enumerate(link_configs)),
+    clock_ms=time.ticks_ms, control_handler=binary_control,
+    clock_us=monotonic_us.now,
+    send_metric=metrics.observe_transport_send)
 
 
-def control_executor(link_id, command, payload):
-    """Convert one authenticated CONTROL command into a BMCU UART request.
-
-    Raises ValueError so refusals surface as signed rejections. The BMCU
-    re-checks its own safety predicates regardless of what passes here.
-    """
-    global reset_operation_nonce
-    monitor = monitor_by_id.get(link_id)
-    if monitor is None:
-        raise ValueError("unknown_link")
-    guard_error = monitor.soft_reset_guard_error()
-    if guard_error is not None:
-        raise ValueError("precondition_failed")
-    reset_operation_nonce = (reset_operation_nonce + 1) & 0xffffffff
-    if reset_operation_nonce == 0:
-        reset_operation_nonce = 1
-    sequence = monitor.request_soft_reset(
-        reset_operation_nonce, int(payload.get("reason", 0)),
-        int(payload.get("ttl_ms", 5000)))
-    return {"bmcu_operation_id": reset_operation_nonce, "sequence": sequence}
+def wifi_event(message):
+    if message.get("type") == "wifi_state":
+        runtime_log.info("wifi", "state changed")
 
 
-_CONTROL_TRANSITIONS = {
-    "cancelled": "cancelled", "rejected": "cancelled",
-    "rebooted": "rebooted", "completed": "completed",
-}
+wifi = WiFiStation(secrets, wifi_event)
+diagnostic_frame = bytearray(C.MAX_MESSAGE_SIZE)
 
 
-def service_control_transitions():
-    if bambuddy_control is None:
-        return
-    for operation_id, link_id in bambuddy_control.pending_links():
-        monitor = monitor_by_id.get(link_id)
-        soft_reset = monitor.soft_reset if monitor is not None else None
-        if not soft_reset:
-            continue
-        status = _CONTROL_TRANSITIONS.get(soft_reset.get("state"))
-        if status is None:
-            continue
-        detail = {"bmcu_state": soft_reset.get("state")}
-        if soft_reset.get("cancel_reason") is not None:
-            detail["cancel_reason"] = soft_reset["cancel_reason"]
-        bambuddy_control.report_transition(operation_id, status, detail)
-wifi = WiFiStation(secrets, publish_wifi)
+def diagnostic_message():
+    rssi = None
+    try:
+        rssi = wifi.wlan.status("rssi")
+    except Exception:
+        pass
+    payload = metrics.snapshot(
+        time.ticks_ms(), monitors, outbox, client, journal, rssi,
+        runtime_log.exception_count)
+    size = binary.write_diagnostic(
+        diagnostic_frame, 0, 0, 0, boot_id, payload)
+    return memoryview(diagnostic_frame)[:size]
 
 
-def transport_state():
-    if binary_client is not None:
-        result = {
-            "state": binary_client.state,
-            "last_error": binary_client.last_error,
-            "queue_depth": binary_outbox.queue_depth,
-            "dropped_count": binary_outbox.forced_drop_count,
-            "pico_boot_session": binary_outbox.pico_boot_id,
-        }
-    elif bambuddy_client is not None:
-        result = bambuddy_client.status()
-    else:
-        result = {
-            "state": "disabled",
-            "last_error": None,
-            "queue_depth": len(bambuddy_outbox.queue),
-            "dropped_count": bambuddy_outbox.queue.dropped_count,
-            "pico_boot_session": bambuddy_outbox.pico_boot_session,
-        }
-    # Stored control_enabled/control_key_set describe intent. The https:// and
-    # http:// NDJSON fallback carries no commands, so report whether a CONTROL
-    # gateway actually exists rather than letting an operator believe a remote
-    # soft-reset path is armed when it is inert.
-    result["control_active"] = bambuddy_control is not None
-    if bambuddy_control is not None:
-        result["control"] = bambuddy_control.status()
-    return result
+def _query_number(path, name, default, maximum):
+    marker = name + "="
+    if marker not in path:
+        return default
+    value = path.split(marker, 1)[1].split("&", 1)[0]
+    try:
+        return min(maximum, max(0, int(value)))
+    except ValueError:
+        return default
 
 
-def commissioning_state():
-    result = bambuddy_settings.public()
-    transport = transport_state()
-    result["transport"] = transport
-    result["control_active"] = transport["control_active"]
-    return result
-
-
-def pico_state(log_limit=None, include_details=True):
-    gc.collect()
-    result = runtime_log.snapshot(log_limit, include_details)
-    result.update({
-        "uptime_ms": time.ticks_ms(),
-        "heap_free": gc.mem_free(),
-        "heap_alloc": gc.mem_alloc(),
-        "reset_cause": machine.reset_cause(),
-    })
-    return result
-
-
-def device_state(monitor):
-    return {
-        "bridge_id": bridge_id,
-        "link_id": monitor.link_id,
-        "link": monitor.link_state,
-        "bmcu_boot_session": monitor.bmcu_boot_session,
-        "tick_hz": monitor.tick_hz,
-        "status": monitor.status,
-        "snapshot": monitor.snapshot,
-        "channels": monitor.channels,
-        "printer_auth": monitor.printer_auth,
-        "printer_rx": monitor.printer_rx,
-        "printer_tx": monitor.printer_tx,
-        "soft_reset": monitor.soft_reset,
-        "sensors": monitor.sensors,
-        "ams_service": monitor.ams_service,
-        "ams_registration": monitor.ams_registration,
-        "decoder_crc_errors": monitor.decoder.crc_errors,
-        "decoder_frame_errors": monitor.decoder.frame_errors,
-    }
-
-
-def api_state(path="/api/devices"):
-    if path == "/api/devices":
-        # One aggregate for the local page and diagnostics: every link plus
-        # bridge-level Wi-Fi, transport, and Pico runtime state.
-        devices = []
-        for monitor in monitors:
-            entry = device_state(monitor)
-            entry["events"] = monitor.events
-            devices.append(entry)
-        return {
-            "bridge_id": bridge_id,
-            "wifi": {"state": wifi.state, "ip": wifi.ip,
-                     "hostname": wifi.hostname},
-            "bambuddy": transport_state(),
-            "devices": devices,
-            "pico": pico_state(8, False),
-        }
-    if path == "/api/pico/logs":
-        return pico_state(12, True)
-    pieces = path.split("/")
-    if len(pieces) == 5 and pieces[:3] == ["", "api", "devices"]:
-        monitor = monitor_by_id.get(pieces[3])
-        if monitor is None:
-            return None
-        if pieces[4] == "status":
-            return device_state(monitor)
-        if pieces[4] == "events":
-            return {"bridge_id": bridge_id,
-                    "link_id": monitor.link_id, "events": monitor.events}
+def binary_api(path):
+    base = path.split("?", 1)[0]
+    if base == "/api/diagnostics.bin":
+        return diagnostic_message()
+    if base in ("/api/current.bin", "/api/history/status.bin"):
+        return list(outbox.iter_current())
+    if base == "/api/logs.bin":
+        after = _query_number(path, "after", 0, 0xFFFFFFFFFFFFFFFF)
+        limit = _query_number(path, "limit", 32, 64)
+        return list(runtime_log.iter_messages(after, limit))
+    if base == "/api/events.bin":
+        after = _query_number(path, "after", 0, 0xFFFFFFFFFFFFFFFF)
+        limit = _query_number(path, "limit", 32, 64)
+        result = []
+        used = 0
+        for sequence, message, _, _ in outbox.durable.iter_records():
+            if sequence <= after:
+                continue
+            if len(result) >= limit or used + len(message) > 32768:
+                break
+            result.append(message)
+            used += len(message)
+        return result
     return None
 
 
-def local_soft_reset(path, request):
-    global reset_operation_nonce
-    pieces = path.split("/")
-    if len(pieces) != 5 or pieces[:3] != ["", "api", "devices"]:
-        raise ValueError("invalid device path")
-    monitor = monitor_by_id.get(pieces[3])
-    if monitor is None:
-        raise ValueError("unknown BMCU link")
-    expected_csrf = bambuddy_settings.public()["csrf"]
-    if request.get("csrf") != expected_csrf:
-        raise ValueError("invalid CSRF token")
-    if request.get("confirm") != "RESET BMCU":
-        raise ValueError("explicit confirmation is required")
-    guard_error = monitor.soft_reset_guard_error()
-    if guard_error is not None:
-        raise ValueError(guard_error)
-
-    reason = int(request.get("reason", 0))
-    ttl_ms = int(request.get("ttl_ms", 5000))
-    reset_operation_nonce = (reset_operation_nonce + 1) & 0xffffffff
-    if reset_operation_nonce == 0:
-        reset_operation_nonce = 1
-    sequence = monitor.request_soft_reset(reset_operation_nonce, reason, ttl_ms)
-    return {
-        "link_id": monitor.link_id, "operation_id": reset_operation_nonce,
-        "sequence": sequence, "state": "requested",
-    }
-
-
 web = WebUI(
-    api_state,
-    getattr(config, "WEB_PORT", 80),
-    config_provider=commissioning_state,
-    config_updater=bambuddy_settings.update,
-    command_updater=local_soft_reset,
-    error_handler=lambda component, error: runtime_log.exception(
-        "web." + component, error),
-)
-now = time.ticks_ms()
-wifi.start(now)
+    binary_api, getattr(config, "WEB_PORT", 80),
+    error_handler=lambda component, error:
+        runtime_log.exception("web." + component, error))
+wifi.start(time.ticks_ms())
 web.start()
-reconcile_bambuddy()
 
-
-def recover_web():
-    web._close_client()
-
-
-last_transport_state = None
-last_transport_log_ms = None
-last_transport_error = None
 next_uart_index = 0
+last_loop_us = monotonic_us.now()
+last_diagnostic_ms = None
+last_gc_ms = None
 
 
 def record_exception(component, error):
@@ -474,15 +225,16 @@ def record_exception(component, error):
 
 
 def service_once(now_ms):
-    global last_transport_state, last_transport_log_ms, last_transport_error
-    global next_uart_index
-    # Keep BMCU UART service ahead of Wi-Fi, WebSocket, and HTTP work.
+    global next_uart_index, last_loop_us, last_diagnostic_ms, last_gc_ms
+    current_us = monotonic_us.now()
+    metrics.observe_loop_gap(max(0, current_us - last_loop_us))
+    last_loop_us = current_us
     try:
         next_uart_index, _ = drain_monitors(
             monitors, now_ms,
-            byte_budget=getattr(config, "BMCU_UART_DRAIN_BUDGET", 1024),
-            chunk_size=getattr(config, "BMCU_UART_DRAIN_CHUNK", 128),
-            start_index=next_uart_index)
+            getattr(config, "BMCU_UART_DRAIN_BUDGET", 1024),
+            getattr(config, "BMCU_UART_DRAIN_CHUNK", 128),
+            next_uart_index)
     except Exception as error:
         record_exception("bmcu.drain", error)
     try:
@@ -490,54 +242,39 @@ def service_once(now_ms):
     except Exception as error:
         record_exception("wifi.poll", error)
     try:
-        reconcile_bambuddy()
+        client.poll(now_ms, wifi.state == "online")
     except Exception as error:
-        record_exception("bambuddy.reconcile", error)
-    if binary_client is not None:
+        record_exception("bambuddy.binary", error)
+    if not any(monitor.uart.any() for monitor in monitors):
         try:
-            binary_client.poll(now_ms, wifi.state == "online")
+            journal.flush_one(monotonic_us.now())
         except Exception as error:
-            record_exception("bambuddy.binary.poll", error)
-    elif bambuddy_client is not None:
+            journal.failure_count += 1
+            record_exception("journal.flush", error)
         try:
-            service_control_transitions()
-            bambuddy_client.poll(now_ms, wifi.state == "online")
+            web.poll()
         except Exception as error:
-            record_exception("bambuddy.poll", error)
-        current_transport_state = bambuddy_client.state
-        if current_transport_state != last_transport_state:
-            current_error = bambuddy_client.last_error
-            elapsed = (None if last_transport_log_ms is None else
-                       time.ticks_diff(now_ms, last_transport_log_ms))
-            if (last_transport_log_ms is None or
-                    current_error != last_transport_error or
-                    elapsed < 0 or elapsed >= 10000):
-                runtime_log.info("bambuddy", "state changed", {
-                    "state": current_transport_state,
-                    "error": current_error,
-                })
-                last_transport_log_ms = now_ms
-                last_transport_error = current_error
-            last_transport_state = current_transport_state
-    if (binary_journal is not None and
-            not any(monitor.uart.any() for monitor in monitors)):
-        try:
-            binary_journal.flush_one(monotonic_us.now())
-        except Exception as error:
-            record_exception("bmcu.journal.flush", error)
-    try:
-        web.poll()
-    except Exception as error:
-        record_exception("web.poll", error)
-        try:
-            recover_web()
-        except Exception as recovery_error:
-            record_exception("web.poll.recovery", recovery_error)
+            record_exception("web.poll", error)
+    if last_diagnostic_ms is None or ticks_diff(
+            now_ms, last_diagnostic_ms) >= 15000:
+        payload = metrics.snapshot(
+            now_ms, monitors, outbox, client, journal, None,
+            runtime_log.exception_count)
+        outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, monotonic_us.now(),
+            payload, False)
+        last_diagnostic_ms = now_ms
+    if (last_gc_ms is None or ticks_diff(now_ms, last_gc_ms) >= 60000) and \
+            not any(monitor.uart.any() for monitor in monitors):
+        started = monotonic_us.now()
+        gc.collect()
+        metrics.observe_gc(monotonic_us.now() - started)
+        last_gc_ms = now_ms
     for monitor in monitors:
         try:
             monitor.ping_if_idle(now_ms)
         except Exception as error:
-            record_exception("bmcu." + monitor.link_id + ".ping", error)
+            record_exception("bmcu.ping", error)
 
 
 while True:

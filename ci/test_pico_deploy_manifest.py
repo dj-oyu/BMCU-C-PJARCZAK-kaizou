@@ -1,11 +1,4 @@
-"""The Pico deploy script must ship every module the bridge imports.
-
-pico/deploy.ps1 used to carry a hardcoded file list. It went stale silently when
-bmcu_control.py, bambuddy_session.py, bambuddy_https.py and bambuddy_tls.py were
-added - all four are imported at module level by main.py or bambuddy_ws.py, so a
-deploy would have produced a Pico that raises ImportError at boot and stops
-bridging. These tests pin the invariant rather than the file list.
-"""
+"""The Pico deploy script must ship every module the bridge imports."""
 import ast
 import re
 import unittest
@@ -95,11 +88,10 @@ class DeployManifestTests(unittest.TestCase):
         self.assertIn("SecretsPath", text)
         self.assertRegex(text, r"':secrets\.py'")
 
-    def test_the_modules_added_after_the_hardcoded_list_are_covered(self):
-        # Regression anchor: these four are exactly what the stale list missed.
+    def test_binary_runtime_modules_are_covered(self):
         required = reachable_from("main", local_modules())
-        for module in ("bmcu_control", "bambuddy_session",
-                       "bambuddy_https", "bambuddy_tls"):
+        for module in ("bambuddy_binary_tcp", "bmcu_binary_outbox",
+                       "bmcu_journal", "device_metrics", "runtime_log"):
             self.assertIn(module, required,
                           module + " is expected to be reachable from main.py")
 

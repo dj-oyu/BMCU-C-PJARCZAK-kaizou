@@ -1,83 +1,97 @@
 import importlib.util
-import json
 import pathlib
 import sys
 import tempfile
 import unittest
 
+PICO = pathlib.Path(__file__).parents[1] / "pico"
+sys.path.insert(0, str(PICO))
+spec = importlib.util.spec_from_file_location(
+    "runtime_log_binary", PICO / "runtime_log.py")
+runtime_log = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runtime_log)
+sys.path.remove(str(PICO))
 
-PICO_DIR = pathlib.Path(__file__).parents[1] / "pico"
-
-# ``pico/`` is deliberately never put on ``sys.path``: the gitignored
-# ``pico/secrets.py`` would otherwise shadow the CPython stdlib ``secrets``
-# module for the whole CI process.
-_SPEC = importlib.util.spec_from_file_location(
-    "runtime_log", PICO_DIR / "runtime_log.py")
-runtime_log = importlib.util.module_from_spec(_SPEC)
-sys.modules["runtime_log"] = runtime_log
-_SPEC.loader.exec_module(runtime_log)
-
-PicoRuntimeLog = runtime_log.PicoRuntimeLog
-guarded_call = runtime_log.guarded_call
+import bmcu_binary as binary
+import bmcu_binary_constants as C
 
 
 class RuntimeLogTests(unittest.TestCase):
     def setUp(self):
         self.now = 100
-        self.log = PicoRuntimeLog(lambda: self.now, limit=8, crash_path=None)
+        self.log = runtime_log.PicoRuntimeLog(
+            lambda: self.now, limit=8, crash_path=None, pico_boot_id=7)
 
-    def test_ring_buffer_is_bounded(self):
+    def messages(self):
+        return list(self.log.iter_messages())
+
+    def parse(self, message):
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+        parser.feed(message)
+        return binary.parse_log(parser.next_message())
+
+    def test_ring_is_fixed_and_binary(self):
         for index in range(12):
             self.log.info("test", "message-%d" % index)
-        self.assertEqual(len(self.log.entries), 8)
-        self.assertEqual(self.log.entries[0]["message"], "message-4")
-        self.assertEqual(self.log.entries[-1]["sequence"], 12)
+        self.assertEqual(len(self.messages()), 8)
+        parsed = self.parse(self.messages()[-1])
+        self.assertEqual(parsed[0], 8)
+        self.assertEqual(bytes(parsed[3]), b"test")
+        self.assertEqual(bytes(parsed[4]), b"message-7")
 
-    def test_ring_buffer_retains_error_entries(self):
-        self.log.exception("web", RuntimeError("important"))
-        for index in range(12):
-            self.log.info("state", "transition-%d" % index)
-        errors = [entry for entry in self.log.entries
-                  if entry["level"] == "error"]
-        self.assertEqual(len(errors), 1)
-        self.assertEqual(errors[0]["component"], "web")
-
-    def test_guarded_call_records_error_and_runs_recovery(self):
+    def test_guarded_call_records_binary_error_and_recovers(self):
         recovered = []
-
-        def fail():
-            raise RuntimeError("socket exploded")
-
-        self.assertFalse(guarded_call(
-            self.log, "web", fail, lambda: recovered.append(True)))
+        self.assertFalse(runtime_log.guarded_call(
+            self.log, "web",
+            lambda: (_ for _ in ()).throw(RuntimeError("socket exploded")),
+            lambda: recovered.append(True)))
         self.assertEqual(recovered, [True])
-        self.assertEqual(self.log.exception_count, 1)
-        entry = self.log.entries[-1]
-        self.assertEqual(entry["component"], "web")
-        self.assertEqual(entry["details"]["exception"], "RuntimeError")
-        self.assertIn("socket exploded", entry["details"]["traceback"])
+        parsed = self.parse(self.messages()[-1])
+        self.assertEqual(parsed[2], C.LOG_ERROR)
+        self.assertEqual(bytes(parsed[3]), b"web")
+        self.assertIn(b"socket exploded", bytes(parsed[4]))
 
-    def test_duplicate_exception_is_suppressed(self):
+    def test_duplicate_exception_is_suppressed_without_new_tree(self):
         self.log.exception("web", RuntimeError("same"))
         self.now = 200
         self.log.exception("web", RuntimeError("same"))
-        self.assertEqual(len(self.log.entries), 1)
-        self.assertEqual(self.log.entries[0]["details"]["suppressed"], 1)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.log.suppressed_count, 1)
         self.assertEqual(self.log.exception_count, 2)
 
-    def test_last_crash_is_persisted_and_loaded_on_next_boot(self):
+    def test_bmcr1_roundtrip_and_torn_record(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = str(pathlib.Path(directory) / "crash.json")
-            first = PicoRuntimeLog(lambda: 77, crash_path=path)
+            path = str(pathlib.Path(directory) / "crash.bmcr")
+            first = runtime_log.PicoRuntimeLog(
+                lambda: 77, crash_path=path, pico_boot_id=8)
             first.exception("wifi", OSError("radio failure"))
-            with open(path, encoding="utf-8") as source:
-                persisted = json.load(source)
-            self.assertEqual(persisted["component"], "wifi")
+            raw = pathlib.Path(path).read_bytes()
+            self.assertEqual(raw[:5], b"BMCR1")
+            second = runtime_log.PicoRuntimeLog(
+                lambda: 3, crash_path=path, pico_boot_id=9)
+            self.assertIsNotNone(second.previous_crash)
+            pathlib.Path(path).write_bytes(raw[:-1])
+            third = runtime_log.PicoRuntimeLog(
+                lambda: 3, crash_path=path, pico_boot_id=10)
+            self.assertIsNone(third.previous_crash)
 
-            second = PicoRuntimeLog(lambda: 3, crash_path=path)
-            self.assertEqual(second.previous_crash["component"], "wifi")
-            self.assertEqual(second.entries[0]["message"],
-                             "previous crash recovered")
+    def test_sink_receives_payload_without_dictionary(self):
+        received = []
+        log = runtime_log.PicoRuntimeLog(
+            lambda: 5, crash_path=None, sink=lambda *args: received.append(args))
+        log.warning("uart", "gap")
+        self.assertEqual(received[0][0], C.PICO_LOG)
+        self.assertIsInstance(received[0][4], memoryview)
+
+    def test_full_protected_ring_and_broken_sink_never_raise(self):
+        log = runtime_log.PicoRuntimeLog(
+            lambda: 5, limit=8, crash_path=None,
+            sink=lambda *_: (_ for _ in ()).throw(RuntimeError("sink")))
+        for index in range(20):
+            log.exception("main", RuntimeError("failure-%d" % index))
+        self.assertEqual(len(list(log.iter_messages())), 8)
+        log.info("main", "low priority dropped safely")
+        self.assertEqual(len(list(log.iter_messages())), 8)
 
 
 if __name__ == "__main__":

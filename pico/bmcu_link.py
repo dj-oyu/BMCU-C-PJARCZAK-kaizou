@@ -138,13 +138,14 @@ class BMCUMonitor:
 
 
     def __init__(self, uart, on_message=None, link_id="bmcu-a",
-                 link_index=0, on_valid_frame=None):
+                 link_index=0, on_valid_frame=None, uart_capacity=None):
         self.uart = uart
         self.on_message = on_message
         self.decoder = FrameDecoder()
         self.link_id = link_id
         self.link_index = link_index
         self.on_valid_frame = on_valid_frame
+        self.uart_capacity = uart_capacity
         self.next_sequence = 1
         self.last_valid_ms = None
         self.last_ping_ms = None
@@ -174,6 +175,14 @@ class BMCUMonitor:
         self.bmcu_boot_session = 0
         self.link_state = "stale"
         self._clock_ms = 0
+        self.uart_backlog = 0
+        self.uart_max_backlog = 0
+        self.uart_drain_bytes = 0
+        self.uart_overflow_count = 0
+        self.uart_max_service_gap_us = 0
+        self._last_uart_service_ms = None
+        self.sequence_gap_count = 0
+        self._overflow_latched = False
     def _emit(self, message):
         message.setdefault("link_id", self.link_id)
         if self.on_message:
@@ -316,7 +325,21 @@ class BMCUMonitor:
         message["hw_tick64"] = self._hw_tick_epoch + tick32
 
     def poll_uart(self, now_ms, max_bytes=MAX_DECODER_BUFFER):
-        available = min(self.uart.any(), max_bytes)
+        backlog = self.uart.any()
+        self.uart_backlog = backlog
+        self.uart_max_backlog = max(self.uart_max_backlog, backlog)
+        at_capacity = (self.uart_capacity is not None and
+                       backlog >= self.uart_capacity)
+        if at_capacity and not self._overflow_latched:
+            self.uart_overflow_count += 1
+        self._overflow_latched = at_capacity
+        if self._last_uart_service_ms is not None:
+            gap_us = self._ticks_diff(
+                now_ms, self._last_uart_service_ms) * 1000
+            self.uart_max_service_gap_us = max(
+                self.uart_max_service_gap_us, gap_us)
+        self._last_uart_service_ms = now_ms
+        available = min(backlog, max_bytes)
         self._clock_ms = now_ms
         if available:
             data = self.uart.read(available)
@@ -330,6 +353,8 @@ class BMCUMonitor:
 
                 for frame in self.decoder.feed(data, accepted):
                     self._handle_frame(frame, now_ms)
+                self.uart_drain_bytes += len(data)
+                self.uart_backlog = self.uart.any()
                 return len(data)
         return 0
 
@@ -400,6 +425,7 @@ class BMCUMonitor:
             expected = None if previous is None else (previous + 1) & 0xffff
             self._last_unsolicited_sequence = frame["sequence"]
             if expected is not None and frame["sequence"] != expected:
+                self.sequence_gap_count += 1
                 self._invalidate_baseline(now_ms, "sequence_gap")
                 message["sequence_gap"] = {"expected": expected, "received": frame["sequence"]}
 

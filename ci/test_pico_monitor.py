@@ -1,4 +1,3 @@
-import ast
 import importlib.util
 from pathlib import Path
 import unittest
@@ -8,23 +7,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("pico_monitor_link", ROOT / "pico" / "bmcu_link.py")
 link = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(link)
-
-
-def load_device_state():
-    """Compile ``device_state`` out of ``pico/main.py`` in isolation.
-
-    ``pico/main.py`` cannot be imported on CPython (machine, network, …), but
-    the published device payload is a contract worth pinning, so the one
-    function is lifted from the module AST and executed on its own.
-    """
-    source = (ROOT / "pico" / "main.py").read_text(encoding="utf-8")
-    for node in ast.parse(source).body:
-        if isinstance(node, ast.FunctionDef) and node.name == "device_state":
-            namespace = {"bridge_id": "bridge-test"}
-            module = ast.Module(body=[node], type_ignores=[])
-            exec(compile(module, "pico/main.py", "exec"), namespace)
-            return namespace["device_state"]
-    raise AssertionError("pico/main.py no longer defines device_state()")
 
 
 class FakeUART:
@@ -226,17 +208,6 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertTrue(self.monitor.snapshot)
         self.assertIsNone(self.monitor.ams_service)
         self.assertIsNone(self.monitor.ams_registration)
-
-    def test_device_state_publishes_the_decoded_ams_families(self):
-        self.hello()
-        self.feed_ams_snapshot()
-        state = load_device_state()(self.monitor)
-        self.assertIn("ams_service", state)
-        self.assertIn("ams_registration", state)
-        self.assertEqual(state["ams_service"], self.monitor.ams_service)
-        self.assertEqual(state["ams_registration"], self.monitor.ams_registration)
-        self.assertEqual(state["ams_service"]["gap_max_ms"], 64000)
-        self.assertEqual(state["ams_registration"]["registration_query_count"], 44)
 
     def test_soft_reset_guard_requires_complete_idle_snapshot(self):
         self.assertEqual(self.monitor.soft_reset_guard_error(),

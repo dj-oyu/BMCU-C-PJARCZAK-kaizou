@@ -72,7 +72,8 @@ def hello_transcript(device_id, firmware, links, replay_boot_ranges, out):
 class BMB1TCPClient:
     def __init__(self, outbox, host, port, device_id, device_key, firmware,
                  links, socket_factory=None, clock_ms=None,
-                 control_handler=None):
+                 control_handler=None, clock_us=None,
+                 send_metric=None):
         self.outbox = outbox
         self.host = host
         self.port = port
@@ -83,6 +84,8 @@ class BMB1TCPClient:
         self.socket_factory = socket_factory or self._new_socket
         self.clock_ms = clock_ms or (lambda: 0)
         self.control_handler = control_handler
+        self.clock_us = clock_us
+        self.send_metric = send_metric
         self.state = WIFI_WAIT
         self.sock = None
         self.parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 2))
@@ -104,6 +107,10 @@ class BMB1TCPClient:
         self._connect_pending = False
         self.last_control_sequence = 0
         self.session_epoch_ms = None
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.reconnect_count = 0
+        self.replay_count = 0
 
     @staticmethod
     def _new_socket():
@@ -137,12 +144,16 @@ class BMB1TCPClient:
         if self.tx_view is None:
             return True
         try:
+            started = self.clock_us() if self.clock_us is not None else 0
             sent = self.sock.send(self.tx_view[self.tx_offset:])
         except OSError:
             return False
+        if self.send_metric is not None and self.clock_us is not None:
+            self.send_metric(max(0, self.clock_us() - started))
         if sent is None or sent <= 0:
             return False
         self.tx_offset += sent
+        self.tx_bytes += sent
         if self.tx_offset == len(self.tx_view):
             self.highest_sent = max(self.highest_sent, self.tx_sequence)
             self.tx_view = None
@@ -172,6 +183,7 @@ class BMB1TCPClient:
         if not count:
             return False
         self.last_rx_ms = now_ms
+        self.rx_bytes += count
         self.parser.feed(memoryview(self.rx_buffer)[:count])
         while True:
             message = self.parser.next_message()
@@ -288,6 +300,7 @@ class BMB1TCPClient:
                 return
             try:
                 self.sock = self.socket_factory()
+                self.reconnect_count += 1
                 try:
                     self.sock.setblocking(False)
                 except AttributeError:
@@ -334,5 +347,6 @@ class BMB1TCPClient:
                     struct.pack_into(">H", self.tx_buffer, 6,
                                      flags | C.FLAG_REPLAY)
                     record = memoryview(self.tx_buffer)[:len(record)]
+                    self.replay_count += 1
                 self._queue_bytes(record, sequence)
                 self._send_step()

@@ -1,23 +1,14 @@
-"""Small non-blocking read-only HTTP UI for the Pico BMCU monitor."""
+"""Bounded non-blocking HTTP server for static UI and BMB1 binary APIs."""
 
-try:
-    import ujson as json
-except ImportError:
-    import json
 import socket
-import gc
 import time
 try:
     import errno
 except ImportError:
     import uerrno as errno
 
-
-# A commissioning POST must fit a 4096-byte CA PEM once JSON-escaped, plus the
-# URL, token, control key, CSRF token, and field names. The whole-request cap
-# adds room for a browser's request line and headers on top of that body.
-MAX_BODY_BYTES = 8192
-MAX_REQUEST_BYTES = 12288
+MAX_REQUEST_BYTES = 2048
+BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
 
 
 def _would_block(error):
@@ -28,171 +19,22 @@ def _would_block(error):
     )
 
 
-PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>BMCU Monitor</title><style>:root{color-scheme:dark;--bg:#0b1018;--card:#151d29;--line:#2a3b52;--muted:#9eafc5;--ok:#44d19a;--bad:#ff7180}*{box-sizing:border-box}body{max-width:920px;margin:auto;padding:20px;font:15px system-ui,sans-serif;background:var(--bg);color:#edf4ff}h1{margin:0;font-size:1.5rem}.sub{color:var(--muted);margin:.35rem 0 1rem}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}.label{font-size:.78rem;color:var(--muted);text-transform:uppercase}.value{font-size:1.35rem;font-weight:650;margin-top:4px}.ok{color:var(--ok)}.bad{color:var(--bad)}h2{font-size:1.1rem;margin:24px 0 10px}h3{font-size:.95rem;margin:18px 0 8px;color:var(--muted)}.device{margin-top:26px;border-top:1px solid var(--line);padding-top:6px}.slots{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}.slot{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}.slot.active{border-color:var(--ok);box-shadow:0 0 0 1px var(--ok)}.slot b{font-size:1.05rem}dl{margin:9px 0 0}dt{color:var(--muted);font-size:.75rem}dd{margin:1px 0 8px}details{margin-top:20px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}pre{overflow:auto;white-space:pre-wrap;font-size:.75rem;color:var(--muted)}button{padding:.5rem .8rem}@media(max-width:500px){.slots{grid-template-columns:repeat(2,1fr)}}</style></head><body><h1>BMCU Monitor</h1><p><a href='/settings'>Bambuddy settings</a> / <a href='/api/pico/logs'>Pico logs JSON</a></p><p class="sub" id="summary">Connecting...</p><section class="grid"><article class="card"><div class="label">Wi-Fi</div><div class="value" id="wifi">--</div></article><article class="card"><div class="label">Bambuddy</div><div class="value" id="bambuddy">--</div></article><article class="card"><div class="label">Uptime</div><div class="value" id="picoUptime">--</div></article><article class="card"><div class="label">Free heap</div><div class="value" id="picoHeap">--</div></article><article class="card"><div class="label">Exceptions</div><div class="value" id="picoExceptions">--</div></article></section><div id="devices"></div><details open><summary>Pico internal log (BMCU frames excluded)</summary><pre id="picoLog">No runtime log</pre></details><details><summary>Show diagnostic JSON</summary><pre id="raw"></pre></details><script>const $=id=>document.getElementById(id),bit=(m,n)=>((m||0)&(1<<n))?'Present':'None';function val(x,d='--'){return x===undefined||x===null?d:x}const amsName=n=>['idle','send-out','on-use','before-pull-back','pull-back','before-on-use','stop-on-use'][n]||'#'+val(n),ctrlName=n=>n===undefined||n===null?'--':(['send','redetect','pull','stop','before-on-use','stop-on-use','pressure-on-use','pressure-idle','before-pull-back'][n]||'#'+n);function set(id,x,good){let e=$(id);e.textContent=x;e.className='value '+(good===true?'ok':good===false?'bad':'')}const resetUi={};function slotHtml(s,c,i){let active=s.current_slot===i,t=c[i]||{};return '<article class="slot '+(active?'active':'')+'"><b>Slot '+(i+1)+'</b><dl><dt>Filament</dt><dd>'+bit(s.inserted_mask,i)+'</dd><dt>Online</dt><dd>'+bit(s.online_mask,i)+'</dd><dt>Pull</dt><dd>'+val(s.pull_pct&&s.pull_pct[i])+' %</dd><dt>AMS state</dt><dd>'+amsName(s.motion&&s.motion[i])+'</dd><dt>Controller</dt><dd>'+ctrlName(t.controller_motion)+'</dd><dt>Motor PWM</dt><dd>'+val(t.motor_pwm)+'</dd><dt>Encoder delta</dt><dd>'+val(t.position_delta)+'</dd><dt>Sensor</dt><dd>'+(t.sensor_good?'Good':(t.sensor_online?'Fault':'Offline'))+'</dd><dt>Motion fault</dt><dd>#'+val(t.motion_fault)+'</dd></dl></article>'}function eventHtml(e){return '<article class="card"><div class="label">'+e.event_name+' / severity '+e.severity+'</div><div>'+((e.event_name==='state_change')?'Field '+e.field+', slot '+e.slot+': '+e.previous_value+' -> '+e.value:((e.event_name==='sensor')?'Sensor '+e.sensor+', slot '+e.slot+': '+e.value:'Record '+e.record_type))+'</div></article>'}function devHtml(d){let s=d.status||{},c=d.channels||[],on=d.link==='online',sel=s.current_slot,act=(sel!==undefined&&sel!==255&&((s.inserted_mask||0)&(1<<sel))&&s.pull_pct)?s.pull_pct[sel]:null,r=resetUi[d.link_id]||{};return '<section class="device"><h2>'+d.link_id+' <span class="'+(on?'ok':'bad')+'">'+val(d.link).toUpperCase()+'</span></h2><section class="grid"><article class="card"><div class="label">Selected Slot</div><div class="value">'+(sel===255||sel===undefined?'None':'#'+(sel+1))+'</div></article><article class="card"><div class="label">Selected Pull</div><div class="value '+(act!==null?'ok':'')+'">'+(act===null?'N/A':act+' %')+'</div></article><article class="card"><div class="label">Pull Delta</div><div class="value">'+(act===null?'N/A':(act>=50?'+':'')+(act-50)+' pts')+'</div></article><article class="card"><div class="label">BMCU TX drop</div><div class="value">'+val(s.tx_drop)+'</div></article><article class="card"><div class="label">BMCU RX / CRC / frame</div><div class="value">'+val(s.rx_drop)+' / '+val(s.crc_error)+' / '+val(s.frame_error)+'</div></article><article class="card"><div class="label">Pico decoder CRC / frame</div><div class="value">'+val(d.decoder_crc_errors)+' / '+val(d.decoder_frame_errors)+'</div></article></section><section class="slots">'+[0,1,2,3].map(i=>slotHtml(s,c,i)).join('')+'</section><h3>Recent events</h3><section class="grid">'+((d.events||[]).slice().reverse().map(eventHtml).join('')||'<article class="card">No push events received yet.</article>')+'</section><p><span class="label">BMCU recovery (idle-only; active motion is rejected)</span><br><button data-link="'+d.link_id+'"'+(r.busy?' disabled':'')+'>Request '+d.link_id+' soft reset</button> <span>'+(r.msg||'')+'</span></p></section>'}function draw(x){let w=x.wifi||{},t=x.bambuddy||{},p=x.pico||{},logs=p.entries||[];set('wifi',val(w.state).toUpperCase(),w.state==='online');set('bambuddy',val(t.state,'disabled').toUpperCase(),t.state==='connected'?true:(t.state==='disabled'?undefined:false));$('picoUptime').textContent=Math.floor((p.uptime_ms||0)/1000)+' s';$('picoHeap').textContent=p.heap_free===undefined?'--':Math.floor(p.heap_free/1024)+' KiB';$('picoExceptions').textContent=val(p.exception_count,0);$('picoLog').textContent=logs.slice().reverse().map(e=>'['+e.uptime_ms+' ms] '+e.level.toUpperCase()+' '+e.component+': '+e.message).join('\\n')||'No runtime log';$('summary').textContent='Bridge '+val(x.bridge_id)+(w.hostname?' / http://'+w.hostname+'.local/':'')+' ('+val(w.ip,'no IP')+') / refreshes every second';$('devices').innerHTML=(x.devices||[]).map(devHtml).join('')||'<p class="sub">No BMCU links configured.</p>';$('raw').textContent=JSON.stringify(x,null,2)}$('devices').onclick=async ev=>{let b=ev.target.closest('button[data-link]');if(!b)return;let link=b.dataset.link;if(prompt('Type RESET BMCU to confirm the reset of '+link)!=='RESET BMCU')return;resetUi[link]={busy:1,msg:'Requesting...'};b.disabled=true;try{let c=await(await fetch('/api/bambuddy/config',{cache:'no-store'})).json(),r=await fetch('/api/devices/'+link+'/soft-reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csrf:c.csrf,confirm:'RESET BMCU',reason:0,ttl_ms:5000})}),x=await r.json();resetUi[link]={busy:1,msg:r.ok?'Requested; waiting for BMCU reboot':(x.error||'Rejected')}}catch(e){resetUi[link]={busy:1,msg:'Request failed: '+e}}setTimeout(()=>{resetUi[link].busy=0},6000)};async function refresh(){try{let r=await fetch('/api/devices',{cache:'no-store'});if(!r.ok)throw Error(r.status);draw(await r.json())}catch(e){$('summary').textContent='Refresh error: '+e}}refresh();setInterval(refresh,1000)</script></body></html>""".encode()
-SETTINGS_PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Bambuddy settings</title><style>body{max-width:640px;margin:2rem auto;padding:0 1rem;font:16px system-ui;background:#0b1018;color:#edf4ff}label{display:block;margin:1rem 0}input[type=url],input[type=password]{width:100%;padding:.7rem;background:#151d29;color:inherit;border:1px solid #456;border-radius:6px}button{padding:.7rem 1rem}#status{margin-left:1rem}</style></head><body><p><a href="/">Monitor</a></p><h1>Bambuddy transport</h1><p>Trusted-LAN ws:// push transport. Optional credential scope: bmcu_link:telemetry.</p><form id="form"><label><input id="enabled" type="checkbox"> Enable transport</label><label>WebSocket URL<input id="url" type="url" placeholder="ws://bambuddy.local:8000/api/v1/bmcu-link/ws"></label><label>Token (leave blank to keep current)<input id="token" type="password" autocomplete="new-password"></label><button>Save</button><span id="status"></span></form><script>let csrf;async function load(){let r=await fetch('/api/bambuddy/config',{cache:'no-store'}),x=await r.json();csrf=x.csrf;enabled.checked=x.enabled;url.value=x.url;status.textContent=x.token_set?'Token is set':'No token (server auth must be disabled)'}form.onsubmit=async e=>{e.preventDefault();let body={csrf,enabled:enabled.checked,url:url.value,token:token.value},r=await fetch('/api/bambuddy/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),x=await r.json();if(!r.ok){status.textContent=x.error||'Save failed';return}csrf=x.csrf;token.value='';status.textContent='Saved'};load()</script></body></html>""".encode()
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"</form>", b"<p id='transport'>Connection: --</p></form>", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"status.textContent=x.token_set?'Token is set':'No token (server auth must be disabled)'",
-    b"status.textContent=x.token_set?'Token is set':'No token (server auth must be disabled)';"
-    b"let t=x.transport||{};transport.textContent='Connection: '+"
-    b"(t.state||'disabled')+(t.last_error?' / '+t.last_error:'')", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"status.textContent='Saved'};load()",
-    b"status.textContent='Saved';setTimeout(load,300)};load()", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"<button>Save</button>",
-    b"<h1>CONTROL (remote soft reset)</h1>"
-    b"<p>Independent from the telemetry token; default off. The BMCU stays "
-    b"the final safety authority.</p>"
-    b"<label><input id='cen' type='checkbox'> Enable authenticated CONTROL"
-    b"</label><label>Control key (64 hex; leave blank to keep current)"
-    b"<input id='ckey' type='password' autocomplete='new-password'></label>"
-    b"<label><input id='cclr' type='checkbox'> Clear control key (also "
-    b"disables CONTROL)</label><button>Save</button>", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"enabled.checked=x.enabled;url.value=x.url;",
-    b"enabled.checked=x.enabled;url.value=x.url;"
-    b"cen.checked=!!x.control_enabled;cclr.checked=false;", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"token:token.value}",
-    b"token:token.value,control_enabled:cen.checked,"
-    b"control_key:ckey.value,clear_control_key:cclr.checked}", 1)
-SETTINGS_PAGE = SETTINGS_PAGE.replace(
-    b"csrf=x.csrf;token.value='';",
-    b"csrf=x.csrf;token.value='';ckey.value='';", 1)
+PAGE = b"""<!doctype html><meta name=viewport content="width=device-width"><title>BMCU Monitor</title><style>body{max-width:900px;margin:auto;padding:20px;font:15px system-ui;background:#0b1018;color:#edf4ff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.card{padding:12px;background:#151d29;border:1px solid #2a3b52;border-radius:10px}.muted{color:#9eafc5}pre{white-space:pre-wrap}</style><h1>BMCU Monitor</h1><p id=s class=muted>Connecting...</p><h2>Loader state</h2><div id=d class=grid></div><h2>Hardware and communications</h2><div id=m class=grid></div><h2>Device log</h2><pre id=l></pre><script>
+const td=new TextDecoder(),u64=(v,o)=>Number(v.getBigUint64(o)),names={1:'uptime ms',4:'heap free',6:'heap min',12:'loop avg us',13:'loop p95 us',14:'loop p99 us',11:'loop max us',32:'queue',33:'drops',48:'exceptions',49:'GC us',50:'GC max us',64:'UART0 backlog',65:'UART0 max backlog',66:'UART0 bytes',67:'UART0 CRC',68:'UART0 frame',69:'UART0 gaps',72:'UART1 backlog',73:'UART1 max backlog',74:'UART1 bytes',75:'UART1 CRC',76:'UART1 frame',77:'UART1 gaps'};
+function frames(b){let v=new DataView(b),a=[],o=0;while(o+32<=b.byteLength){if(v.getUint32(o)!==0x424d4231||v.getUint8(o+4)!==1)break;let n=v.getUint32(o+8);if(n>4096||o+32+n>b.byteLength)break;a.push([v.getUint8(o+5),new DataView(b,o+32,n)]);o+=32+n}return a}
+function tlvs(v){let a=[],o=0;while(o+4<=v.byteLength){let t=v.getUint8(o),k=v.getUint8(o+1),n=v.getUint16(o+2);o+=4;if(o+n>v.byteLength)break;let x=k===4&&n===8?u64(v,o):(k===7&&n===4?v.getInt32(o):td.decode(new Uint8Array(v.buffer,v.byteOffset+o,n)));a.push([t,x]);o+=n}return a}
+async function get(p){let r=await fetch(p,{cache:'no-store'});if(!r.ok)throw Error(r.status);return frames(await r.arrayBuffer())}
+function status(v){if(v.byteLength<44||v.getUint8(13)!==2)return'';let slot=v.getUint8(29),ins=v.getUint8(30),on=v.getUint8(31),h='';for(let i=0;i<4;i++)h+='<div class=card><b>Slot '+(i+1)+(slot===i?' / selected':'')+'</b><br>Filament '+((ins>>i)&1)+' / Online '+((on>>i)&1)+'<br>Motion '+v.getUint8(32+i)+' / Pull '+v.getUint8(36+i)+'%</div>';return h}
+let last=0;async function refresh(){try{let cur=await get('/api/current.bin'),slots='';for(let [t,v] of cur)if(t===16)slots+=status(v);d.innerHTML=slots||'<span class=muted>No STATUS received</span>';let diag=await get('/api/diagnostics.bin'),h='';for(let [t,v] of diag)if(t===19)for(let [k,x] of tlvs(v))h+='<div class=card><span class=muted>'+(names[k]||'metric '+k)+'</span><br>'+x+'</div>';m.innerHTML=h;s.textContent='Binary live snapshot / refresh 3 s';let logs=await get('/api/logs.bin?after='+last+'&limit=32),lines=[];for(let [t,v] of logs)if(t===20){let q=u64(v,0),up=u64(v,8),sev=v.getUint8(16),cn=v.getUint8(17),mn=v.getUint16(18),o=22,c=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,cn));o+=cn;let msg=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,mn));last=Math.max(last,q);lines.push('['+up+' ms] '+sev+' '+c+': '+msg)}if(lines.length)l.textContent=(lines.join('\\n')+'\\n'+l.textContent).slice(0,12000)}catch(e){s.textContent='Refresh error: '+e}}refresh();setInterval(refresh,3000)</script>"""
 
-
-def _patch_settings(page, old, new):
-    """Byte-patch the commissioning page, failing loudly on a silent no-match."""
-    if old not in page:
-        raise ValueError("settings page patch did not match")
-    return page.replace(old, new, 1)
-
-
-# TLS / fallback commissioning: wss:// and https:// need commissioned trust
-# material because MicroPython has no system trust store.
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"<p>Trusted-LAN ws:// push transport.",
-    b"<p>ws:// and http:// are trusted-LAN only; wss:// and https:// need a "
-    b"CA certificate below. https:// selects the NDJSON fallback, which "
-    b"carries telemetry but no commands.")
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"<h1>CONTROL (remote soft reset)</h1>",
-    b"<label><input id='tins' type='checkbox'> Skip TLS verification "
-    b"(insecure; test only)</label>"
-    b"<label>CA certificate PEM for wss:// or https:// (leave blank to keep "
-    b"current)<textarea id='tca' rows='4' style='width:100%'></textarea>"
-    b"</label><label><input id='tclr' type='checkbox'> Clear CA certificate"
-    b"</label><p id='tlsstate'>CA certificate: --</p>"
-    b"<h1>CONTROL (remote soft reset)</h1>")
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"cen.checked=!!x.control_enabled;cclr.checked=false;",
-    b"cen.checked=!!x.control_enabled;cclr.checked=false;"
-    b"tins.checked=!!x.tls_insecure;tclr.checked=false;"
-    b"tlsstate.textContent='CA certificate: '+"
-    b"(x.tls_ca_set?'is set':'not set');")
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"control_key:ckey.value,clear_control_key:cclr.checked}",
-    b"control_key:ckey.value,clear_control_key:cclr.checked,"
-    b"tls_insecure:tins.checked,tls_ca:tca.value,clear_tls_ca:tclr.checked}")
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"csrf=x.csrf;token.value='';ckey.value='';",
-    b"csrf=x.csrf;token.value='';ckey.value='';tca.value='';")
-
-# CONTROL is only wired to the WebSocket transport. Say so on the page and
-# report the effective state, so nobody trusts an inert remote reset path.
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"the final safety authority.</p>",
-    b"the final safety authority. https:// and http:// select the NDJSON "
-    b"fallback, which carries no commands, so CONTROL stays inert on those "
-    b"schemes.</p><p id='cstate'>CONTROL: --</p>")
-SETTINGS_PAGE = _patch_settings(
-    SETTINGS_PAGE,
-    b"tlsstate.textContent='CA certificate: '+"
-    b"(x.tls_ca_set?'is set':'not set');",
-    b"tlsstate.textContent='CA certificate: '+"
-    b"(x.tls_ca_set?'is set':'not set');"
-    b"cstate.textContent='CONTROL: '+(x.control_active?'active':"
-    b"(x.control_enabled?'enabled but inert on this transport':'off'));")
-
-class _JsonChunks:
-    """Incremental JSON encoder with bounded contiguous allocations."""
-
-    def __init__(self, chunk_size=512):
-        self.chunk_size = chunk_size
-        self.buffer = bytearray()
-        self.parts = []
-        self.length = 0
-
-    def write(self, data):
-        if isinstance(data, str):
-            data = data.encode()
-        offset = 0
-        while offset < len(data):
-            available = self.chunk_size - len(self.buffer)
-            count = min(available, len(data) - offset)
-            self.buffer.extend(memoryview(data)[offset:offset + count])
-            self.length += count
-            offset += count
-            if len(self.buffer) == self.chunk_size:
-                self.parts.append(bytes(self.buffer))
-                self.buffer = bytearray()
-
-    def finish(self):
-        if self.buffer:
-            self.parts.append(bytes(self.buffer))
-            self.buffer = bytearray()
-        return self.parts, self.length
-
-
-def _write_json(writer, value):
-    if value is None:
-        writer.write(b"null")
-    elif value is True:
-        writer.write(b"true")
-    elif value is False:
-        writer.write(b"false")
-    elif isinstance(value, bytes):
-        writer.write(json.dumps(value.hex()))
-    elif isinstance(value, str):
-        writer.write(json.dumps(value))
-    elif isinstance(value, dict):
-        writer.write(b"{")
-        first = True
-        for key, item in value.items():
-            if not first:
-                writer.write(b",")
-            first = False
-            writer.write(json.dumps(str(key)))
-            writer.write(b":")
-            _write_json(writer, item)
-        writer.write(b"}")
-    elif isinstance(value, (list, tuple)):
-        writer.write(b"[")
-        for index, item in enumerate(value):
-            if index:
-                writer.write(b",")
-            _write_json(writer, item)
-        writer.write(b"]")
-    else:
-        writer.write(json.dumps(value))
 
 class _Response:
-    """Two-part HTTP response that avoids copying large bodies."""
-
     def __init__(self, header, body):
-        if isinstance(body, list):
-            body.insert(0, header)
-            self.parts = body
+        self.parts = [header]
+        if isinstance(body, (list, tuple)):
+            self.parts.extend(body)
         else:
-            self.parts = [header, body]
+            self.parts.append(body)
         self.offset = 0
 
     def current(self):
@@ -201,13 +43,17 @@ class _Response:
             self.offset = 0
         if not self.parts:
             return b""
-        if self.offset == 0:
-            return self.parts[0]
-        return self.parts[0][self.offset:]
+        return memoryview(self.parts[0])[self.offset:]
 
     def consume(self, count):
-        self.offset += count
-        self.current()
+        while count and self.parts:
+            remaining = len(self.parts[0]) - self.offset
+            if count < remaining:
+                self.offset += count
+                return
+            count -= remaining
+            self.parts.pop(0)
+            self.offset = 0
 
     def done(self):
         return not self.parts
@@ -217,14 +63,8 @@ class _Response:
 
 
 class WebUI:
-    """Services at most one non-blocking HTTP connection at a time."""
-
-    def __init__(self, state_provider, port=80, config_provider=None,
-                 config_updater=None, command_updater=None, error_handler=None):
-        self.state_provider = state_provider
-        self.config_provider = config_provider
-        self.config_updater = config_updater
-        self.command_updater = command_updater
+    def __init__(self, binary_provider, port=80, error_handler=None):
+        self.binary_provider = binary_provider
         self.error_handler = error_handler
         self.port = port
         self.server = None
@@ -238,132 +78,51 @@ class WebUI:
     @staticmethod
     def _listener(family, address, port, ipv6_only=False):
         server = socket.socket(family, socket.SOCK_STREAM)
-        try:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if ipv6_only:
-                # lwIP values; MicroPython does not export these constants.
-                server.setsockopt(41, 27, 1)  # IPPROTO_IPV6, IPV6_V6ONLY
-            server.bind((address, port))
-            server.listen(1)
-            server.setblocking(False)
-            return server
-        except Exception:
-            try:
-                server.close()
-            except Exception:
-                pass
-            raise
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if ipv6_only:
+            server.setsockopt(41, 27, 1)
+        server.bind((address, port))
+        server.listen(1)
+        server.setblocking(False)
+        return server
 
     def start(self):
-        self.servers = []
         try:
             self.servers.append(self._listener(
-                socket.AF_INET6, '::', self.port, ipv6_only=True))
+                socket.AF_INET6, "::", self.port, True))
         except (AttributeError, OSError):
             pass
-        self.server = self._listener(
-            socket.AF_INET, '0.0.0.0', self.port)
+        self.server = self._listener(socket.AF_INET, "0.0.0.0", self.port)
         self.servers.append(self.server)
 
     @staticmethod
-    def _http_response(status, content_type, body, body_length=None):
-        if body_length is None:
-            body_length = (sum(len(part) for part in body)
-                           if isinstance(body, list) else len(body))
-        if isinstance(body, bytes) and len(body) > 512:
-            body = [body[offset:offset + 512]
-                    for offset in range(0, len(body), 512)]
-        header = ('HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n'
-                  'Cache-Control: no-store\r\nConnection: close\r\n\r\n' %
-                  (status, content_type, body_length))
-        return _Response(header.encode(), body)
-
-    def _request_ready(self):
-        marker = self.request.find(b'\r\n\r\n')
-        if marker < 0:
-            return False
-        header = bytes(self.request[:marker]).split(b'\r\n')
-        content_length = 0
-        for line in header[1:]:
-            name, separator, value = line.partition(b':')
-            if separator and name.strip().lower() == b'content-length':
-                try:
-                    content_length = int(value.strip())
-                except ValueError:
-                    content_length = -1
-        if content_length < 0 or content_length > MAX_BODY_BYTES:
-            # JSON, not text: the settings page reads r.json() on failure, so a
-            # text/plain 413 would surface as nothing at all.
-            self.response = self._json_response(
-                '413 Payload Too Large', {"error": "Request too large"})
-            return False
-        return len(self.request) >= marker + 4 + content_length
-
-    def _json_response(self, status, value):
-        gc.collect()
-        writer = _JsonChunks()
-        _write_json(writer, value)
-        parts, length = writer.finish()
-        return self._http_response(
-            status, 'application/json', parts, body_length=length)
+    def _http_response(status, content_type, body):
+        size = sum(len(item) for item in body) if isinstance(
+            body, (list, tuple)) else len(body)
+        header = ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n" %
+                  (status, content_type, size)).encode()
+        return _Response(header, body)
 
     def _finish_request(self):
-        marker = self.request.find(b'\r\n\r\n')
-        header = bytes(self.request[:marker])
-        body = bytes(self.request[marker + 4:])
-        first_line = header.split(b'\r\n', 1)[0].split()
-        method = first_line[0] if len(first_line) >= 1 else b''
-        path = first_line[1] if len(first_line) >= 2 else b''
-        if method == b'GET' and path == b'/':
+        line = bytes(self.request).split(b"\r\n", 1)[0].split()
+        method = line[0] if line else b""
+        path = line[1] if len(line) > 1 else b""
+        if method != b"GET":
             self.response = self._http_response(
-                '200 OK', 'text/html; charset=utf-8', PAGE)
-        elif method == b'GET' and path == b'/settings':
+                "405 Method Not Allowed", "text/plain", b"GET only\n")
+        elif path == b"/":
             self.response = self._http_response(
-                '200 OK', 'text/html; charset=utf-8', SETTINGS_PAGE)
-        elif path == b'/api/bambuddy/config' and method == b'GET':
-            if self.config_provider is None:
-                self.response = self._json_response('404 Not Found',
-                                                    {"error": "Not found"})
-            else:
-                self.response = self._json_response('200 OK',
-                                                    self.config_provider())
-        elif method == b'POST' and path.startswith(b'/api/devices/') and path.endswith(b'/soft-reset'):
-            if self.command_updater is None:
-                self.response = self._json_response('404 Not Found',
-                                                    {"error": "Not found"})
-            else:
-                try:
-                    request = json.loads(body.decode())
-                    result = self.command_updater(path.decode(), request)
-                    self.response = self._json_response('202 Accepted', result)
-                except (ValueError, TypeError) as exc:
-                    self.response = self._json_response(
-                        '400 Bad Request', {"error": str(exc)})
-        elif path == b'/api/bambuddy/config' and method == b'POST':
-            if self.config_updater is None:
-                self.response = self._json_response('404 Not Found',
-                                                    {"error": "Not found"})
-            else:
-                try:
-                    request = json.loads(body.decode())
-                    result = self.config_updater(request)
-                    self.response = self._json_response('200 OK', result)
-                except (ValueError, TypeError) as exc:
-                    self.response = self._json_response(
-                        '400 Bad Request', {"error": str(exc)})
-        elif method == b'GET' and path.startswith(b'/api/'):
-            state = self.state_provider(path.decode())
-            if state is None:
-                self.response = self._json_response('404 Not Found',
-                                                    {"error": "Not found"})
-            else:
-                self.response = self._json_response('200 OK', state)
-        elif method not in (b'GET', b'POST'):
+                "200 OK", "text/html; charset=utf-8", PAGE)
+        elif path.startswith(b"/api/") and b".bin" in path:
+            value = self.binary_provider(path.decode())
             self.response = self._http_response(
-                '405 Method Not Allowed', 'text/plain', b'Method not allowed\n')
+                "200 OK", BINARY_TYPE, value) if value is not None else \
+                self._http_response("404 Not Found", "text/plain",
+                                    b"Not found\n")
         else:
             self.response = self._http_response(
-                '404 Not Found', 'text/plain', b'Not found\n')
+                "404 Not Found", "text/plain", b"Not found\n")
 
     def _close_client(self):
         if self.client:
@@ -379,79 +138,34 @@ class WebUI:
 
     @staticmethod
     def _now_ms():
-        if hasattr(time, "ticks_ms"):
-            return time.ticks_ms()
-        return int(time.monotonic() * 1000)
+        return time.ticks_ms() if hasattr(time, "ticks_ms") else int(
+            time.monotonic() * 1000)
 
-    @staticmethod
-    def _ticks_diff(left, right):
-        if hasattr(time, "ticks_diff"):
-            return time.ticks_diff(left, right)
-        return left - right
-
-    @staticmethod
-    def _ticks_add(value, delta):
-        if hasattr(time, "ticks_add"):
-            return time.ticks_add(value, delta)
-        return value + delta
-
-    def _touch_client(self):
-        self.client_deadline_ms = self._ticks_add(self._now_ms(), 5000)
-
-    def _finish_response(self):
-        try:
-            self.client.shutdown(getattr(socket, "SHUT_WR", 1))
-        except (AttributeError, OSError):
-            pass
-        self.response = None
-        self.close_at_ms = self._ticks_add(self._now_ms(), 100)
+    def _touch(self):
+        self.client_deadline_ms = self._now_ms() + 3000
 
     def poll(self):
-        if (self.client and self.client_deadline_ms is not None and
-                self._ticks_diff(self._now_ms(),
-                                 self.client_deadline_ms) >= 0):
+        now = self._now_ms()
+        if self.client and self.client_deadline_ms is not None and \
+                now >= self.client_deadline_ms:
             self._close_client()
             return
-        if self.client and self.close_at_ms is not None:
-            if self._ticks_diff(self._now_ms(), self.close_at_ms) >= 0:
-                self._close_client()
-            return
         if self.client and self.response is not None:
-            chunked = isinstance(self.response, _Response)
-            sendall = getattr(self.client, "sendall", None)
-            if chunked and sendall is not None:
-                try:
-                    self.client.settimeout(1)
-                    while not self.response.done():
-                        payload = self.response.current()
-                        sendall(payload)
-                        self.response.consume(len(payload))
-                    self._finish_response()
-                except OSError:
-                    self._close_client()
-                return
-            payload = self.response.current() if chunked else self.response
             try:
-                sent = self.client.send(payload)
+                sent = self.client.send(self.response.current())
             except OSError as error:
                 if _would_block(error):
                     return
                 self._close_client()
                 return
-            if sent == 0:
+            if not sent:
                 self._close_client()
-            elif sent is None:
                 return
-            elif sent > 0 and chunked:
-                self._touch_client()
-                self.response.consume(sent)
-                if self.response.done():
-                    self._finish_response()
-            elif sent >= len(payload):
-                self._finish_response()
-            elif sent > 0:
-                self._touch_client()
-                self.response = self.response[sent:]
+            self.response.consume(sent)
+            if self.response.done():
+                self._close_client()
+            else:
+                self._touch()
             return
         if self.client:
             try:
@@ -464,20 +178,20 @@ class WebUI:
             if not data:
                 self._close_client()
                 return
-            self._touch_client()
             self.request.extend(data)
+            self._touch()
             if len(self.request) > MAX_REQUEST_BYTES:
-                self.response = self._json_response(
-                    '413 Payload Too Large', {"error": "Request too large"})
-            elif self._request_ready():
+                self.response = self._http_response(
+                    "413 Payload Too Large", "text/plain", b"Too large\n")
+            elif b"\r\n\r\n" in self.request:
                 try:
                     self._finish_request()
                 except Exception as error:
-                    if self.error_handler is not None:
+                    if self.error_handler:
                         self.error_handler("request", error)
                     self.response = self._http_response(
-                        '500 Internal Server Error', 'text/plain',
-                        b'internal Pico error\n')
+                        "500 Internal Server Error", "text/plain",
+                        b"internal Pico error\n")
             return
         for server in self.servers or (self.server,):
             if server is None:
@@ -485,7 +199,7 @@ class WebUI:
             try:
                 self.client, _ = server.accept()
                 self.client.setblocking(False)
-                self._touch_client()
+                self._touch()
                 return
             except OSError:
                 pass

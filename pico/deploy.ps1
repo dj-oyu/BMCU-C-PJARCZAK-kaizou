@@ -15,10 +15,8 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 # Derived from the directory rather than hardcoded: a hardcoded list silently
-# went stale when bmcu_control.py, bambuddy_session.py, bambuddy_https.py and
-# bambuddy_tls.py were added, and every one of them is imported at module level
-# by main.py or bambuddy_ws.py. Deploying without them leaves the bridge unable
-# to import itself, i.e. a Pico that no longer boots after an OTA update.
+# went stale as transport modules were added. Deploying without any imported
+# module leaves the bridge unable to boot after an OTA update.
 # ci/test_pico_deploy_manifest.py fails if this ever drifts again.
 $excluded = @('secrets.py', 'secrets_example.py', 'config_example.py')
 $modules = Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.py' |

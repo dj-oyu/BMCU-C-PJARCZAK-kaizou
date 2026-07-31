@@ -155,6 +155,8 @@ class BMJ1Journal:
         self.path = self._path(self.segment_sequence)
         self.watermarks = load_watermarks(self.directory)
         self.checkpoint_dirty = False
+        self.bytes_written = 0
+        self.failure_count = 0
         self.file = None
         self._open(created_at_us)
 
@@ -190,6 +192,7 @@ class BMJ1Journal:
                              self.segment_sequence, created_at_us)
         self.file.write(header)
         self.file.flush()
+        self.bytes_written += SEGMENT_HEADER_SIZE
 
     def stage(self, *args):
         return self.stager.stage(*args)
@@ -218,8 +221,10 @@ class BMJ1Journal:
             write_segment_header(header, self.pico_boot_id,
                                  self.segment_sequence, created_at_us)
             self.file.write(header)
+            self.bytes_written += SEGMENT_HEADER_SIZE
         written = self.stager.flush_one(self.file)
         self.file.flush()
+        self.bytes_written += written
         return written
 
     def record_ack(self, pico_boot_id, watermark):

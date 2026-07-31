@@ -26,6 +26,8 @@ class BMB1Outbox:
             bytearray(DELIVERY_SLOT_SIZE * durable_slots), DELIVERY_SLOT_SIZE)
         self.latest_status = ByteRing(
             bytearray(STATUS_SLOT_SIZE * link_count), STATUS_SLOT_SIZE)
+        self.current_status = ByteRing(
+            bytearray(DELIVERY_SLOT_SIZE * link_count), DELIVERY_SLOT_SIZE)
         self.encode_buffer = bytearray(C.MAX_MESSAGE_SIZE)
         self.journal = journal
         self.forced_drop_first = 0
@@ -33,6 +35,7 @@ class BMB1Outbox:
         self.forced_drop_count = 0
         self.forced_drop_observed_at_us = 0
         self.status_replacements = 0
+        self.last_ack_watermark = 0
 
     def _allocate_sequence(self):
         result = self.next_sequence
@@ -60,6 +63,12 @@ class BMB1Outbox:
                 replace_key=link_index)
             if replaced:
                 self.status_replacements += 1
+            current_size = binary.write_bmcu_frame(
+                self.encode_buffer, 0, 0, 0, self.pico_boot_id, link_index,
+                received_at_us, wire)
+            self.current_status.append(
+                0, memoryview(self.encode_buffer)[:current_size],
+                replace_key=link_index)
             return 0
         sequence = self._allocate_sequence()
         size = binary.write_bmcu_frame(
@@ -144,6 +153,9 @@ class BMB1Outbox:
             released += 1
         if self.journal is not None:
             self.journal.record_ack(pico_boot_id, watermark)
+        if pico_boot_id == self.pico_boot_id:
+            self.last_ack_watermark = max(
+                self.last_ack_watermark, watermark)
         return released
 
     def restore(self, pico_boot_id, record_type, flags, link_index, sequence,
@@ -182,6 +194,28 @@ class BMB1Outbox:
                 self._remember_drop(sequence, observed_at_us)
         return sequence
 
+    def enqueue_payload(self, record_type, flags, link_index, received_at_us,
+                        payload, journal_record=False):
+        sequence = self._allocate_sequence()
+        size = binary.write_message(
+            self.encode_buffer, 0, record_type, flags, sequence,
+            self.pico_boot_id, link_index, payload)
+        try:
+            self.durable.append(
+                sequence, memoryview(self.encode_buffer)[:size],
+                protected=bool(flags & C.FLAG_CRITICAL))
+        except RingFull:
+            self._remember_drop(sequence, received_at_us)
+            return 0
+        if journal_record and self.journal is not None:
+            try:
+                self.journal.stage(
+                    record_type, flags, link_index, sequence, received_at_us,
+                    payload)
+            except RingFull:
+                self._remember_drop(sequence, received_at_us)
+        return sequence
+
     @property
     def queue_depth(self):
         return len(self.durable) + len(self.latest_status)
@@ -204,6 +238,10 @@ class BMB1Outbox:
             values = ranges[boot_id]
             result.append((boot_id, values[0], values[1]))
         return tuple(result[:C.MAX_REPLAY_BOOT_RANGES])
+
+    def iter_current(self):
+        for _, message, _, _ in self.current_status.iter_records():
+            yield message
 
 
 def _decode_header(message):

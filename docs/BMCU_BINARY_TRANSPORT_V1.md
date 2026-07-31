@@ -548,6 +548,13 @@ time and maximum service delay are the meaningful health signals on the Pico.
 Unknown tags are ignored. Strings have explicit maximum lengths. Runtime logs
 are not embedded in diagnostics; they use `PICO_LOG`.
 
+Loop gap average, p95, p99, and maximum values are microseconds over the
+implementation's current bounded sample window. `GC_TIME_US` is the most
+recent explicitly scheduled collection duration and `GC_MAX_TIME_US` is the
+boot-lifetime maximum. UART drain bytes and overflow counts are boot-lifetime
+cumulative counters. Transport encode/send averages use a bounded recent
+window; transport send maximum is the boot-lifetime maximum.
+
 The Pico sends a complete diagnostic snapshot after authentication, a normal
 snapshot at most once every 15 seconds, and an immediate snapshot when a
 health value crosses a warning or critical boundary. Bambuddy stores the
