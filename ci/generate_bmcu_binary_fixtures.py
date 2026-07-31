@@ -126,10 +126,10 @@ def main():
     )
     result_header = bytearray(C.HEADER_SIZE)
     binary.write_header(result_header, 0, C.CONTROL_RESULT, 0,
-                        len(unsigned_result) + 32, 12, boot, 0)
+                        len(unsigned_result) + 32, 0, boot, 0)
     result_mac = hmac256(session_key, result_header, unsigned_result)
     records["control_result.bin"] = encoded(
-        binary.write_control_result, 0, 12, boot, 0, 77, C.RESULT_OK,
+        binary.write_control_result, 0, 0, boot, 0, 77, C.RESULT_OK,
         b"accepted", result_mac)
 
     max_detail = bytearray(C.MAX_LOG_DETAIL_BYTES)
