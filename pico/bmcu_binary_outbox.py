@@ -70,9 +70,20 @@ class BMB1Outbox:
             return self.large
         return None
 
-    def _append_message(self, sequence, size, protected):
+    def _append_message(self, sequence, size, protected,
+                        use_drop_reserve=False):
         target = self._ring_for_size(size)
-        if target is None or len(target) == target.capacity:
+        if target is None:
+            return False
+        limit = target.capacity
+        if (target is self.durable and target.capacity > 1 and
+                not use_drop_reserve):
+            # A loss marker is the only way the peer can advance its durable
+            # ACK across records rejected while this ring is saturated.
+            # Keep one slot available so replay traffic cannot deadlock that
+            # marker behind a permanently full queue.
+            limit -= 1
+        if len(target) >= limit:
             return False
         try:
             target.append(sequence, memoryview(self.encode_buffer)[:size],
@@ -142,7 +153,8 @@ class BMB1Outbox:
             self.forced_drop_first, self.forced_drop_last,
             self.forced_drop_count,
             C.DROP_RAM_QUEUE_FULL)
-        if not self._append_message(sequence, size, True):
+        if not self._append_message(
+                sequence, size, True, use_drop_reserve=True):
             return False
         if self.journal is not None:
             try:

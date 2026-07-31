@@ -145,6 +145,27 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(outbox.acknowledge(99, 4), 1)
         self.assertIsNone(outbox.peek())
 
+    def test_drop_marker_has_a_reserved_slot_during_replay_saturation(self):
+        outbox = BMB1Outbox(99, durable_slots=2)
+        event = link.encode_frame(link.EVENT, 1, bytes(16))
+        self.assertEqual(outbox.enqueue_raw(0, 1000, event, link.EVENT), 1)
+        self.assertEqual(outbox.enqueue_raw(0, 1001, event, link.EVENT), 0)
+
+        self.assertEqual(outbox.queue_depth, 1)
+        outbox.peek()
+        self.assertEqual(outbox.queue_depth, 2)
+        self.assertEqual(outbox.forced_drop_count, 0)
+
+        outbox.acknowledge(99, 1)
+        sequence, message, protected, _ = outbox.peek()
+        self.assertEqual(sequence, 2)
+        self.assertTrue(protected)
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+        parser.feed(message)
+        drop = parser.next_message()
+        self.assertEqual(drop.message_type, C.TRANSPORT_DROP)
+        self.assertEqual(binary.parse_transport_drop(drop)[1:4], (2, 2, 1))
+
     def test_recovered_boot_ranges_are_reported_current_first(self):
         outbox = BMB1Outbox(99, durable_slots=4)
         payload = b"x"
