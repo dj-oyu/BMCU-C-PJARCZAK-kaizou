@@ -103,6 +103,7 @@ message.
 | `0x11` | `LINK_STATE` | Pico to Bambuddy |
 | `0x12` | `TRANSPORT_DROP` | Pico to Bambuddy |
 | `0x13` | `PICO_DIAGNOSTIC` | Pico to Bambuddy or local UI |
+| `0x14` | `PICO_LOG` | Pico to Bambuddy or local UI |
 | `0x20` | `ACK` | Bambuddy to Pico |
 | `0x30` | `CONTROL` | Bambuddy to Pico |
 | `0x31` | `CONTROL_RESULT` | Pico to Bambuddy |
@@ -328,6 +329,7 @@ Always journal:
 - transport drops;
 - slot, motion, inserted-mask, and online-mask transitions;
 - CONTROL and CONTROL_RESULT.
+- Pico warning and error log records.
 
 Sample before journaling:
 
@@ -430,7 +432,8 @@ The local endpoints are:
 - `GET /api/current.bin`;
 - `GET /api/events.bin?after=<sequence>&limit=<n>`;
 - `GET /api/history/status.bin`;
-- `GET /api/diagnostics.bin`.
+- `GET /api/diagnostics.bin`;
+- `GET /api/logs.bin?after=<sequence>&limit=<n>`.
 
 Responses use `Content-Type: application/vnd.bmcu-monitor.v1` and consist of
 one or more complete BMB1 messages. Because every message carries a fixed
@@ -456,8 +459,67 @@ repeated:
 
 Defined v1 tags include uptime, free journal capacity, queue depth, oldest
 unacknowledged sequence, last ACK watermark, Wi-Fi state, Bambuddy connection
-state, exception count, and bounded runtime-log entries. Unknown tags are
-ignored. Strings and log messages have explicit maximum lengths.
+state, and exception count. Unknown tags are ignored. Strings have explicit
+maximum lengths. Runtime logs are not embedded in diagnostics; they use
+`PICO_LOG`.
+
+### 12.1 Binary device log
+
+The device log is binary from creation through delivery. The Pico must not
+build a dictionary entry, JSON snapshot, or JSON crash file for it.
+
+`PICO_LOG` payload:
+
+```text
+u64 log_sequence
+u64 uptime_ms
+u8  severity
+u8  component_length
+u16 message_length
+u16 detail_length
+bytes component, UTF-8, maximum 40 bytes
+bytes message, UTF-8, maximum 320 bytes
+bytes detail TLV, maximum 512 bytes
+```
+
+Severity values are `0=debug`, `1=info`, `2=notice`, `3=warning`,
+`4=error`, and `5=critical`.
+
+Detail TLV uses the same `tag`, `value_type`, `value_length`, `value` layout as
+`PICO_DIAGNOSTIC`. Tags are component-specific and optional. Implementations
+must prefer typed numeric details over formatted text. Tracebacks are UTF-8,
+truncated from the beginning so the most recent frames remain, and bounded by
+the detail limit.
+
+The in-memory runtime log is a preallocated byte ring. A fixed-slot
+implementation may initially use 1024-byte slots with a small configured
+count. Repeated identical exceptions within the suppression window update a
+numeric suppression counter when the entry is still mutable; they do not
+allocate another object tree.
+
+`/api/logs.bin` returns concatenated `PICO_LOG` messages directly from the log
+ring and journal. It is sequence-paginated and bounded to at most 64 records or
+32 KiB per response, whichever comes first. The browser decodes and formats
+the records. There is no `/api/pico/logs` JSON compatibility endpoint.
+
+Warning, error, and critical logs are journaled. Debug, info, and notice logs
+remain in the bounded RAM ring unless a diagnostic capture mode explicitly
+enables their persistence. Sending a log to Bambuddy does not remove it from
+the local ring.
+
+The last-crash record uses a bounded binary `BMCR1` file:
+
+```text
+bytes magic "BMCR1"
+u16  record_length
+bytes one PICO_LOG payload
+u32  crc32
+```
+
+It is written only by the existing rate-limited crash persistence policy.
+Startup validates its length and CRC before exposing it as a recovered
+`PICO_LOG`. A malformed or torn crash record is ignored. No JSON parsing or
+serialization is used for crash persistence.
 
 The browser retains the last sequence it rendered and requests only newer
 events. A full snapshot, complete journal, and runtime log must not be
@@ -478,6 +540,7 @@ The UI exposes:
 - journal usage and retained time range;
 - last durable ACK watermark;
 - explicit drop ranges.
+- sequence-paginated binary device logs and the recovered last-crash record.
 
 Configuration writes use bounded HTML form encoding or a dedicated compact
 binary request, not JSON. Configuration-file representation at rest is outside
@@ -530,4 +593,6 @@ Implementation is complete when automated integration tests demonstrate:
 - malformed and unauthenticated inputs are bounded and rejected;
 - the local UI reads current and historical binary data without constructing
   a Pico-side JSON or semantic object-tree response;
+- device logs, exception details, and the last-crash record are binary and
+  render correctly in the browser without Pico-side JSON generation;
 - no production JSON/WebSocket/NDJSON telemetry path remains enabled.
