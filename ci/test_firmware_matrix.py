@@ -85,20 +85,20 @@ class FirmwareMatrixTests(unittest.TestCase):
             output = temporary_root / "release"
             assets = fm.package_release(root, output, "test label", expected_count=3)
             self.assertEqual(len(assets), 9)
-            self.assertTrue(all(path.name.startswith("BMCU-firmware-test-label-") for path in assets))
+            self.assertTrue(all(path.name.startswith("BMCU-test-label-") for path in assets))
 
-            all_zip = output / "BMCU-firmware-test-label-all.zip"
+            all_zip = output / "BMCU-test-label-all.zip"
             with zipfile.ZipFile(all_zip) as archive:
                 binaries = [name for name in archive.namelist() if name.endswith(".bin")]
                 self.assertEqual(len(binaries), 3)
                 self.assertIn("manifest.json", archive.namelist())
             for slug in fm.RELEASE_PROFILE_SLUGS.values():
-                with zipfile.ZipFile(output / f"BMCU-firmware-test-label-{slug}.zip") as archive:
+                with zipfile.ZipFile(output / f"BMCU-test-label-{slug}.zip") as archive:
                     self.assertEqual(
                         len([name for name in archive.namelist() if name.endswith(".bin")]), 1
                     )
             checksum_lines = (
-                output / "BMCU-firmware-test-label-SHA256SUMS.txt"
+                output / "BMCU-test-label-SHA256SUMS.txt"
             ).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(checksum_lines), 8)
 

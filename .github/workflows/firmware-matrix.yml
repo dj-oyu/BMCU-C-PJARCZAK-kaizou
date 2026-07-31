@@ -6,17 +6,20 @@ on:
       - main
     paths:
       - ".github/workflows/firmware-matrix.yml"
+      - ".github/workflows/host-tests.yml"
       - "platformio.ini"
       - "version"
       - "src/**"
       - "ci/firmware_matrix.json"
       - "ci/firmware_matrix.py"
       - "ci/test_firmware_matrix.py"
+      - "ci/release_metadata.py"
+      - "ci/test_release_metadata.py"
       - "which_to_choose_*.txt"
   workflow_dispatch:
     inputs:
       release_label:
-        description: Optional label used in release asset filenames
+        description: "Optional release tag/asset label (default: V<version>-kaizou-YYYYMMDD)"
         required: false
         type: string
 
@@ -28,10 +31,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host-tests:
+    uses: ./.github/workflows/host-tests.yml
+
   plan:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      release_label: ${{ steps.release.outputs.release_label }}
+      release_name: ${{ steps.release.outputs.release_name }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -44,6 +52,14 @@ jobs:
       - name: Create build matrix
         id: matrix
         run: echo "matrix=$(python ci/firmware_matrix.py matrix)" >> "$GITHUB_OUTPUT"
+      - name: Derive release metadata
+        id: release
+        env:
+          RELEASE_LABEL: ${{ inputs.release_label }}
+        run: >-
+          python ci/release_metadata.py metadata
+          --label "$RELEASE_LABEL"
+          --github-output "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -85,7 +101,9 @@ jobs:
           retention-days: 1
 
   package:
-    needs: build
+    needs:
+      - plan
+      - build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -109,7 +127,12 @@ jobs:
           python ci/firmware_matrix.py package-release
           --root dist
           --output release-assets
-          --label "${{ inputs.release_label }}"
+          --label "${{ needs.plan.outputs.release_label }}"
+      - name: Format release notes and checksums
+        run: >-
+          python ci/release_metadata.py notes
+          --assets release-assets
+          --label "${{ needs.plan.outputs.release_label }}"
       - name: Upload release-ready assets
         uses: actions/upload-artifact@v4
         with:
@@ -117,3 +140,37 @@ jobs:
           path: release-assets/
           if-no-files-found: error
           retention-days: 1
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - host-tests
+      - plan
+      - package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-ready-${{ github.sha }}
+          path: release-assets
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_LABEL: ${{ needs.plan.outputs.release_label }}
+          RELEASE_NAME: ${{ needs.plan.outputs.release_name }}
+        run: |
+          if gh release view "$RELEASE_LABEL" >/dev/null 2>&1; then
+            echo "::notice::Release $RELEASE_LABEL already exists; leaving it unchanged. Use a unique release_label to publish another build."
+            exit 0
+          fi
+          notes_file="$(find release-assets -maxdepth 1 -name '*-release-notes.md' -print -quit)"
+          test -n "$notes_file"
+          gh release create "$RELEASE_LABEL" release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file "$notes_file" \
+            --prerelease

@@ -5,7 +5,8 @@ Status: canonical table for local and GitHub Actions builds
 The machine-readable source is [`ci/firmware_matrix.json`](../ci/firmware_matrix.json). The builder validates
 that table before compiling. A firmware-related push to `main`, including a merged pull request, runs
 `.github/workflows/firmware-matrix.yml` and produces every supported binary. Documentation-only and unrelated
-changes do not start the expensive full matrix. A manual run can supply an optional release filename label.
+changes do not start the expensive full matrix. After the matrix and host tests pass on `main`, the workflow
+automatically publishes a GitHub pre-release. A manual run can supply an optional release label.
 
 ## Parameters
 
@@ -67,7 +68,7 @@ parallelism. A newer push cancels an obsolete in-progress matrix. Each shard is 
 diagnostics. After all shards pass, the package job downloads them, verifies every SHA-256/CRC32/size entry,
 and uploads one `release-ready-<git-sha>` artifact, also retained for one day.
 
-The release-ready artifact contains nine files:
+The release-ready artifact and GitHub pre-release contain nine files:
 
 - one ZIP with all 780 binaries;
 - one ZIP for each of the standard A1, high-force P1S, and soft-load A1 profiles;
@@ -75,8 +76,13 @@ The release-ready artifact contains nine files:
 - generated release notes;
 - `SHA256SUMS.txt` covering the other eight files.
 
-Download this short-lived Actions artifact and attach its files to a GitHub Release. Release assets are the
-long-term download location; generated binaries should not be committed to the repository.
+The release tag, title, body, and asset names follow the established release format:
+`V<version>-kaizou-<YYYYMMDD>`, `BMCU V<version> kaizou firmware matrix (<YYYY-MM-DD>)`, and
+`BMCU-V<version>-kaizou-<YYYYMMDD>-...`. The release is deliberately marked as a pre-release because hardware
+validation remains a separate gate. If a release with the generated daily tag already exists, the publish job
+skips it instead of overwriting it; manually dispatch the workflow with a unique `release_label` to publish another
+build that day. Release assets are the long-term download location; generated binaries should not be committed
+to the repository.
 
 ## Artifact layout
 
