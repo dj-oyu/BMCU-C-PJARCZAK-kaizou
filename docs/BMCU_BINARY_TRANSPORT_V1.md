@@ -459,9 +459,20 @@ repeated:
 
 Defined v1 tags include uptime, free journal capacity, queue depth, oldest
 unacknowledged sequence, last ACK watermark, Wi-Fi state, Bambuddy connection
-state, and exception count. Unknown tags are ignored. Strings have explicit
-maximum lengths. Runtime logs are not embedded in diagnostics; they use
-`PICO_LOG`.
+state, and exception count. The initial registry also covers firmware and reset
+identity, free/allocated/minimum heap, temperature, garbage-collection count,
+loop delay, UART backlog and error counters, Wi-Fi RSSI and reconnects, TCP
+traffic and reconnects, journal usage and failures, replay count, and STATUS
+replacement count. CPU percentage is not reported: cooperative-loop busy/idle
+time and maximum service delay are the meaningful health signals on the Pico.
+Unknown tags are ignored. Strings have explicit maximum lengths. Runtime logs
+are not embedded in diagnostics; they use `PICO_LOG`.
+
+The Pico sends a complete diagnostic snapshot after authentication, a normal
+snapshot at most once every 15 seconds, and an immediate snapshot when a
+health value crosses a warning or critical boundary. Bambuddy stores the
+long-term series. The Pico journals lower-frequency normal samples and
+higher-frequency samples around an anomaly.
 
 ### 12.1 Binary device log
 
@@ -541,6 +552,13 @@ The UI exposes:
 - last durable ACK watermark;
 - explicit drop ranges.
 - sequence-paginated binary device logs and the recovered last-crash record.
+
+Bambuddy presents these diagnostics as a managed BMCU Monitor device, with an
+overview, hardware, communications, device-log, and local-history view.
+Aggregate health is green, warning, critical, or offline. UART overflow,
+sequence loss, journal failure, and prolonged durable-ACK delay are critical
+signals; low heap, weak Wi-Fi, growing queue depth, and low journal capacity
+are warning signals before their configured critical boundary.
 
 Configuration writes use bounded HTML form encoding or a dedicated compact
 binary request, not JSON. Configuration-file representation at rest is outside
