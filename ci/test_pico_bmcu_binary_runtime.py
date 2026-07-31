@@ -124,6 +124,27 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(drop.message_type, C.TRANSPORT_DROP)
         self.assertEqual(binary.parse_transport_drop(drop)[1:4], (2, 2, 1))
 
+    def test_consecutive_drops_form_exact_range_and_ack_can_advance(self):
+        outbox = BMB1Outbox(99, durable_slots=1)
+        event = link.encode_frame(link.EVENT, 1, bytes(16))
+        self.assertEqual(outbox.enqueue_raw(0, 1000, event, link.EVENT), 1)
+        self.assertEqual(outbox.enqueue_raw(0, 1001, event, link.EVENT), 0)
+        self.assertEqual(outbox.enqueue_raw(0, 1002, event, link.EVENT), 0)
+        self.assertEqual(outbox.next_sequence, 4)
+        self.assertEqual(outbox.acknowledge(99, 1), 1)
+
+        sequence, message, _, _ = outbox.peek()
+        self.assertEqual(sequence, 2)
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+        parser.feed(message)
+        drop = parser.next_message()
+        self.assertEqual(binary.parse_transport_drop(drop)[1:4], (2, 3, 2))
+
+        self.assertEqual(outbox.acknowledge(99, 3), 1)
+        self.assertEqual(outbox.enqueue_raw(0, 1003, event, link.EVENT), 4)
+        self.assertEqual(outbox.acknowledge(99, 4), 1)
+        self.assertIsNone(outbox.peek())
+
     def test_recovered_boot_ranges_are_reported_current_first(self):
         outbox = BMB1Outbox(99, durable_slots=4)
         payload = b"x"

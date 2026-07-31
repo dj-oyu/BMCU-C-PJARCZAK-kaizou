@@ -78,7 +78,8 @@ def write_link_state(out, offset, flags, transport_sequence, pico_boot_id,
 def write_transport_drop(out, offset, flags, transport_sequence, pico_boot_id,
                          observed_at_us, first_sequence, last_sequence, count,
                          reason):
-    if (first_sequence == 0 or last_sequence < first_sequence or count == 0):
+    if (first_sequence == 0 or last_sequence < first_sequence or
+            count != last_sequence - first_sequence + 1):
         raise CodecError("TRANSPORT_DROP requires exact non-empty bounds")
     _check_space(out, offset, C.HEADER_SIZE + 32)
     write_header(out, offset, C.TRANSPORT_DROP, flags, 32,
@@ -412,7 +413,8 @@ def parse_transport_drop(message):
         raise CodecError("invalid TRANSPORT_DROP")
     observed, first, last, count, reason, reserved = struct.unpack_from(
         ">QQQIB3s", message.payload, 0)
-    if (reserved != b"\0\0\0" or first == 0 or last < first or count == 0):
+    if (reserved != b"\0\0\0" or first == 0 or last < first or
+            count != last - first + 1):
         raise CodecError("invalid TRANSPORT_DROP fields")
     return observed, first, last, count, reason
 

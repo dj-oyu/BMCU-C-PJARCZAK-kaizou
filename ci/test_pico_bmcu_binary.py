@@ -260,7 +260,8 @@ class FixtureTests(unittest.TestCase):
 
     def test_transport_drop_rejects_unknown_or_empty_bounds(self):
         out = bytearray(C.MAX_MESSAGE_SIZE)
-        for first, last, count in ((0, 0, 1), (4, 3, 1), (3, 3, 0)):
+        for first, last, count in (
+                (0, 0, 1), (4, 3, 1), (3, 3, 0), (3, 4, 1)):
             with self.assertRaises(binary.CodecError):
                 binary.write_transport_drop(
                     out, 0, 0, 9, 1, 100, first, last, count,

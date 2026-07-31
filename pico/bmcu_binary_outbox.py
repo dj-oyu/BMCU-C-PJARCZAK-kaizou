@@ -55,6 +55,11 @@ class BMB1Outbox:
             self.forced_drop_first = self.next_sequence
             self.forced_drop_last = self.next_sequence
             self.next_sequence += 1
+        else:
+            # Every additional lost record owns the next global sequence so
+            # the marker advertises one exact contiguous range.
+            self.forced_drop_last = self.next_sequence
+            self.next_sequence += 1
         self.forced_drop_count += 1
         self.forced_drop_observed_at_us = observed_at_us
 
@@ -134,7 +139,8 @@ class BMB1Outbox:
         size = binary.write_transport_drop(
             self.encode_buffer, 0, C.FLAG_CRITICAL, sequence,
             self.pico_boot_id, self.forced_drop_observed_at_us,
-            sequence, sequence, self.forced_drop_count,
+            self.forced_drop_first, self.forced_drop_last,
+            self.forced_drop_count,
             C.DROP_RAM_QUEUE_FULL)
         if not self._append_message(sequence, size, True):
             return False

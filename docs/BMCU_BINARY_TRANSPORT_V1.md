@@ -249,14 +249,17 @@ u8[3] reserved
 
 No loss may be silent. Both bounds and the count are mandatory and non-zero;
 `last_dropped_sequence` must be greater than or equal to
-`first_dropped_sequence`. A sender must not emit a `TRANSPORT_DROP` until it
-can identify the exact dropped sequence bounds.
+`first_dropped_sequence`, and the count must equal `last - first + 1`. A
+sender must not emit a `TRANSPORT_DROP` until it can identify the exact
+dropped sequence bounds.
 
 If RAM admission fails after a transport sequence is reserved, sequence
 allocation pauses. The eventual `TRANSPORT_DROP` marker uses that exact
-reserved sequence; additional losses before admission increase its count but
-do not consume more sequences. Thus DROP reporting never creates an
-unfillable global ACK gap.
+reserved sequence. Each additional loss before admission reserves the next
+global sequence and advances `last_dropped_sequence`, so
+`dropped_record_count == last_dropped_sequence -
+first_dropped_sequence + 1`. Thus DROP reporting is exact and never creates
+an unfillable global ACK gap.
 
 ### 7.3 CONTROL
 
