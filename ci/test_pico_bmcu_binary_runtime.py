@@ -174,6 +174,28 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(outbox.available_boot_ranges(),
                          ((99, 0, 0), (7, 3, 3)))
 
+    def test_historical_replay_cannot_jump_a_live_ack_gap(self):
+        outbox = BMB1Outbox(99, durable_slots=4, large_slots=4)
+        self.assertTrue(outbox.restore(
+            7, C.PICO_LOG, C.FLAG_JOURNALED,
+            C.GLOBAL_SCOPE, 500, 1, b"old"))
+        first = outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, 2, b"x" * 200)
+        second = outbox.enqueue_payload(
+            C.LINK_STATE, 0, 0, 3, b"small")
+        third = outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, 4, b"y" * 200)
+        self.assertEqual((first, second, third), (1, 2, 3))
+
+        seen = []
+        for boot, watermark in ((99, 1), (99, 2), (99, 3), (7, 500)):
+            sequence, message, _, _ = outbox.peek()
+            seen.append((
+                int.from_bytes(bytes(message[20:28]), "big"), sequence))
+            self.assertEqual(outbox.acknowledge(boot, watermark), 1)
+        self.assertEqual(seen, [(99, 1), (99, 2), (99, 3), (7, 500)])
+        self.assertIsNone(outbox.peek())
+
 
 class JournalTests(unittest.TestCase):
     def record(self):
@@ -302,7 +324,8 @@ class JournalTests(unittest.TestCase):
             managed.file.close()
             cursor = journal.JournalReplayCursor(directory)
             outbox = BMB1Outbox(100, durable_slots=4)
-            cursor.page_into(outbox, 4)
+            outbox.replay_pager = lambda: cursor.page_into(outbox, 4)
+            outbox.replay_pager()
 
             seen = []
             drop_range = None
