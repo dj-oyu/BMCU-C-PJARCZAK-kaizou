@@ -33,6 +33,8 @@ class MetricWindow:
             for index in range(len(self.buckets)):
                 self.buckets[index] //= 2
                 self.count += self.buckets[index]
+                midpoint = 0 if index == 0 else 1 << (index - 1)
+                self.total += self.buckets[index] * midpoint
 
     def average(self):
         return self.total // self.count if self.count else 0

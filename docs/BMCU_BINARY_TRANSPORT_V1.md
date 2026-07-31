@@ -247,8 +247,16 @@ u8  reason
 u8[3] reserved
 ```
 
-No loss may be silent. If exact dropped sequence bounds are unavailable, both
-bounds are zero and the count remains mandatory.
+No loss may be silent. Both bounds and the count are mandatory and non-zero;
+`last_dropped_sequence` must be greater than or equal to
+`first_dropped_sequence`. A sender must not emit a `TRANSPORT_DROP` until it
+can identify the exact dropped sequence bounds.
+
+If RAM admission fails after a transport sequence is reserved, sequence
+allocation pauses. The eventual `TRANSPORT_DROP` marker uses that exact
+reserved sequence; additional losses before admission increase its count but
+do not consume more sequences. Thus DROP reporting never creates an
+unfillable global ACK gap.
 
 ### 7.3 CONTROL
 
@@ -297,6 +305,9 @@ bytes hmac_sha256, 32 bytes
 
 The result HMAC covers the complete transport header and the result payload
 excluding the HMAC. The only v1 command is the existing guarded BMCU soft reset.
+`CONTROL_RESULT` is session-bound, uses transport sequence zero, and is never
+journaled or replayed. A result not delivered before disconnect is discarded;
+the server may issue the command again in a newly authenticated session.
 
 ## 8. ACK and replay
 
@@ -688,6 +699,9 @@ the validated value to a Python integer.
   journal processing.
 - A Pico restart creates a new boot ID and restores unacknowledged journal
   records with their original boot ID and sequence identity.
+- Replay is paged from BMJ1 into bounded RAM as ACKs release queue capacity.
+  HELLO advertises complete unacknowledged ranges found by the startup scan,
+  including records not yet resident in RAM.
 
 ## 15. Implementation completion criteria
 

@@ -114,6 +114,14 @@ class BinaryCodecTests(unittest.TestCase):
         with self.assertRaises(binary.CodecError):
             parser.next_message()
 
+    def test_receiver_ignores_unknown_reserved_flags(self):
+        binary.write_header(
+            self.out, 0, C.PING, 0, 0, 0, 0, C.GLOBAL_SCOPE)
+        struct.pack_into(">H", self.out, 6, 0x8000)
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+        parser.feed(memoryview(self.out)[:C.HEADER_SIZE])
+        self.assertEqual(parser.next_message().flags, 0x8000)
+
     def test_control_result_and_protocol_error_bounds(self):
         size = binary.write_control_result(
             self.out, 0, 0, 0, 4, C.GLOBAL_SCOPE, 7, 0, b"ok",
@@ -249,6 +257,14 @@ class FixtureTests(unittest.TestCase):
         _, messages, _ = self.load_messages("concatenated.bin")
         self.assertEqual([item.message_type for item in messages],
                          [C.LINK_STATE, C.ACK])
+
+    def test_transport_drop_rejects_unknown_or_empty_bounds(self):
+        out = bytearray(C.MAX_MESSAGE_SIZE)
+        for first, last, count in ((0, 0, 1), (4, 3, 1), (3, 3, 0)):
+            with self.assertRaises(binary.CodecError):
+                binary.write_transport_drop(
+                    out, 0, 0, 9, 1, 100, first, last, count,
+                    C.DROP_RAM_QUEUE_FULL)
 
     def test_hello_and_truncated_fixture(self):
         raw, messages, _ = self.load_messages("hello.bin")

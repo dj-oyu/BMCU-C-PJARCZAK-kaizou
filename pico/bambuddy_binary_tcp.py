@@ -73,7 +73,7 @@ class BMB1TCPClient:
     def __init__(self, outbox, host, port, device_id, device_key, firmware,
                  links, socket_factory=None, clock_ms=None,
                  control_handler=None, clock_us=None,
-                 send_metric=None):
+                 send_metric=None, ticks_diff=None, ticks_add=None):
         self.outbox = outbox
         self.host = host
         self.port = port
@@ -86,12 +86,16 @@ class BMB1TCPClient:
         self.control_handler = control_handler
         self.clock_us = clock_us
         self.send_metric = send_metric
+        self.ticks_diff = ticks_diff or (lambda left, right: left - right)
+        self.ticks_add = ticks_add or (lambda value, delta: value + delta)
         self.state = WIFI_WAIT
         self.sock = None
         self.parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 2))
         self.rx_buffer = bytearray(512)
         self.tx_buffer = bytearray(C.MAX_MESSAGE_SIZE)
         self.auth_buffer = bytearray(512)
+        self.control_buffer = bytearray(256)
+        self.control_pending_length = 0
         self.tx_view = None
         self.tx_offset = 0
         self.tx_sequence = 0
@@ -111,6 +115,10 @@ class BMB1TCPClient:
         self.tx_bytes = 0
         self.reconnect_count = 0
         self.replay_count = 0
+        self.state_deadline_ms = 0
+        self.inflight_sequence = 0
+        self.inflight_boot_id = 0
+        self.inflight_sent_ms = 0
 
     @staticmethod
     def _new_socket():
@@ -127,9 +135,11 @@ class BMB1TCPClient:
         self.sock = None
         self.tx_view = None
         self.tx_offset = 0
+        self.control_pending_length = 0
+        self.inflight_sequence = 0
         self.replay_through = max(self.replay_through, self.highest_sent)
         self.state = BACKOFF
-        self.next_action_ms = now_ms + 1000
+        self.next_action_ms = self.ticks_add(now_ms, 1000)
         self.last_error = str(error)
 
     def _queue_bytes(self, view, sequence=0):
@@ -146,8 +156,10 @@ class BMB1TCPClient:
         try:
             started = self.clock_us() if self.clock_us is not None else 0
             sent = self.sock.send(self.tx_view[self.tx_offset:])
-        except OSError:
-            return False
+        except OSError as error:
+            if (error.args[0] if error.args else None) in (11, 35, 10035):
+                return False
+            raise
         if self.send_metric is not None and self.clock_us is not None:
             self.send_metric(max(0, self.clock_us() - started))
         if sent is None or sent <= 0:
@@ -155,10 +167,14 @@ class BMB1TCPClient:
         self.tx_offset += sent
         self.tx_bytes += sent
         if self.tx_offset == len(self.tx_view):
+            completed_sequence = self.tx_sequence
             self.highest_sent = max(self.highest_sent, self.tx_sequence)
             self.tx_view = None
             self.tx_offset = 0
             self.tx_sequence = 0
+            if completed_sequence:
+                self.inflight_sequence = completed_sequence
+                self.inflight_sent_ms = self.clock_ms()
         return True
 
     def _build_hello(self):
@@ -178,8 +194,12 @@ class BMB1TCPClient:
     def _receive(self, now_ms):
         try:
             count = self.sock.recv_into(self.rx_buffer)
-        except (OSError, AttributeError):
+        except AttributeError:
             return True
+        except OSError as error:
+            if (error.args[0] if error.args else None) in (11, 35, 10035):
+                return True
+            raise
         if not count:
             return False
         self.last_rx_ms = now_ms
@@ -200,6 +220,7 @@ class BMB1TCPClient:
                 self.outbox.pico_boot_id.to_bytes(8, "big"))
             self._build_hello()
             self.state = HELLO_SEND
+            self.state_deadline_ms = self.ticks_add(self.clock_ms(), 5000)
             return
         if self.state == ACCEPT_WAIT:
             persisted, ack_timeout, ping_interval = \
@@ -210,10 +231,14 @@ class BMB1TCPClient:
             self.session_epoch_ms = self.clock_ms()
             self.last_control_sequence = 0
             self.state = ONLINE
+            self.state_deadline_ms = 0
             return
         if self.state == ONLINE and message.message_type == C.ACK:
             boot_id, watermark, _, _ = binary.parse_ack(message)
             self.outbox.acknowledge(boot_id, watermark)
+            if (boot_id == self.inflight_boot_id and
+                    watermark >= self.inflight_sequence):
+                self.inflight_sequence = 0
         elif self.state == ONLINE and message.message_type == C.CONTROL:
             self._handle_control(message)
         elif self.state == ONLINE and message.message_type == C.PING:
@@ -243,7 +268,8 @@ class BMB1TCPClient:
             if not self._same(expected, supplied):
                 result, detail = C.RESULT_UNAUTHENTICATED, b"bad hmac"
             elif (self.session_epoch_ms is None or
-                  (self.clock_ms() - self.session_epoch_ms) * 1000 >
+                  self.ticks_diff(self.clock_ms(),
+                                  self.session_epoch_ms) * 1000 >
                   issued_at_us + ttl_ms * 1000):
                 result, detail = C.RESULT_EXPIRED, b"expired"
             elif command_sequence <= self.last_control_sequence:
@@ -261,33 +287,28 @@ class BMB1TCPClient:
                     result, detail = C.RESULT_UNSAFE, b"rejected"
         except binary.CodecError:
             return
-        sequence = self.outbox._allocate_sequence()
         unsigned = bytearray(12 + len(detail))
         struct.pack_into(">QBBH", unsigned, 0, command_sequence, result, 0,
                          len(detail))
         unsigned[12:] = detail
         binary.write_header(
-            self.outbox.encode_buffer, 0, C.CONTROL_RESULT, 0,
-            len(unsigned) + 32, sequence, self.outbox.pico_boot_id,
+            self.control_buffer, 0, C.CONTROL_RESULT, 0,
+            len(unsigned) + 32, 0, self.outbox.pico_boot_id,
             message.link_index)
         mac = hmac_sha256(
             self.session_key,
-            memoryview(self.outbox.encode_buffer)[:C.HEADER_SIZE], unsigned)
+            memoryview(self.control_buffer)[:C.HEADER_SIZE], unsigned)
         size = binary.write_control_result(
-            self.outbox.encode_buffer, 0, 0, sequence,
+            self.control_buffer, 0, 0, 0,
             self.outbox.pico_boot_id, message.link_index, command_sequence,
             result, detail, mac)
-        try:
-            self.outbox.durable.append(
-                sequence, memoryview(self.outbox.encode_buffer)[:size],
-                protected=True)
-        except Exception:
-            self.outbox._remember_drop(sequence)
+        self.control_pending_length = size
 
     def attach_connected_socket(self, sock):
         """Test/embedded hook after a nonblocking connect has completed."""
         self.sock = sock
         self.state = CHALLENGE_WAIT
+        self.state_deadline_ms = self.ticks_add(self.clock_ms(), 5000)
 
     def poll(self, now_ms, wifi_online=True):
         if not wifi_online:
@@ -296,7 +317,7 @@ class BMB1TCPClient:
             self.state = WIFI_WAIT
             return
         if self.state in (WIFI_WAIT, BACKOFF):
-            if now_ms < self.next_action_ms:
+            if self.ticks_diff(now_ms, self.next_action_ms) < 0:
                 return
             try:
                 self.sock = self.socket_factory()
@@ -308,6 +329,7 @@ class BMB1TCPClient:
                 try:
                     self.sock.connect((self.host, self.port))
                     self.state = CHALLENGE_WAIT
+                    self.state_deadline_ms = self.ticks_add(now_ms, 5000)
                 except OSError as error:
                     code = error.args[0] if error.args else None
                     if code not in (11, 36, 10035, 115, 119):
@@ -328,19 +350,52 @@ class BMB1TCPClient:
                 return
             self._connect_pending = False
             self.state = CHALLENGE_WAIT
-        if not self._receive(now_ms):
+            self.state_deadline_ms = self.ticks_add(now_ms, 5000)
+        if (self.state in (CHALLENGE_WAIT, HELLO_SEND, ACCEPT_WAIT) and
+                self.ticks_diff(now_ms, self.state_deadline_ms) >= 0):
+            self._close(now_ms, "handshake timeout")
+            return
+        try:
+            alive = self._receive(now_ms)
+        except (OSError, binary.CodecError) as error:
+            self._close(now_ms, error)
+            return
+        if not alive:
             self._close(now_ms, "peer closed")
             return
-        if self.state == HELLO_SEND and self._send_step():
-            if self.tx_view is None:
+        if self.state == HELLO_SEND:
+            try:
+                sent = self._send_step()
+            except OSError as error:
+                self._close(now_ms, error)
+                return
+            if sent and self.tx_view is None:
                 self.state = ACCEPT_WAIT
         elif self.state == ONLINE:
             if self.tx_view is not None:
-                self._send_step()
+                try:
+                    self._send_step()
+                except OSError as error:
+                    self._close(now_ms, error)
+                return
+            if self.control_pending_length:
+                self._queue_bytes(memoryview(
+                    self.control_buffer)[:self.control_pending_length])
+                self.control_pending_length = 0
+                return
+            if self.inflight_sequence:
+                if self.ticks_diff(
+                        now_ms, self.inflight_sent_ms) < self.ack_timeout_ms:
+                    return
+                self.inflight_sequence = 0
+            if self.last_rx_ms and self.ticks_diff(
+                    now_ms, self.last_rx_ms) > self.ping_interval_ms * 2:
+                self._close(now_ms, "liveness timeout")
                 return
             current = self.outbox.peek()
             if current is not None:
                 sequence, record, _, _ = current
+                self.inflight_boot_id = struct.unpack_from(">Q", record, 20)[0]
                 if sequence <= self.replay_through:
                     self.tx_buffer[:len(record)] = record
                     flags = struct.unpack_from(">H", self.tx_buffer, 6)[0]

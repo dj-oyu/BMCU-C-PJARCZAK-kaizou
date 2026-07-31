@@ -74,7 +74,7 @@ class FrameDecoder:
         self.crc_errors = 0
         self.frame_errors = 0
 
-    def feed(self, data, on_valid_wire=None):
+    def feed(self, data, on_valid_wire=None, on_frame=None):
         if len(data) > MAX_DECODER_BUFFER:
             self.frame_errors += 1
             data = data[-MAX_DECODER_BUFFER:]
@@ -110,13 +110,16 @@ class FrameDecoder:
                 self._buffer = self._buffer[1:]
                 continue
             wire = bytes(self._buffer[:wire_length])
+            if on_valid_wire is not None:
+                on_valid_wire(memoryview(wire), body[1])
             frame = {
                 "version": body[0], "kind": body[1], "sequence": _u16(body, 2),
                 "payload": bytes(body[5:]),
             }
-            if on_valid_wire is not None:
-                on_valid_wire(memoryview(wire), frame)
-            frames.append(frame)
+            if on_frame is not None:
+                on_frame(frame)
+            else:
+                frames.append(frame)
             self._buffer = self._buffer[wire_length:]
         return frames
 
@@ -346,13 +349,14 @@ class BMCUMonitor:
             if data:
                 received_at_us = now_ms * 1000
 
-                def accepted(wire, metadata):
+                def accepted(wire, kind):
                     if self.on_valid_frame is not None:
                         self.on_valid_frame(
-                            self.link_index, received_at_us, wire, metadata)
+                            self.link_index, received_at_us, wire, kind)
 
-                for frame in self.decoder.feed(data, accepted):
-                    self._handle_frame(frame, now_ms)
+                self.decoder.feed(
+                    data, accepted,
+                    lambda frame: self._handle_frame(frame, now_ms))
                 self.uart_drain_bytes += len(data)
                 self.uart_backlog = self.uart.any()
                 return len(data)

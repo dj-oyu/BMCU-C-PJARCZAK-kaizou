@@ -10,10 +10,10 @@ spec = importlib.util.spec_from_file_location(
     "device_metrics_test", PICO / "device_metrics.py")
 device_metrics = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(device_metrics)
-sys.path.remove(str(PICO))
 
 import bmcu_binary as binary
 import bmcu_binary_constants as C
+from bmcu_binary_outbox import BMB1Outbox
 
 
 class Monitor:
@@ -38,6 +38,14 @@ class BinaryOnlyRuntimeTests(unittest.TestCase):
         self.assertEqual(window.average(), 202)
         self.assertGreaterEqual(window.percentile(95), 1000)
 
+    def test_metric_window_average_remains_sensible_after_decay(self):
+        window = device_metrics.MetricWindow()
+        for _ in range(2048):
+            window.add(100)
+        self.assertGreater(window.count, 0)
+        self.assertGreaterEqual(window.average(), 64)
+        self.assertLessEqual(window.average(), 128)
+
     def test_diagnostic_is_bounded_typed_tlv(self):
         metrics = device_metrics.DeviceMetrics()
         for value in range(1, 50):
@@ -49,6 +57,23 @@ class BinaryOnlyRuntimeTests(unittest.TestCase):
         self.assertIn(C.DIAG_UART0_DRAIN_BYTES, tags)
         self.assertIn(C.DIAG_UART0_OVERFLOW_COUNT, tags)
         self.assertLessEqual(len(payload), C.MAX_PAYLOAD_SIZE)
+        outbox = BMB1Outbox(9, durable_slots=2, large_slots=2)
+        sequence = outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, 1, payload)
+        self.assertEqual(sequence, 1)
+        self.assertEqual(len(outbox.large), 1)
+
+    def test_large_log_and_oversized_payload_have_bounded_outcomes(self):
+        outbox = BMB1Outbox(9, durable_slots=2, large_slots=2)
+        sequence = outbox.enqueue_payload(
+            C.PICO_LOG, 0, C.GLOBAL_SCOPE, 1,
+            b"x" * (1024 - C.HEADER_SIZE))
+        self.assertEqual(sequence, 1)
+        self.assertEqual(len(outbox.large), 1)
+        self.assertEqual(outbox.enqueue_payload(
+            C.PICO_LOG, 0, C.GLOBAL_SCOPE, 2,
+            b"x" * (C.MAX_PAYLOAD_SIZE + 1)), 0)
+        self.assertEqual(outbox.forced_drop_count, 1)
 
     def test_legacy_json_transports_and_endpoints_are_absent(self):
         for name in (

@@ -54,7 +54,7 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(len(accepted), 1)
         self.assertEqual(accepted[0][0:2], (1, 25000))
         self.assertEqual(bytes(accepted[0][2]), wire)
-        self.assertEqual(accepted[0][3]["kind"], link.STATUS)
+        self.assertEqual(accepted[0][3], link.STATUS)
 
     def test_invalid_crc_never_reaches_callback(self):
         wire = bytearray(link.encode_frame(link.STATUS, 3, bytes(range(27))))
@@ -116,7 +116,7 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(outbox.forced_drop_count, 1)
         self.assertEqual(outbox.acknowledge(99, 1), 1)
         sequence, message, protected, _ = outbox.peek()
-        self.assertEqual(sequence, 3)
+        self.assertEqual(sequence, 2)
         self.assertTrue(protected)
         parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
         parser.feed(message)
@@ -178,6 +178,15 @@ class JournalTests(unittest.TestCase):
         self.assertGreater(stager.flush_one(target), 0)
         self.assertTrue(target.getvalue())
 
+    def test_stager_reserves_capacity_for_critical_event(self):
+        stager = journal.JournalStager(
+            bytearray(journal.RECORD_MAX_SIZE * 2))
+        stager.stage(C.PICO_LOG, 0, C.GLOBAL_SCOPE, 1, 5, b"log")
+        with self.assertRaises(journal.RingFull):
+            stager.stage(C.PICO_LOG, 0, C.GLOBAL_SCOPE, 2, 6, b"log")
+        stager.stage(
+            C.BMCU_FRAME, C.FLAG_CRITICAL, 0, 2, 6, b"event")
+
     def test_directory_restart_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             managed = journal.BMJ1Journal(directory, 99, 1000)
@@ -211,6 +220,33 @@ class JournalTests(unittest.TestCase):
             with open(path, "wb") as target:
                 target.write(b"BMA1\x01\x01\0\0broken")
             self.assertEqual(journal.load_watermarks(directory), {})
+
+    def test_cursor_pages_more_than_ram_capacity_until_all_acked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1)
+            for sequence in range(1, 201):
+                managed.stage(
+                    C.BMCU_FRAME, C.FLAG_CRITICAL, 0, sequence,
+                    sequence, b"x")
+                managed.flush_one()
+            managed.file.close()
+            cursor = journal.JournalReplayCursor(directory)
+            outbox = BMB1Outbox(
+                100, durable_slots=4, large_slots=1)
+            outbox.historical_ranges = cursor.available_ranges
+            outbox.replay_pager = lambda: cursor.page_into(outbox, 4)
+            seen = []
+            while True:
+                current = outbox.peek()
+                if current is None:
+                    break
+                sequence, message, _, _ = current
+                boot = int.from_bytes(bytes(message[20:28]), "big")
+                seen.append(sequence)
+                outbox.acknowledge(boot, sequence)
+            self.assertEqual(seen, list(range(1, 201)))
+            self.assertIn((99, 1, 200), outbox.historical_ranges)
 
 
 class FakeSocket:
@@ -299,11 +335,68 @@ class TCPClientTests(unittest.TestCase):
         parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
         parser.feed(raw)
         client._handle_message(parser.next_message())
-        _, result_raw, _, _ = outbox.peek()
         result_parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
-        result_parser.feed(result_raw)
+        result_parser.feed(memoryview(
+            client.control_buffer)[:client.control_pending_length])
         result = binary.parse_control_result(result_parser.next_message())
         self.assertEqual(result[1], C.RESULT_EXPIRED)
+        self.assertEqual(outbox.queue_depth, 0)
+
+    def test_delivery_waits_for_ack_before_retransmitting(self):
+        now = [0]
+        boot = 99
+        fake = FakeSocket(send_limit=C.MAX_MESSAGE_SIZE)
+        outbox = BMB1Outbox(boot, durable_slots=4)
+        outbox.enqueue_link_state(0, 1, C.LINK_ONLINE, 0)
+        client = tcp.BMB1TCPClient(
+            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),),
+            clock_ms=lambda: now[0])
+        client.sock = fake
+        client.state = tcp.ONLINE
+        client.ack_timeout_ms = 10
+        client.poll(0)
+        first_length = len(fake.sent)
+        self.assertGreater(first_length, 0)
+        for value in range(1, 10):
+            now[0] = value
+            client.poll(value)
+        self.assertEqual(len(fake.sent), first_length)
+        now[0] = 10
+        client.poll(10)
+        self.assertEqual(len(fake.sent), first_length * 2)
+
+    def test_handshake_timeout_is_wrap_safe(self):
+        modulus = 16384
+
+        def ticks_add(value, delta):
+            return (value + delta) % modulus
+
+        def ticks_diff(left, right):
+            return ((left - right + modulus // 2) % modulus) - modulus // 2
+
+        now = [16000]
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
+            ((0, b"a"),), clock_ms=lambda: now[0],
+            ticks_add=ticks_add, ticks_diff=ticks_diff)
+        client.attach_connected_socket(FakeSocket())
+        now[0] = ticks_add(16000, 4999)
+        client.poll(now[0])
+        self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
+        now[0] = ticks_add(16000, 5000)
+        client.poll(now[0])
+        self.assertEqual(client.state, tcp.BACKOFF)
+
+    def test_disconnect_discards_session_bound_control_result(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
+            ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+        client.control_pending_length = 42
+        client._close(1, "test")
+        self.assertEqual(client.control_pending_length, 0)
+        self.assertEqual(client.state, tcp.BACKOFF)
 
 
 if __name__ == "__main__":

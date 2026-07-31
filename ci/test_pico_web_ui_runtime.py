@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -37,6 +38,15 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertIn(b"/api/logs.bin?after=", page)
         self.assertNotIn(b"JSON.stringify", page)
         self.assertNotIn(b"/api/devices", page)
+        self.assertIn(b"getBigUint64(o).toString()", page)
+
+    def test_embedded_javascript_has_valid_syntax(self):
+        source = web_ui.PAGE.decode().split("<script>", 1)[1].split(
+            "</script>", 1)[0]
+        result = subprocess.run(
+            ["node", "--check", "--input-type=module"], input=source,
+            text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_binary_response_is_not_serialized_or_copied(self):
         payload = bytearray(b"BMB1-payload")

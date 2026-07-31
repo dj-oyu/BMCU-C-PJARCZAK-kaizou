@@ -95,6 +95,12 @@ class JournalStager:
 
     def stage(self, record_type, flags, link_index, transport_sequence,
               received_at_us, payload):
+        # Keep one slot available for a critical BMCU event when ordinary
+        # journal traffic temporarily outruns flash writes.
+        if (self.ring.capacity > 1 and
+                not flags & C.FLAG_CRITICAL and
+                len(self.ring) >= self.ring.capacity - 1):
+            raise RingFull("journal critical reserve")
         size = write_record(self.scratch, record_type, flags, link_index,
                             transport_sequence, received_at_us, payload)
         self.ring.append(self.next_local_sequence,
@@ -262,6 +268,75 @@ def recover_directory(directory, callback):
         except (OSError, JournalError):
             continue
     return count
+
+
+def scan_available_ranges(directory):
+    ranges = {}
+    watermarks = load_watermarks(directory)
+
+    def found(boot_id, _type, _flags, _link, sequence, _received, _payload):
+        if sequence <= watermarks.get(boot_id, 0):
+            return
+        current = ranges.get(boot_id)
+        if current is None:
+            ranges[boot_id] = [sequence, sequence]
+        else:
+            current[0] = min(current[0], sequence)
+            current[1] = max(current[1], sequence)
+
+    recover_directory(directory, found)
+    return tuple((boot, value[0], value[1])
+                 for boot, value in sorted(ranges.items()))
+
+
+class JournalReplayCursor:
+    """Pages all unacknowledged journal records into bounded RAM."""
+
+    def __init__(self, directory):
+        self.directory = directory.rstrip("/")
+        self.watermarks = load_watermarks(directory)
+        self.pending = None
+        self._iterator = self._records()
+        self.available_ranges = scan_available_ranges(directory)
+
+    def _records(self):
+        try:
+            import uos as os
+        except ImportError:
+            import os
+        try:
+            names = sorted(name for name in os.listdir(self.directory)
+                           if name.endswith(".bmj"))
+        except OSError:
+            return
+        scratch = bytearray(RECORD_MAX_SIZE)
+        for name in names:
+            try:
+                with open(self.directory + "/" + name, "rb") as source:
+                    for boot_id, _, _, record in recover_records(
+                            source, scratch):
+                        _, kind, flags, link, sequence, received, payload = \
+                            record
+                        if sequence <= self.watermarks.get(boot_id, 0):
+                            continue
+                        yield (boot_id, kind, flags, link, sequence, received,
+                               bytes(payload))
+            except (OSError, JournalError):
+                continue
+
+    def page_into(self, outbox, limit=16):
+        loaded = 0
+        while loaded < limit:
+            if self.pending is None:
+                try:
+                    self.pending = next(self._iterator)
+                except StopIteration:
+                    break
+            if not outbox.restore(*self.pending):
+                break
+            self.pending = None
+            loaded += 1
+        return loaded
 
 
 def load_watermarks(directory):

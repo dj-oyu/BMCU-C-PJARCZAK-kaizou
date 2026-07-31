@@ -17,7 +17,7 @@ import bmcu_binary as binary
 import bmcu_binary_constants as C
 from bambuddy_binary_tcp import BMB1TCPClient
 from bmcu_binary_outbox import BMB1Outbox
-from bmcu_journal import BMJ1Journal, recover_directory
+from bmcu_journal import BMJ1Journal, JournalReplayCursor
 from bmcu_link import BMCUMonitor, drain_monitors
 from device_metrics import DeviceMetrics
 from runtime_log import PicoRuntimeLog
@@ -74,7 +74,10 @@ journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
 outbox = BMB1Outbox(
     boot_id, len(link_configs),
     getattr(config, "BMCU_BINARY_QUEUE_SLOTS", 128))
-recover_directory(journal_path, outbox.restore)
+replay_cursor = JournalReplayCursor(journal_path)
+outbox.historical_ranges = replay_cursor.available_ranges
+outbox.replay_pager = lambda: replay_cursor.page_into(outbox, 16)
+outbox.replay_pager()
 journal = BMJ1Journal(
     journal_path, boot_id, monotonic_us.now(),
     getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4))
@@ -141,7 +144,8 @@ client = BMB1TCPClient(
           for index, item in enumerate(link_configs)),
     clock_ms=time.ticks_ms, control_handler=binary_control,
     clock_us=monotonic_us.now,
-    send_metric=metrics.observe_transport_send)
+    send_metric=metrics.observe_transport_send,
+    ticks_diff=time.ticks_diff, ticks_add=time.ticks_add)
 
 
 def wifi_event(message):
