@@ -11,6 +11,7 @@ MAX_REQUEST_BYTES = 2048
 MAX_BODY_BYTES = 256
 MAX_RECV_BYTES = 256
 MAX_SEND_BYTES = 256
+HTTP_LISTEN_BACKLOG = 4
 BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
 
 
@@ -116,7 +117,7 @@ class WebUI:
         if ipv6_only:
             server.setsockopt(41, 27, 1)
         server.bind((address, port))
-        server.listen(1)
+        server.listen(HTTP_LISTEN_BACKLOG)
         server.setblocking(False)
         return server
 

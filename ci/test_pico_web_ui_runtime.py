@@ -45,6 +45,9 @@ class WouldBlockReadIntoClient(ReadIntoClient):
 
 
 class WebUIRuntimeTests(unittest.TestCase):
+    def test_listener_allows_a_small_burst_queue(self):
+        self.assertEqual(web_ui.HTTP_LISTEN_BACKLOG, 4)
+
     def test_page_uses_arraybuffer_dataview_and_delta_endpoints(self):
         page = web_ui.PAGE
         self.assertIn(b"arrayBuffer()", page)
