@@ -13,6 +13,7 @@ from machine import UART, Pin
 import bmcu_binary as binary
 import bmcu_binary_constants as C
 from bambuddy_binary_tcp import BMB1TCPClient
+from boot_session import next_boot_id
 from bmcu_binary_outbox import BMB1Outbox
 from bmcu_journal import BMJ1Journal, JournalReplayCursor
 from bmcu_link import BMCUMonitor, drain_monitors
@@ -68,7 +69,7 @@ bridge_id = getattr(
     config, "BRIDGE_ID", getattr(secrets, "MDNS_HOSTNAME",
                                  "pico-bmcu-bridge"))
 monotonic_us = MonotonicMicros()
-boot_id = int.from_bytes(os.urandom(8), "big")
+boot_id = next_boot_id(os.urandom(8))
 link_configs = getattr(config, "BMCU_LINKS", None) or ({
     "id": "bmcu-a", "uart": config.UART_ID,
     "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN,
