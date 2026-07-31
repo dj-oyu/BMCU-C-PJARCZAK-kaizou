@@ -290,6 +290,41 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(seen, list(range(1, 201)))
             self.assertIn((99, 1, 200), outbox.historical_ranges)
 
+    def test_cursor_synthesizes_drop_for_sparse_journal_sequences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1)
+            for sequence in (1, 4):
+                managed.stage(
+                    C.BMCU_FRAME, C.FLAG_CRITICAL, 0, sequence,
+                    sequence, b"x")
+                managed.flush_one()
+            managed.file.close()
+            cursor = journal.JournalReplayCursor(directory)
+            outbox = BMB1Outbox(100, durable_slots=4)
+            cursor.page_into(outbox, 4)
+
+            seen = []
+            drop_range = None
+            while True:
+                current = outbox.peek()
+                if current is None:
+                    break
+                sequence, message, _, _ = current
+                parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+                parser.feed(message)
+                decoded = parser.next_message()
+                seen.append((sequence, decoded.message_type))
+                if decoded.message_type == C.TRANSPORT_DROP:
+                    drop_range = binary.parse_transport_drop(decoded)[1:4]
+                outbox.acknowledge(decoded.pico_boot_id, sequence)
+            self.assertEqual(seen, [
+                (1, C.BMCU_FRAME),
+                (2, C.TRANSPORT_DROP),
+                (4, C.BMCU_FRAME),
+            ])
+            self.assertEqual(drop_range, (2, 3, 2))
+
 
 class FakeSocket:
     def __init__(self, receive=b"", send_limit=13):

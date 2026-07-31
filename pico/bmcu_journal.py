@@ -285,19 +285,32 @@ def scan_available_ranges(directory):
             current[1] = max(current[1], sequence)
 
     recover_directory(directory, found)
+    # Dict insertion order follows the segment scan, so the retained tail is
+    # the most recent history rather than arbitrary numeric boot IDs.
     return tuple((boot, value[0], value[1])
-                 for boot, value in sorted(ranges.items()))
+                 for boot, value in ranges.items())
 
 
 class JournalReplayCursor:
-    """Pages all unacknowledged journal records into bounded RAM."""
+    """Pages recent unacknowledged journal records into bounded RAM."""
 
     def __init__(self, directory):
         self.directory = directory.rstrip("/")
         self.watermarks = load_watermarks(directory)
         self.pending = None
+        ranges = scan_available_ranges(directory)
+        historical_limit = max(0, C.MAX_REPLAY_BOOT_RANGES - 1)
+        self.available_ranges = ranges[-historical_limit:] \
+            if historical_limit else ()
+        self.allowed_boots = {
+            boot_id for boot_id, _oldest, _newest in self.available_ranges
+        }
+        self.next_sequences = {
+            boot_id: max(self.watermarks.get(boot_id, 0) + 1, oldest)
+            for boot_id, oldest, _newest in self.available_ranges
+        }
+        self.drop_payload = bytearray(32)
         self._iterator = self._records()
-        self.available_ranges = scan_available_ranges(directory)
 
     def _records(self):
         try:
@@ -317,6 +330,8 @@ class JournalReplayCursor:
                             source, scratch):
                         _, kind, flags, link, sequence, received, payload = \
                             record
+                        if boot_id not in self.allowed_boots:
+                            continue
                         if sequence <= self.watermarks.get(boot_id, 0):
                             continue
                         yield (boot_id, kind, flags, link, sequence, received,
@@ -332,12 +347,32 @@ class JournalReplayCursor:
                     self.pending = next(self._iterator)
                 except StopIteration:
                     break
+            boot_id, _kind, _flags, _link, sequence, received, _payload = \
+                self.pending
+            expected = self.next_sequences.get(boot_id, sequence)
+            if sequence > expected:
+                last = min(sequence - 1, expected + 0xFFFFFFFF - 1)
+                struct.pack_into(
+                    ">QQQIB3s", self.drop_payload, 0, received,
+                    expected, last, last - expected + 1,
+                    C.DROP_JOURNAL_CORRUPT, b"\0\0\0")
+                if not outbox.restore(
+                        boot_id, C.TRANSPORT_DROP, C.FLAG_CRITICAL,
+                        C.GLOBAL_SCOPE, expected, received,
+                        self.drop_payload):
+                    break
+                self.next_sequences[boot_id] = last + 1
+                loaded += 1
+                continue
+            if sequence < expected:
+                self.pending = None
+                continue
             if not outbox.restore(*self.pending):
                 break
+            self.next_sequences[boot_id] = sequence + 1
             self.pending = None
             loaded += 1
         return loaded
-
 
 def load_watermarks(directory):
     path = directory.rstrip("/") + "/ack.bma"
