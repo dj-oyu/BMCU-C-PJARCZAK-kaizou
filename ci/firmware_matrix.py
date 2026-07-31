@@ -243,7 +243,7 @@ def package_release(root: Path, output: Path, label: str | None = None,
     output.mkdir(parents=True, exist_ok=True)
 
     release_label = sanitize_release_label(label) if label and label.strip() else default_release_label()
-    prefix = f"BMCU-firmware-{release_label}"
+    prefix = f"BMCU-{release_label}"
     common_files = [
         path for path in (
             root / "manifest.json",
