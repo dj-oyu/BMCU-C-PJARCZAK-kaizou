@@ -159,6 +159,7 @@ jobs:
       - name: Publish pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_LABEL: ${{ needs.plan.outputs.release_label }}
           RELEASE_NAME: ${{ needs.plan.outputs.release_name }}
         run: |
