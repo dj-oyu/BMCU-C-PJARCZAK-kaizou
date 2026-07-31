@@ -136,7 +136,7 @@ if len(key_hex) != 64:
     raise ValueError("BMCU_BINARY_DEVICE_KEY must be 64 hex characters")
 client = BMB1TCPClient(
     outbox, getattr(config, "BMCU_BINARY_HOST", ""),
-    int(getattr(config, "BMCU_BINARY_PORT", 8766)),
+    int(getattr(config, "BMCU_BINARY_PORT", 8799)),
     getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
     binascii.unhexlify(key_hex),
     getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),

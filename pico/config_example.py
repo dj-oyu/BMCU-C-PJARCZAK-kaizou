@@ -23,7 +23,7 @@ BMCU_LINKS = (
 DEBUG_USB = False
 # Required BMB1 transport configuration.
 BMCU_BINARY_HOST = "192.168.1.10"
-BMCU_BINARY_PORT = 8766
+BMCU_BINARY_PORT = 8799
 BMCU_BINARY_DEVICE_ID = "pico-bmcu-bridge"
 BMCU_BINARY_DEVICE_KEY = ""
 BMCU_BINARY_JOURNAL_PATH = "bmcu_history"
