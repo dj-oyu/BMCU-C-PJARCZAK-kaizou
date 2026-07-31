@@ -113,7 +113,9 @@ message.
 
 `transport_sequence` is zero for messages that do not participate in durable
 telemetry ordering. It is monotonically increasing per Pico boot for durable
-Pico-to-Bambuddy records.
+Pico-to-Bambuddy records across all links and bridge-scoped record types.
+`link_index` is the physical link for link-scoped records and `0xff` for
+bridge-scoped records, including HELLO, ACK, diagnostics, logs, and liveness.
 
 ### 4.2 Flags
 
@@ -137,6 +139,8 @@ Authentication uses HMAC-SHA256.
 2. Pico sends `HELLO`.
 3. Bambuddy verifies the HMAC and sends `HELLO_ACCEPTED`.
 4. No telemetry or CONTROL is accepted before step 3 completes.
+
+`SERVER_CHALLENGE` payload is exactly the 32-byte nonce.
 
 ### 5.1 HELLO payload
 
@@ -170,6 +174,18 @@ CONTROL messages use a session key derived as:
 ```text
 HMAC-SHA256(device_key, "BMB1-SESSION" || challenge || pico_boot_id)
 ```
+
+`HELLO_ACCEPTED` payload:
+
+```text
+u64 persisted_through_sequence
+u32 ack_timeout_ms
+u32 ping_interval_ms
+```
+
+The persisted watermark is zero when Bambuddy has no durable record for this
+boot. Timeout values are server policy and must be bounded by the Pico before
+use.
 
 ## 6. BMCU_FRAME
 
@@ -242,14 +258,29 @@ The Pico rejects an expired, replayed, unauthenticated, unknown, or unsafe
 command and returns a `CONTROL_RESULT`. No motor, slot, or filament movement
 command is introduced by this transport specification.
 
+`CONTROL_RESULT` payload:
+
+```text
+u64 command_sequence
+u8  result
+u8  reserved
+u16 detail_length
+bytes detail, UTF-8, maximum 160 bytes
+bytes hmac_sha256, 32 bytes
+```
+
+The result HMAC covers the complete transport header and the result payload
+excluding the HMAC. The only v1 command is the existing guarded BMCU soft reset.
+
 ## 8. ACK and replay
 
-Bambuddy ACKs only after durable database commit. ACK is a cumulative
-contiguous watermark, scoped by Pico boot ID and link.
+Bambuddy ACKs only after durable database commit. ACK is one cumulative
+contiguous global watermark scoped by Pico boot ID. It covers durable records
+from every link plus bridge-scoped diagnostics and logs.
 
 ```text
 u64 pico_boot_id
-u8  link_index
+u8  scope, must be `0xff` in v1
 u8  reject_count
 u16 reserved
 u64 persisted_through_sequence
@@ -259,8 +290,9 @@ repeated reject_count times:
 ```
 
 The Pico may release delivery-queue records at or below the acknowledged
-watermark. Locally retained history is not deleted merely because it was
-ACKed.
+global watermark. Bambuddy must not advance it across a missing sequence,
+regardless of the missing record's link. Locally retained history is not
+deleted merely because it was ACKed.
 
 After reconnect:
 
@@ -279,6 +311,22 @@ device_id, pico_boot_id, transport_sequence
 
 Replay ordering is reconstructed from `transport_sequence` and
 `received_at_us`, not TCP arrival order alone.
+
+## 8.1 Liveness and protocol errors
+
+PING and PONG each carry one opaque `u64` token. PONG echoes the PING token.
+They are not durable and use transport sequence zero.
+
+`PROTOCOL_ERROR` payload:
+
+```text
+u16 error_code
+u16 detail_length
+bytes detail, UTF-8, maximum 160 bytes
+```
+
+The detail is diagnostic only, must not contain a key or credential, and must
+not be used for parser control flow.
 
 ## 9. Pico RAM queues
 

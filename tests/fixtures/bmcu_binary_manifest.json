@@ -1,0 +1,17 @@
+{
+  "fixtures": {
+    "bmcu_frame.bin": {
+      "description": "BMB1 BMCU_FRAME carrying the canonical valid STATUS vector",
+      "sha256": "0d89ca74c9425dd49ee85c738935ff554ce27171e08be51c6628c6efaefdd5f7"
+    },
+    "link_state.bin": {
+      "description": "BMB1 online LINK_STATE",
+      "sha256": "c28800f541b69de89ec6fc15d783946a3d64fe4d7b5b446580b68745ecd10879"
+    },
+    "max_log.bin": {
+      "description": "Maximum field-sized PICO_LOG",
+      "sha256": "ee8898ed6c1e272dce736bd772d13f478fd47a89f9bd34175a872136e7693be0"
+    }
+  },
+  "registry_revision": 1
+}
