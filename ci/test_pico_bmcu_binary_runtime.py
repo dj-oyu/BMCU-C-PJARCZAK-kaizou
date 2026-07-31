@@ -293,6 +293,29 @@ class FakeSocket:
         pass
 
 
+class ReadIntoSocket:
+    def __init__(self, receive=b""):
+        self.receive = bytearray(receive)
+        self.sent = bytearray()
+
+    def readinto(self, target):
+        if not self.receive:
+            raise OSError(11)
+        count = min(len(target), len(self.receive))
+        target[:count] = self.receive[:count]
+        del self.receive[:count]
+        return count
+
+    def send(self, data):
+        self.sent.extend(data)
+        return len(data)
+
+
+class WouldBlockReadIntoSocket(ReadIntoSocket):
+    def readinto(self, _target):
+        return None
+
+
 class TCPClientTests(unittest.TestCase):
     def frame(self, message_type, payload, boot=0, link_index=C.GLOBAL_SCOPE):
         out = bytearray(C.MAX_MESSAGE_SIZE)
@@ -333,6 +356,31 @@ class TCPClientTests(unittest.TestCase):
         fake.receive.extend(self.frame(C.ACK, ack_payload, boot))
         client.poll(131)
         self.assertEqual(outbox.queue_depth, 0)
+
+    def test_micropython_readinto_receives_server_challenge(self):
+        boot = 0x1122334455667788
+        challenge = self.frame(C.SERVER_CHALLENGE, bytes(range(32)))
+        fake = ReadIntoSocket(challenge)
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(boot, durable_slots=4), "host", 1234, b"device",
+            bytes(range(32)), b"1.0", ((0, b"bmcu-a"),))
+        client.attach_connected_socket(fake)
+
+        client.poll(1)
+
+        self.assertEqual(client.state, tcp.ACCEPT_WAIT)
+        self.assertTrue(fake.sent)
+
+    def test_micropython_readinto_none_means_would_block(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1234, b"device", b"k" * 32,
+            b"1.0", ((0, b"bmcu-a"),))
+        client.attach_connected_socket(WouldBlockReadIntoSocket())
+
+        client.poll(1)
+
+        self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
+        self.assertIsNone(client.last_error)
 
     def test_control_uses_session_relative_ttl(self):
         now = [20]

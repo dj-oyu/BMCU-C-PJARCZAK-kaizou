@@ -28,6 +28,22 @@ class Client:
         self.closed = True
 
 
+class ReadIntoClient(Client):
+    def readinto(self, target):
+        count = min(len(target), len(self.request))
+        target[:count] = self.request[:count]
+        self.request = self.request[count:]
+        return count
+
+    def recv(self, _):
+        raise AssertionError("readinto should be used")
+
+
+class WouldBlockReadIntoClient(ReadIntoClient):
+    def readinto(self, _target):
+        return None
+
+
 class WebUIRuntimeTests(unittest.TestCase):
     def test_page_uses_arraybuffer_dataview_and_delta_endpoints(self):
         page = web_ui.PAGE
@@ -86,6 +102,34 @@ class WebUIRuntimeTests(unittest.TestCase):
         web.poll()
         self.assertIn(b"application/vnd.bmcu-monitor.v1", web.response)
         self.assertIsInstance(web.response.parts[-1], memoryview)
+
+    def test_request_buffer_is_fixed_and_uses_readinto(self):
+        web = web_ui.WebUI(lambda _: b"ok")
+        request_buffer = web.request
+        web.client = ReadIntoClient(
+            b"GET /api/current.bin HTTP/1.1\r\nHost: pico\r\n\r\n")
+
+        web.poll()
+        self.assertIs(web.request, request_buffer)
+        self.assertGreater(web.request_length, 0)
+
+        for _ in range(4):
+            if web.client is None:
+                break
+            web.poll()
+        self.assertIs(web.request, request_buffer)
+        self.assertEqual(web.request_length, 0)
+
+    def test_readinto_none_keeps_http_client_open(self):
+        web = web_ui.WebUI(lambda _: b"ok")
+        client = WouldBlockReadIntoClient(b"")
+        web.client = client
+
+        web.poll()
+
+        self.assertIs(web.client, client)
+        self.assertFalse(client.closed)
+        self.assertEqual(web.request_length, 0)
 
     def test_partial_response_uses_bounded_memoryview_offset(self):
         response = web_ui._Response(b"head", b"0123456789")

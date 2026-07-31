@@ -92,6 +92,7 @@ class BMB1TCPClient:
         self.sock = None
         self.parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 2))
         self.rx_buffer = bytearray(512)
+        self._receive_into = None
         self.tx_buffer = bytearray(C.MAX_MESSAGE_SIZE)
         self.auth_buffer = bytearray(512)
         self.control_buffer = bytearray(256)
@@ -133,6 +134,7 @@ class BMB1TCPClient:
             except Exception:
                 pass
         self.sock = None
+        self._receive_into = None
         self.tx_view = None
         self.tx_offset = 0
         self.control_pending_length = 0
@@ -193,14 +195,18 @@ class BMB1TCPClient:
 
     def _receive(self, now_ms):
         try:
-            count = self.sock.recv_into(self.rx_buffer)
-        except AttributeError:
-            return True
+            if self._receive_into is None:
+                self._receive_into = getattr(self.sock, "readinto", None)
+                if self._receive_into is None:
+                    self._receive_into = self.sock.recv_into
+            count = self._receive_into(self.rx_buffer)
         except OSError as error:
             if (error.args[0] if error.args else None) in (11, 35, 10035):
                 return True
             raise
-        if not count:
+        if count is None:
+            return True
+        if count == 0:
             return False
         self.last_rx_ms = now_ms
         self.rx_bytes += count
@@ -307,6 +313,7 @@ class BMB1TCPClient:
     def attach_connected_socket(self, sock):
         """Test/embedded hook after a nonblocking connect has completed."""
         self.sock = sock
+        self._receive_into = None
         self.state = CHALLENGE_WAIT
         self.state_deadline_ms = self.ticks_add(self.clock_ms(), 5000)
 

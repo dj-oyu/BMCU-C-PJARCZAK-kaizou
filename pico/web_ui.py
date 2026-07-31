@@ -9,6 +9,7 @@ except ImportError:
 
 MAX_REQUEST_BYTES = 2048
 MAX_BODY_BYTES = 256
+MAX_RECV_BYTES = 256
 MAX_SEND_BYTES = 256
 BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
 
@@ -100,7 +101,10 @@ class WebUI:
         self.server = None
         self.servers = []
         self.client = None
-        self.request = bytearray()
+        self.request = bytearray(MAX_REQUEST_BYTES)
+        self.request_view = memoryview(self.request)
+        self.request_length = 0
+        self.request_meta = None
         self.response = None
         self.close_at_ms = None
         self.client_deadline_ms = None
@@ -135,12 +139,13 @@ class WebUI:
                   (status, content_type, size)).encode()
         return _Response(header, body)
 
-    def _request_parts(self):
-        raw = bytes(self.request)
-        marker = raw.find(b"\r\n\r\n")
+    def _request_metadata(self):
+        if self.request_meta is not None:
+            return self.request_meta
+        marker = self.request.find(b"\r\n\r\n", 0, self.request_length)
         if marker < 0:
             return None
-        lines = raw[:marker].split(b"\r\n")
+        lines = bytes(self.request_view[:marker]).split(b"\r\n")
         request_line = lines[0].split() if lines else ()
         method = request_line[0] if request_line else b""
         path = request_line[1] if len(request_line) > 1 else b""
@@ -154,17 +159,20 @@ class WebUI:
             length = int(headers.get("content-length", "0"))
         except ValueError:
             length = -1
-        return method, path, headers, raw[marker + 4:], length
+        self.request_meta = method, path, headers, length, marker + 4
+        return self.request_meta
 
     def _request_complete(self):
-        parts = self._request_parts()
-        if parts is None:
+        metadata = self._request_metadata()
+        if metadata is None:
             return False
-        length = parts[4]
-        return length < 0 or length > MAX_BODY_BYTES or len(parts[3]) >= length
+        length, body_start = metadata[3], metadata[4]
+        return length < 0 or length > MAX_BODY_BYTES or \
+            self.request_length - body_start >= length
 
     def _finish_request(self):
-        method, path, headers, body, length = self._request_parts()
+        method, path, headers, length, body_start = \
+            self._request_metadata()
         if length < 0:
             self.response = self._http_response(
                 "400 Bad Request", "text/plain", b"invalid content length\n")
@@ -173,7 +181,8 @@ class WebUI:
             self.response = self._http_response(
                 "413 Payload Too Large", "text/plain", b"body too large\n")
             return
-        body = body[:length]
+        body = bytes(self.request_view[body_start:body_start + length]) \
+            if length else b""
         if (path.startswith(b"/api/device-key") or
                 path.startswith(b"/api/transport")) and self.settings_provider:
             result = self.settings_provider(
@@ -204,7 +213,8 @@ class WebUI:
             except OSError:
                 pass
         self.client = None
-        self.request = bytearray()
+        self.request_length = 0
+        self.request_meta = None
         self.response = None
         self.close_at_ms = None
         self.client_deadline_ms = None
@@ -241,22 +251,34 @@ class WebUI:
                 self._touch()
             return
         if self.client:
+            if self.request_length >= MAX_REQUEST_BYTES:
+                self.response = self._http_response(
+                    "413 Payload Too Large", "text/plain", b"Too large\n")
+                return
+            maximum = min(
+                MAX_RECV_BYTES, MAX_REQUEST_BYTES - self.request_length)
+            target = self.request_view[
+                self.request_length:self.request_length + maximum]
             try:
-                data = self.client.recv(256)
+                try:
+                    count = self.client.readinto(target)
+                except AttributeError:
+                    data = self.client.recv(maximum)
+                    count = len(data)
+                    target[:count] = data
             except OSError as error:
                 if _would_block(error):
                     return
                 self._close_client()
                 return
-            if not data:
+            if count is None:
+                return
+            if count == 0:
                 self._close_client()
                 return
-            self.request.extend(data)
+            self.request_length += count
             self._touch()
-            if len(self.request) > MAX_REQUEST_BYTES:
-                self.response = self._http_response(
-                    "413 Payload Too Large", "text/plain", b"Too large\n")
-            elif self._request_complete():
+            if self._request_complete():
                 try:
                     self._finish_request()
                 except Exception as error:
