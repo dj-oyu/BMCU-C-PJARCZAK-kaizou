@@ -145,7 +145,7 @@ def binary_control(link_index, command, arguments):
 key_store = DeviceKeyStore(getattr(config, "BMCU_BINARY_DEVICE_KEY", ""))
 transport_store = TransportSettingsStore(
     getattr(config, "BMCU_BINARY_HOST", ""),
-    getattr(config, "BMCU_BINARY_PORT", 8766))
+    getattr(config, "BMCU_BINARY_PORT", 8799))
 for load_error in (key_store.load_error, transport_store.load_error):
     if load_error:
         runtime_log.warning("settings", load_error)

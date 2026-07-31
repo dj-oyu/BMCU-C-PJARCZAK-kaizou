@@ -24,7 +24,7 @@ DEBUG_USB = False
 # BMB1 bootstrap settings. Host, port, and device key can be replaced later in
 # the local UI; persisted UI values take precedence over this file.
 BMCU_BINARY_HOST = "192.168.1.10"
-BMCU_BINARY_PORT = 8766
+BMCU_BINARY_PORT = 8799
 BMCU_BINARY_DEVICE_ID = "pico-bmcu-bridge"
 BMCU_BINARY_DEVICE_KEY = ""
 BMCU_BINARY_JOURNAL_PATH = "bmcu_history"
