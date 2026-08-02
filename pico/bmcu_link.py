@@ -66,22 +66,101 @@ def _i32(data, offset):
     return value - 0x100000000 if value & 0x80000000 else value
 
 
+REJECT_CRC = 1
+REJECT_LENGTH = 2
+REJECT_OVERSIZED = 3
+
+CAPTURE_SLOTS = 8
+CAPTURE_BYTES = 72
+
+
+class RejectCapture:
+    """Keeps the most recent rejected byte runs so they can be inspected.
+
+    The decoder used to discard malformed input silently, leaving only counters,
+    which cannot distinguish a single flipped bit from a truncated frame. Storage
+    is preallocated because this runs inside the UART drain path.
+    """
+
+    def __init__(self, slots=CAPTURE_SLOTS, size=CAPTURE_BYTES):
+        self.slots = slots
+        self.size = size
+        self.storage = bytearray(slots * size)
+        self.lengths = bytearray(slots)
+        self.reasons = bytearray(slots)
+        self.timestamps = [0] * slots
+        self.ordinals = [0] * slots
+        self.captured = 0
+        self._next = 0
+
+    def add(self, reason, data, now_ms=0):
+        count = len(data)
+        if count > self.size:
+            count = self.size
+        start = self._next * self.size
+        self.storage[start:start + count] = data[:count]
+        self.lengths[self._next] = count
+        self.reasons[self._next] = reason
+        self.timestamps[self._next] = now_ms
+        self.captured += 1
+        self.ordinals[self._next] = self.captured
+        self._next = (self._next + 1) % self.slots
+
+    def records(self):
+        """Oldest first, so a reader sees the runs in the order they arrived."""
+        for offset in range(self.slots):
+            index = (self._next + offset) % self.slots
+            if not self.ordinals[index]:
+                continue
+            start = index * self.size
+            yield (self.ordinals[index], self.reasons[index],
+                   self.timestamps[index],
+                   memoryview(self.storage)[start:start + self.lengths[index]])
+
+
 class FrameDecoder:
     """Consumes arbitrary UART chunks and emits only valid bounded frames."""
 
-    def __init__(self):
+    def __init__(self, capture=None):
         self._buffer = bytearray()
         self.crc_errors = 0
         self.frame_errors = 0
+        # Bytes dropped as unparseable noise. Kept apart from frame_errors so a
+        # bad length byte in an otherwise healthy stream stays distinguishable
+        # from a stream the decoder cannot make sense of at all.
+        self.discarded_bytes = 0
+        self.capture = capture
+        self.clock_ms = 0
+
+    def _reject(self, reason, data):
+        if self.capture is not None:
+            self.capture.add(reason, data, self.clock_ms)
 
     def feed(self, data, on_valid_wire=None, on_frame=None):
-        if len(data) > MAX_DECODER_BUFFER:
-            self.frame_errors += 1
-            data = data[-MAX_DECODER_BUFFER:]
-        self._buffer.extend(data)
-        if len(self._buffer) > MAX_DECODER_BUFFER:
-            self._buffer = self._buffer[-MAX_DECODER_BUFFER:]
+        """Parse every byte handed in; retain only an unparsed remainder.
+
+        This used to drop all but the last MAX_DECODER_BUFFER bytes of any
+        larger chunk, before parsing. With a 512-byte drain chunk against a
+        128-byte bound that silently discarded up to 384 bytes of intact frames
+        per read, which showed up as CRC errors on whatever frame straddled the
+        cut. The noise bound belongs on the *unparsed remainder*, which is at
+        most one legal frame, not on the arriving chunk.
+        """
         frames = []
+        view = memoryview(data)
+        for start in range(0, len(view), MAX_DECODER_BUFFER) or (0,):
+            self._buffer.extend(view[start:start + MAX_DECODER_BUFFER])
+            self._parse(frames, on_valid_wire, on_frame)
+            if len(self._buffer) > MAX_DECODER_BUFFER:
+                # Nothing legal can be this long once complete frames have been
+                # consumed, so the head is noise rather than a partial frame.
+                self.discarded_bytes += len(self._buffer) - MAX_DECODER_BUFFER
+                self._reject(REJECT_OVERSIZED,
+                             self._buffer[:CAPTURE_BYTES])
+                self._buffer = self._buffer[-MAX_DECODER_BUFFER:]
+        return frames
+
+    def _parse(self, frames, on_valid_wire, on_frame):
         while True:
             start = self._buffer.find(SYNC)
             if start < 0:
@@ -98,6 +177,9 @@ class FrameDecoder:
             payload_length = self._buffer[6]
             if payload_length > MAX_PAYLOAD:
                 self.frame_errors += 1
+                # Capture the surrounding run, not just the header: a bad length
+                # byte is usually the tail of an earlier desync.
+                self._reject(REJECT_LENGTH, self._buffer[:CAPTURE_BYTES])
                 self._buffer = self._buffer[1:]
                 continue
             wire_length = payload_length + 9
@@ -107,6 +189,9 @@ class FrameDecoder:
             expected_crc = _u16(self._buffer, wire_length - 2)
             if crc16_ccitt_false(body) != expected_crc:
                 self.crc_errors += 1
+                # The whole candidate frame, so a reader can recompute the CRC
+                # offline and tell a flipped bit from a truncated frame.
+                self._reject(REJECT_CRC, self._buffer[:wire_length])
                 self._buffer = self._buffer[1:]
                 continue
             wire = bytes(self._buffer[:wire_length])
@@ -121,7 +206,6 @@ class FrameDecoder:
             else:
                 frames.append(frame)
             self._buffer = self._buffer[wire_length:]
-        return frames
 
 
 def encode_frame(kind, sequence, payload=b""):
@@ -141,10 +225,12 @@ class BMCUMonitor:
 
 
     def __init__(self, uart, on_message=None, link_id="bmcu-a",
-                 link_index=0, on_valid_frame=None, uart_capacity=None):
+                 link_index=0, on_valid_frame=None, uart_capacity=None,
+                 capture_slots=CAPTURE_SLOTS):
         self.uart = uart
         self.on_message = on_message
-        self.decoder = FrameDecoder()
+        self.capture = RejectCapture(capture_slots) if capture_slots else None
+        self.decoder = FrameDecoder(self.capture)
         self.link_id = link_id
         self.link_index = link_index
         self.on_valid_frame = on_valid_frame
@@ -344,6 +430,7 @@ class BMCUMonitor:
         self._last_uart_service_ms = now_ms
         available = min(backlog, max_bytes)
         self._clock_ms = now_ms
+        self.decoder.clock_ms = now_ms
         if available:
             data = self.uart.read(available)
             if data:
