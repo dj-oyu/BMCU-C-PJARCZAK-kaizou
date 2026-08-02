@@ -21,6 +21,7 @@ BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
 # littlefs instead of a module-level literal keeps ~14 KB off a heap that the UI
 # itself flags as low below 20 KB.
 INDEX_PATH = "www/index.html.gz"
+SCHEMA_PATH = "www/schema.json"
 FILE_CHUNK_BYTES = 512
 
 
@@ -172,17 +173,18 @@ class WebUI:
         return _Response(cls._header(status, content_type, size), body)
 
     @classmethod
-    def _static_response(cls, path):
-        """Serves the pre-compressed page; the Pico never gzips at runtime."""
+    def _static_response(cls, path, content_type="text/html; charset=utf-8",
+                         rebuild="tools/build_web_ui.py", gzipped=True):
+        """Streams a staged asset; the Pico never compresses at runtime."""
         try:
             size = os.stat(path)[6]
             handle = open(path, "rb")
         except OSError:
             return cls._http_response(
                 "503 Service Unavailable", "text/plain",
-                b"web UI asset missing; run tools/build_web_ui.py\n")
-        header = cls._header("200 OK", "text/html; charset=utf-8", size,
-                             "Content-Encoding: gzip\r\n")
+                ("asset missing; run %s\n" % rebuild).encode())
+        header = cls._header("200 OK", content_type, size,
+                             "Content-Encoding: gzip\r\n" if gzipped else "")
         return _FileResponse(header, handle, size)
 
     def _request_metadata(self):
@@ -241,6 +243,18 @@ class WebUI:
                 "405 Method Not Allowed", "text/plain", b"GET only\n")
         elif path == b"/":
             self.response = self._static_response(INDEX_PATH)
+        elif path == b"/api/schema.json":
+            # Self-description so a reader can decode every binary endpoint
+            # without the device source. Generated at build time, so serving it
+            # costs no heap and no CPU beyond the file stream.
+            #
+            # Served uncompressed on purpose: this is the entry point, and the
+            # notes explaining that everything else is gzipped are inside it.
+            # urllib does not transparently inflate, so a naive first read of a
+            # gzipped schema fails before it can tell the reader why.
+            self.response = self._static_response(
+                SCHEMA_PATH, "application/json; charset=utf-8",
+                "tools/generate_api_schema.py", gzipped=False)
         elif path.startswith(b"/api/") and b".bin" in path:
             value = self.binary_provider(path.decode())
             self.response = self._http_response(

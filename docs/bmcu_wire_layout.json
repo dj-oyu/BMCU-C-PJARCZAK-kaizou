@@ -1,0 +1,223 @@
+{
+  "layout": "bmcu-wire-layout",
+  "revision": 1,
+  "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
+  "structures": {
+    "bmb1_envelope": {
+      "description": "BMB1 message header, pico/bmcu_binary.py write_header, format >4sBBHIQQB3s",
+      "endianness": "big",
+      "size": 32,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "bytes", "size": 4, "constant": "BMB1"},
+        {"name": "version", "offset": 4, "type": "u8", "constant": 1},
+        {"name": "message_type", "offset": 5, "type": "u8", "enum": "message_types"},
+        {"name": "flags", "offset": 6, "type": "u16", "enum": "flags", "flags": true},
+        {"name": "payload_length", "offset": 8, "type": "u32"},
+        {"name": "transport_sequence", "offset": 12, "type": "u64"},
+        {"name": "pico_boot_id", "offset": 20, "type": "u64"},
+        {"name": "link_index", "offset": 28, "type": "u8", "note": "255 is bridge scope"}
+      ]
+    },
+    "bmcu_frame_prefix": {
+      "description": "BMCU_FRAME payload prefix before the verbatim link wire frame, write_bmcu_frame format >QH",
+      "endianness": "big",
+      "size": 10,
+      "fields": [
+        {"name": "received_at_us", "offset": 0, "type": "u64"},
+        {"name": "wire_length", "offset": 8, "type": "u16"}
+      ]
+    },
+    "link_wire": {
+      "description": "BMCU Link frame, pico/bmcu_link.py encode_frame. Note the endianness change: sequence and CRC are little-endian while every BMB1 field above is big-endian.",
+      "endianness": "little",
+      "header_size": 7,
+      "trailer_size": 2,
+      "fields": [
+        {"name": "sync", "offset": 0, "type": "bytes", "size": 2, "constant_hex": "a55a"},
+        {"name": "version", "offset": 2, "type": "u8", "constant_hex": "83"},
+        {"name": "kind", "offset": 3, "type": "u8", "enum": "kind"},
+        {"name": "sequence", "offset": 4, "type": "u16"},
+        {"name": "payload_length", "offset": 6, "type": "u8", "note": "max 57"},
+        {"name": "crc16_ccitt_false", "offset": -2, "type": "u16", "note": "over bytes 2..len-2"}
+      ]
+    },
+    "status_payload": {
+      "description": "kind 2 STATUS, BMCUMonitor._decode_status. Absolute offset inside a BMB1 BMCU_FRAME payload is bmcu_frame_prefix.size + link_wire.header_size + offset.",
+      "endianness": "little",
+      "size": 27,
+      "fields": [
+        {"name": "hw_tick32", "offset": 0, "type": "u32"},
+        {"name": "tx_drop", "offset": 4, "type": "u16", "note": "BMCU transmit queue drops"},
+        {"name": "rx_drop", "offset": 6, "type": "u16", "note": "BMCU receive drops"},
+        {"name": "crc_error", "offset": 8, "type": "u16", "note": "BMCU side, compare with the Pico decoder counters to tell direction"},
+        {"name": "frame_error", "offset": 10, "type": "u16"},
+        {"name": "current_slot", "offset": 12, "type": "u8", "note": "255 means none selected"},
+        {"name": "inserted_mask", "offset": 13, "type": "u8", "bits": 4, "note": "per-channel HARDWARE presence, latched at boot from the PULL potentiometer. Not filament."},
+        {"name": "online_mask", "offset": 14, "type": "u8", "bits": 4, "note": "per-channel filament detection: the microswitch, gated by inserted_mask"},
+        {"name": "motion", "offset": 15, "type": "u8", "count": 4},
+        {"name": "pull_pct", "offset": 19, "type": "u8", "count": 4, "unit": "percent", "note": "50 is neutral"},
+        {"name": "pressure", "offset": 23, "type": "u16"},
+        {"name": "led_mode", "offset": 25, "type": "u8"},
+        {"name": "control_error", "offset": 26, "type": "u8"}
+      ]
+    },
+    "event_payload": {
+      "description": "kind 3 EVENT, BMCUMonitor._decode_event",
+      "endianness": "little",
+      "size": 16,
+      "fields": [
+        {"name": "hw_tick32", "offset": 0, "type": "u32"},
+        {"name": "record_type", "offset": 4, "type": "u8", "enum": "record_type"},
+        {"name": "severity", "offset": 5, "type": "u8", "enum": "severity"},
+        {"name": "source", "offset": 6, "type": "u8", "enum": "source"},
+        {"name": "payload_length", "offset": 7, "type": "u8", "note": "max 8"},
+        {"name": "payload", "offset": 8, "type": "bytes", "size": 8, "note": "union, interpreted by record_type"}
+      ]
+    },
+    "full_status_record": {
+      "description": "kind 115 FULL_STATUS_RECORD, BMCUMonitor._handle_snapshot",
+      "endianness": "little",
+      "size": 26,
+      "fields": [
+        {"name": "snapshot_id", "offset": 0, "type": "u16"},
+        {"name": "record_index", "offset": 2, "type": "u8"},
+        {"name": "record_count", "offset": 3, "type": "u8"},
+        {"name": "record_type", "offset": 4, "type": "u8", "enum": "full_status_record_type"},
+        {"name": "hw_tick32", "offset": 6, "type": "u32"},
+        {"name": "record_data", "offset": 10, "type": "bytes", "size": 16}
+      ]
+    },
+    "log_payload": {
+      "description": "PICO_LOG payload, pico/bmcu_binary.py write_log, format >QQBBHH then three byte runs",
+      "endianness": "big",
+      "header_size": 22,
+      "fields": [
+        {"name": "log_sequence", "offset": 0, "type": "u64"},
+        {"name": "uptime_ms", "offset": 8, "type": "u64", "unit": "ms"},
+        {"name": "severity", "offset": 16, "type": "u8", "enum": "log_severity"},
+        {"name": "component_length", "offset": 17, "type": "u8"},
+        {"name": "message_length", "offset": 18, "type": "u16"},
+        {"name": "detail_length", "offset": 20, "type": "u16"},
+        {"name": "component", "offset": 22, "type": "utf8", "length_from": "component_length"},
+        {"name": "message", "type": "utf8", "length_from": "message_length", "follows": "component"},
+        {"name": "detail", "type": "tlv_run", "length_from": "detail_length", "follows": "message"}
+      ]
+    },
+    "tlv": {
+      "description": "Diagnostic and log-detail triplet, pico/bmcu_binary.py write_tlv",
+      "endianness": "big",
+      "header_size": 4,
+      "fields": [
+        {"name": "tag", "offset": 0, "type": "u8", "enum": "diagnostic_tags"},
+        {"name": "value_type", "offset": 1, "type": "u8", "enum": "value_types"},
+        {"name": "length", "offset": 2, "type": "u16"},
+        {"name": "value", "offset": 4, "type": "typed", "length_from": "length"}
+      ]
+    },
+    "snapshot_record": {
+      "description": "/api/snapshot.bin record. Local diagnostic format, never sent to Bambuddy.",
+      "endianness": "big",
+      "header_size": 16,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "bytes", "size": 4, "constant": "BSNP"},
+        {"name": "version", "offset": 4, "type": "u8", "constant": 1},
+        {"name": "link_index", "offset": 5, "type": "u8"},
+        {"name": "record_type", "offset": 6, "type": "u8", "enum": "full_status_record_type", "note": "240 is a synthetic link record, 241 a retained EVENT"},
+        {"name": "record_index", "offset": 7, "type": "u8"},
+        {"name": "hw_tick32", "offset": 8, "type": "u32"},
+        {"name": "reserved", "offset": 12, "type": "u16"},
+        {"name": "payload_length", "offset": 14, "type": "u16"},
+        {"name": "payload", "offset": 16, "type": "bytes", "length_from": "payload_length", "note": "verbatim record_data for real record types, event_payload for 241, link_record for 240"}
+      ]
+    },
+    "link_record": {
+      "description": "Synthetic snapshot record 240: link state that no FULL_STATUS record carries",
+      "endianness": "big",
+      "size": 16,
+      "fields": [
+        {"name": "link_state", "offset": 0, "type": "u8", "enum": "link_states"},
+        {"name": "channels_present", "offset": 1, "type": "u8"},
+        {"name": "bmcu_boot_session", "offset": 4, "type": "u32"},
+        {"name": "tick_hz", "offset": 8, "type": "u32", "note": "0 when the BMCU has not sent HELLO"},
+        {"name": "sequence_gap_count", "offset": 12, "type": "u32"}
+      ]
+    },
+    "capture_record": {
+      "description": "/api/capture.bin record: UART bytes the decoder rejected. Local diagnostic format.",
+      "endianness": "big",
+      "header_size": 16,
+      "fields": [
+        {"name": "magic", "offset": 0, "type": "bytes", "size": 4, "constant": "BCAP"},
+        {"name": "version", "offset": 4, "type": "u8", "constant": 1},
+        {"name": "link_index", "offset": 5, "type": "u8"},
+        {"name": "reject_reason", "offset": 6, "type": "u8", "enum": "reject_reasons_local"},
+        {"name": "reserved", "offset": 7, "type": "u8"},
+        {"name": "ordinal", "offset": 8, "type": "u32", "note": "capture count for that link, gaps mean older runs were overwritten"},
+        {"name": "uptime_ms_low16", "offset": 12, "type": "u16"},
+        {"name": "payload_length", "offset": 14, "type": "u16"},
+        {"name": "payload", "offset": 16, "type": "bytes", "length_from": "payload_length"}
+      ]
+    }
+  },
+  "local_enums": {
+    "reject_reasons_local": {"1": "crc_mismatch", "2": "payload_length_out_of_range", "3": "unparseable_noise_discarded"}
+  },
+  "endpoints": [
+    {
+      "path": "/api/current.bin",
+      "answers": "What is each loader doing right now?",
+      "cadence": "changes many times a second; the UI polls at 3 s",
+      "body": "concatenated bmb1_envelope messages, message_type BMCU_FRAME, one per link, each carrying a kind 2 STATUS frame",
+      "decode": ["bmb1_envelope", "bmcu_frame_prefix", "link_wire", "status_payload"]
+    },
+    {
+      "path": "/api/diagnostics.bin",
+      "answers": "How healthy is the bridge itself?",
+      "cadence": "recomputed every 15 s",
+      "body": "one bmb1_envelope of message_type PICO_DIAGNOSTIC whose payload is a run of tlv",
+      "decode": ["bmb1_envelope", "tlv"]
+    },
+    {
+      "path": "/api/snapshot.bin",
+      "answers": "What did each link report about its channels, the printer bus and AMS registration?",
+      "cadence": "arrives once per link session; poll on demand, not on a timer",
+      "body": "concatenated snapshot_record",
+      "decode": ["snapshot_record", "link_record", "event_payload"]
+    },
+    {
+      "path": "/api/logs.bin",
+      "answers": "What went wrong, with tracebacks?",
+      "cadence": "cursor paginated, ?after=<log_sequence>&limit=<n up to 64>",
+      "body": "concatenated bmb1_envelope messages of message_type PICO_LOG",
+      "decode": ["bmb1_envelope", "log_payload", "tlv"]
+    },
+    {
+      "path": "/api/events.bin",
+      "answers": "What is still queued for delivery to Bambuddy?",
+      "cadence": "cursor paginated, ?after=<transport_sequence>&limit=<n up to 64>",
+      "body": "concatenated bmb1_envelope messages from the durable outbox",
+      "decode": ["bmb1_envelope"]
+    },
+    {
+      "path": "/api/capture.bin",
+      "answers": "What did the bytes look like that failed to decode?",
+      "cadence": "bounded ring, newest few per link",
+      "body": "concatenated capture_record",
+      "decode": ["capture_record"]
+    }
+  ],
+  "reading_notes": [
+    "Endianness changes between layers. BMB1 and the local BSNP/BCAP formats are big-endian; everything inside a BMCU link frame is little-endian.",
+    "A STATUS field's absolute offset inside a BMB1 payload is bmcu_frame_prefix.size (10) + link_wire.header_size (7) + the status_payload offset. Reading a slot mask at offset 13 instead of 30 is the mistake this note exists to prevent.",
+    "inserted_mask is channel hardware presence, not filament. online_mask is filament. The web UI mislabelled this for a long time.",
+    "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
+    "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
+  ],
+  "thresholds": [
+    {"metric": "HEAP_FREE", "warn_below": 20000, "unit": "bytes"},
+    {"metric": "LOOP_GAP_P99_US", "warn_above": 100000, "unit": "microseconds"},
+    {"metric": "QUEUE_DEPTH", "warn_above": 128, "note": "the durable ring size; a depth pinned here is steady state, not a stall, if LAST_ACK_WATERMARK is advancing"},
+    {"metric": "EXCEPTION_COUNT", "warn_above": 0, "note": "the 5 s log suppression hides the rate: the counter advances on every exception while only one line per window is logged"},
+    {"metric": "UART0_CRC_ERRORS", "warn_above": 0, "note": "per link; healthy is zero since the DMA receive path landed"}
+  ]
+}

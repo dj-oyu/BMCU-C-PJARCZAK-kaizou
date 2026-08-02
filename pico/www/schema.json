@@ -1,0 +1,917 @@
+{
+ "endpoints": [
+  {
+   "answers": "What is each loader doing right now?",
+   "body": "concatenated bmb1_envelope messages, message_type BMCU_FRAME, one per link, each carrying a kind 2 STATUS frame",
+   "cadence": "changes many times a second; the UI polls at 3 s",
+   "decode": [
+    "bmb1_envelope",
+    "bmcu_frame_prefix",
+    "link_wire",
+    "status_payload"
+   ],
+   "path": "/api/current.bin"
+  },
+  {
+   "answers": "How healthy is the bridge itself?",
+   "body": "one bmb1_envelope of message_type PICO_DIAGNOSTIC whose payload is a run of tlv",
+   "cadence": "recomputed every 15 s",
+   "decode": [
+    "bmb1_envelope",
+    "tlv"
+   ],
+   "path": "/api/diagnostics.bin"
+  },
+  {
+   "answers": "What did each link report about its channels, the printer bus and AMS registration?",
+   "body": "concatenated snapshot_record",
+   "cadence": "arrives once per link session; poll on demand, not on a timer",
+   "decode": [
+    "snapshot_record",
+    "link_record",
+    "event_payload"
+   ],
+   "path": "/api/snapshot.bin"
+  },
+  {
+   "answers": "What went wrong, with tracebacks?",
+   "body": "concatenated bmb1_envelope messages of message_type PICO_LOG",
+   "cadence": "cursor paginated, ?after=<log_sequence>&limit=<n up to 64>",
+   "decode": [
+    "bmb1_envelope",
+    "log_payload",
+    "tlv"
+   ],
+   "path": "/api/logs.bin"
+  },
+  {
+   "answers": "What is still queued for delivery to Bambuddy?",
+   "body": "concatenated bmb1_envelope messages from the durable outbox",
+   "cadence": "cursor paginated, ?after=<transport_sequence>&limit=<n up to 64>",
+   "decode": [
+    "bmb1_envelope"
+   ],
+   "path": "/api/events.bin"
+  },
+  {
+   "answers": "What did the bytes look like that failed to decode?",
+   "body": "concatenated capture_record",
+   "cadence": "bounded ring, newest few per link",
+   "decode": [
+    "capture_record"
+   ],
+   "path": "/api/capture.bin"
+  }
+ ],
+ "enums": {
+  "ack_result": {
+   "0": "ok",
+   "1": "bad_value",
+   "2": "unsupported",
+   "3": "busy",
+   "4": "bad_state",
+   "5": "denied",
+   "6": "expired",
+   "7": "duplicate",
+   "8": "internal"
+  },
+  "capability": {
+   "1": "status_events",
+   "128": "soft_reset",
+   "16": "printer_trace",
+   "2": "led_override",
+   "32": "sensor_record",
+   "4": "ping_pong",
+   "64": "full_status",
+   "8": "raw_hw_tick"
+  },
+  "command_owner": {
+   "0": "none",
+   "1": "printer",
+   "2": "user",
+   "3": "bmcu_local",
+   "4": "safety",
+   "5": "system"
+  },
+  "diag_counter": {
+   "1": "ams_service_gap_ms",
+   "2": "ams_would_reoffer"
+  },
+  "diagnostic_tags": {
+   "1": "uptime_ms",
+   "10": "loop_idle_us",
+   "11": "loop_max_delay_us",
+   "12": "loop_gap_avg_us",
+   "13": "loop_gap_p95_us",
+   "14": "loop_gap_p99_us",
+   "16": "wifi_state",
+   "17": "wifi_rssi_dbm",
+   "18": "wifi_reconnect_count",
+   "2": "reset_reason",
+   "24": "tcp_state",
+   "25": "tcp_rx_bytes",
+   "26": "tcp_tx_bytes",
+   "27": "tcp_reconnect_count",
+   "28": "ack_age_ms",
+   "29": "last_ack_watermark",
+   "3": "firmware",
+   "30": "replay_count",
+   "31": "transport_encode_avg_us",
+   "32": "queue_depth",
+   "33": "queue_drop_count",
+   "34": "oldest_unacknowledged_sequence",
+   "35": "status_replacement_count",
+   "36": "transport_send_avg_us",
+   "37": "transport_send_max_us",
+   "4": "heap_free",
+   "40": "journal_used_bytes",
+   "41": "journal_free_bytes",
+   "42": "journal_failure_count",
+   "43": "journal_oldest_us",
+   "44": "journal_newest_us",
+   "48": "exception_count",
+   "49": "gc_time_us",
+   "5": "heap_allocated",
+   "50": "gc_max_time_us",
+   "6": "heap_min_free",
+   "64": "uart0_backlog",
+   "65": "uart0_max_backlog",
+   "66": "uart0_rx_bytes",
+   "67": "uart0_crc_errors",
+   "68": "uart0_frame_errors",
+   "69": "uart0_sequence_gaps",
+   "7": "temperature_milli_c",
+   "70": "uart0_resync_count",
+   "71": "uart0_max_service_delay_us",
+   "72": "uart1_backlog",
+   "73": "uart1_max_backlog",
+   "74": "uart1_rx_bytes",
+   "75": "uart1_crc_errors",
+   "76": "uart1_frame_errors",
+   "77": "uart1_sequence_gaps",
+   "78": "uart1_resync_count",
+   "79": "uart1_max_service_delay_us",
+   "8": "gc_count",
+   "80": "uart0_drain_bytes",
+   "81": "uart0_overflow_count",
+   "82": "uart1_drain_bytes",
+   "83": "uart1_overflow_count",
+   "9": "loop_busy_us"
+  },
+  "drop_reasons": {
+   "0": "unknown",
+   "1": "ram_queue_full",
+   "2": "journal_full",
+   "3": "journal_corrupt",
+   "4": "record_too_large",
+   "5": "retention_eviction"
+  },
+  "flags": {
+   "1": "replay",
+   "16": "journaled",
+   "2": "critical",
+   "4": "snapshot",
+   "8": "wall_time_valid"
+  },
+  "full_status_record_type": {
+   "1": "global",
+   "10": "printer_tx_fault",
+   "11": "ams_service",
+   "12": "ams_registration",
+   "2": "channel",
+   "3": "printer_bus",
+   "4": "counters",
+   "5": "printer_auth",
+   "6": "printer_rx_core",
+   "7": "printer_rx_loss",
+   "8": "printer_rx_dma",
+   "9": "printer_tx_core"
+  },
+  "full_status_section": {
+   "1": "global",
+   "15": "all",
+   "2": "channels",
+   "4": "printer_bus",
+   "8": "counters"
+  },
+  "kind": {
+   "1": "hello",
+   "114": "pong",
+   "115": "full_status_record",
+   "127": "ack",
+   "16": "get_status",
+   "17": "set_led_mode",
+   "18": "ping",
+   "2": "status",
+   "23": "get_full_status",
+   "24": "request_soft_reset",
+   "3": "event",
+   "4": "printer_transaction",
+   "5": "sensor_record"
+  },
+  "limits": {
+   "128": "max_control_argument_bytes",
+   "160": "max_control_result_detail_bytes",
+   "2": "max_link_count",
+   "31": "max_link_id_bytes",
+   "32": "header_size",
+   "320": "max_log_message_bytes",
+   "32768": "max_local_log_response_bytes",
+   "40": "max_log_component_bytes",
+   "4096": "max_payload_size",
+   "512": "max_log_detail_bytes",
+   "63": "max_firmware_bytes",
+   "64": "max_local_log_records",
+   "8": "max_replay_boot_ranges"
+  },
+  "link_states": {
+   "0": "unknown",
+   "1": "resyncing",
+   "2": "online",
+   "3": "stale",
+   "4": "offline",
+   "5": "incompatible"
+  },
+  "log_severity": {
+   "0": "debug",
+   "1": "info",
+   "2": "notice",
+   "3": "warning",
+   "4": "error",
+   "5": "critical"
+  },
+  "message_types": {
+   "1": "server_challenge",
+   "127": "protocol_error",
+   "16": "bmcu_frame",
+   "17": "link_state",
+   "18": "transport_drop",
+   "19": "pico_diagnostic",
+   "2": "hello",
+   "20": "pico_log",
+   "3": "hello_accepted",
+   "32": "ack",
+   "48": "control",
+   "49": "control_result",
+   "64": "ping",
+   "65": "pong"
+  },
+  "outcome": {
+   "0": "accepted",
+   "1": "applied",
+   "2": "replied",
+   "3": "ignored",
+   "4": "rejected",
+   "5": "failed"
+  },
+  "reason": {
+   "0": "ok",
+   "1": "target_mismatch",
+   "10": "safety_inhibit",
+   "11": "internal",
+   "12": "owner_conflict",
+   "13": "lease_expired",
+   "14": "no_response",
+   "15": "no_response_expected",
+   "2": "slot_range",
+   "3": "ams_offline",
+   "4": "invalid_length",
+   "5": "invalid_crc",
+   "6": "unsupported",
+   "7": "no_handler",
+   "8": "tx_busy",
+   "9": "bad_state"
+  },
+  "record_type": {
+   "1": "boot",
+   "10": "reset_state",
+   "2": "printer_link",
+   "3": "printer_transaction",
+   "4": "state_change",
+   "5": "sensor",
+   "6": "command_result",
+   "7": "safety_decision",
+   "8": "diagnostic_counter",
+   "9": "printer_long_transaction"
+  },
+  "reject_reasons_local": {
+   "1": "crc_mismatch",
+   "2": "payload_length_out_of_range",
+   "3": "unparseable_noise_discarded"
+  },
+  "reset_cancel_reason": {
+   "0": "none",
+   "1": "safety_changed",
+   "2": "expired",
+   "3": "link_tx_fault"
+  },
+  "reset_state": {
+   "1": "scheduled",
+   "2": "cancelled"
+  },
+  "sensor_validity": {
+   "0": "unknown",
+   "1": "valid",
+   "2": "stale",
+   "3": "offline",
+   "4": "fault"
+  },
+  "severity": {
+   "0": "debug",
+   "1": "info",
+   "2": "notice",
+   "3": "warning",
+   "4": "error",
+   "5": "critical"
+  },
+  "source": {
+   "0": "system",
+   "1": "printer_bus",
+   "2": "motion",
+   "3": "sensor",
+   "4": "management",
+   "5": "safety"
+  },
+  "state_field": {
+   "1": "slot",
+   "2": "inserted_mask",
+   "3": "online_mask",
+   "4": "motion",
+   "5": "pressure",
+   "6": "led_mode",
+   "7": "control_error",
+   "8": "motion_fault"
+  },
+  "value_types": {
+   "1": "uint8",
+   "10": "utf8",
+   "11": "bytes",
+   "2": "uint16",
+   "3": "uint32",
+   "4": "uint64",
+   "5": "int8",
+   "6": "int16",
+   "7": "int32",
+   "8": "int64",
+   "9": "bool"
+  }
+ },
+ "purpose": "Self-description for the BMCU monitor's local HTTP API. Fetch this once, then every other endpoint can be decoded without reading the device source.",
+ "reading_notes": [
+  "Endianness changes between layers. BMB1 and the local BSNP/BCAP formats are big-endian; everything inside a BMCU link frame is little-endian.",
+  "A STATUS field's absolute offset inside a BMB1 payload is bmcu_frame_prefix.size (10) + link_wire.header_size (7) + the status_payload offset. Reading a slot mask at offset 13 instead of 30 is the mistake this note exists to prevent.",
+  "inserted_mask is channel hardware presence, not filament. online_mask is filament. The web UI mislabelled this for a long time.",
+  "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
+  "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
+ ],
+ "revision": 1,
+ "schema": "bmcu-monitor-api",
+ "structures": {
+  "bmb1_envelope": {
+   "description": "BMB1 message header, pico/bmcu_binary.py write_header, format >4sBBHIQQB3s",
+   "endianness": "big",
+   "fields": [
+    {
+     "constant": "BMB1",
+     "name": "magic",
+     "offset": 0,
+     "size": 4,
+     "type": "bytes"
+    },
+    {
+     "constant": 1,
+     "name": "version",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "enum": "message_types",
+     "name": "message_type",
+     "offset": 5,
+     "type": "u8"
+    },
+    {
+     "enum": "flags",
+     "flags": true,
+     "name": "flags",
+     "offset": 6,
+     "type": "u16"
+    },
+    {
+     "name": "payload_length",
+     "offset": 8,
+     "type": "u32"
+    },
+    {
+     "name": "transport_sequence",
+     "offset": 12,
+     "type": "u64"
+    },
+    {
+     "name": "pico_boot_id",
+     "offset": 20,
+     "type": "u64"
+    },
+    {
+     "name": "link_index",
+     "note": "255 is bridge scope",
+     "offset": 28,
+     "type": "u8"
+    }
+   ],
+   "size": 32
+  },
+  "bmcu_frame_prefix": {
+   "description": "BMCU_FRAME payload prefix before the verbatim link wire frame, write_bmcu_frame format >QH",
+   "endianness": "big",
+   "fields": [
+    {
+     "name": "received_at_us",
+     "offset": 0,
+     "type": "u64"
+    },
+    {
+     "name": "wire_length",
+     "offset": 8,
+     "type": "u16"
+    }
+   ],
+   "size": 10
+  },
+  "capture_record": {
+   "description": "/api/capture.bin record: UART bytes the decoder rejected. Local diagnostic format.",
+   "endianness": "big",
+   "fields": [
+    {
+     "constant": "BCAP",
+     "name": "magic",
+     "offset": 0,
+     "size": 4,
+     "type": "bytes"
+    },
+    {
+     "constant": 1,
+     "name": "version",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "name": "link_index",
+     "offset": 5,
+     "type": "u8"
+    },
+    {
+     "enum": "reject_reasons_local",
+     "name": "reject_reason",
+     "offset": 6,
+     "type": "u8"
+    },
+    {
+     "name": "reserved",
+     "offset": 7,
+     "type": "u8"
+    },
+    {
+     "name": "ordinal",
+     "note": "capture count for that link, gaps mean older runs were overwritten",
+     "offset": 8,
+     "type": "u32"
+    },
+    {
+     "name": "uptime_ms_low16",
+     "offset": 12,
+     "type": "u16"
+    },
+    {
+     "name": "payload_length",
+     "offset": 14,
+     "type": "u16"
+    },
+    {
+     "length_from": "payload_length",
+     "name": "payload",
+     "offset": 16,
+     "type": "bytes"
+    }
+   ],
+   "header_size": 16
+  },
+  "event_payload": {
+   "description": "kind 3 EVENT, BMCUMonitor._decode_event",
+   "endianness": "little",
+   "fields": [
+    {
+     "name": "hw_tick32",
+     "offset": 0,
+     "type": "u32"
+    },
+    {
+     "enum": "record_type",
+     "name": "record_type",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "enum": "severity",
+     "name": "severity",
+     "offset": 5,
+     "type": "u8"
+    },
+    {
+     "enum": "source",
+     "name": "source",
+     "offset": 6,
+     "type": "u8"
+    },
+    {
+     "name": "payload_length",
+     "note": "max 8",
+     "offset": 7,
+     "type": "u8"
+    },
+    {
+     "name": "payload",
+     "note": "union, interpreted by record_type",
+     "offset": 8,
+     "size": 8,
+     "type": "bytes"
+    }
+   ],
+   "size": 16
+  },
+  "full_status_record": {
+   "description": "kind 115 FULL_STATUS_RECORD, BMCUMonitor._handle_snapshot",
+   "endianness": "little",
+   "fields": [
+    {
+     "name": "snapshot_id",
+     "offset": 0,
+     "type": "u16"
+    },
+    {
+     "name": "record_index",
+     "offset": 2,
+     "type": "u8"
+    },
+    {
+     "name": "record_count",
+     "offset": 3,
+     "type": "u8"
+    },
+    {
+     "enum": "full_status_record_type",
+     "name": "record_type",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "name": "hw_tick32",
+     "offset": 6,
+     "type": "u32"
+    },
+    {
+     "name": "record_data",
+     "offset": 10,
+     "size": 16,
+     "type": "bytes"
+    }
+   ],
+   "size": 26
+  },
+  "link_record": {
+   "description": "Synthetic snapshot record 240: link state that no FULL_STATUS record carries",
+   "endianness": "big",
+   "fields": [
+    {
+     "enum": "link_states",
+     "name": "link_state",
+     "offset": 0,
+     "type": "u8"
+    },
+    {
+     "name": "channels_present",
+     "offset": 1,
+     "type": "u8"
+    },
+    {
+     "name": "bmcu_boot_session",
+     "offset": 4,
+     "type": "u32"
+    },
+    {
+     "name": "tick_hz",
+     "note": "0 when the BMCU has not sent HELLO",
+     "offset": 8,
+     "type": "u32"
+    },
+    {
+     "name": "sequence_gap_count",
+     "offset": 12,
+     "type": "u32"
+    }
+   ],
+   "size": 16
+  },
+  "link_wire": {
+   "description": "BMCU Link frame, pico/bmcu_link.py encode_frame. Note the endianness change: sequence and CRC are little-endian while every BMB1 field above is big-endian.",
+   "endianness": "little",
+   "fields": [
+    {
+     "constant_hex": "a55a",
+     "name": "sync",
+     "offset": 0,
+     "size": 2,
+     "type": "bytes"
+    },
+    {
+     "constant_hex": "83",
+     "name": "version",
+     "offset": 2,
+     "type": "u8"
+    },
+    {
+     "enum": "kind",
+     "name": "kind",
+     "offset": 3,
+     "type": "u8"
+    },
+    {
+     "name": "sequence",
+     "offset": 4,
+     "type": "u16"
+    },
+    {
+     "name": "payload_length",
+     "note": "max 57",
+     "offset": 6,
+     "type": "u8"
+    },
+    {
+     "name": "crc16_ccitt_false",
+     "note": "over bytes 2..len-2",
+     "offset": -2,
+     "type": "u16"
+    }
+   ],
+   "header_size": 7,
+   "trailer_size": 2
+  },
+  "log_payload": {
+   "description": "PICO_LOG payload, pico/bmcu_binary.py write_log, format >QQBBHH then three byte runs",
+   "endianness": "big",
+   "fields": [
+    {
+     "name": "log_sequence",
+     "offset": 0,
+     "type": "u64"
+    },
+    {
+     "name": "uptime_ms",
+     "offset": 8,
+     "type": "u64",
+     "unit": "ms"
+    },
+    {
+     "enum": "log_severity",
+     "name": "severity",
+     "offset": 16,
+     "type": "u8"
+    },
+    {
+     "name": "component_length",
+     "offset": 17,
+     "type": "u8"
+    },
+    {
+     "name": "message_length",
+     "offset": 18,
+     "type": "u16"
+    },
+    {
+     "name": "detail_length",
+     "offset": 20,
+     "type": "u16"
+    },
+    {
+     "length_from": "component_length",
+     "name": "component",
+     "offset": 22,
+     "type": "utf8"
+    },
+    {
+     "follows": "component",
+     "length_from": "message_length",
+     "name": "message",
+     "type": "utf8"
+    },
+    {
+     "follows": "message",
+     "length_from": "detail_length",
+     "name": "detail",
+     "type": "tlv_run"
+    }
+   ],
+   "header_size": 22
+  },
+  "snapshot_record": {
+   "description": "/api/snapshot.bin record. Local diagnostic format, never sent to Bambuddy.",
+   "endianness": "big",
+   "fields": [
+    {
+     "constant": "BSNP",
+     "name": "magic",
+     "offset": 0,
+     "size": 4,
+     "type": "bytes"
+    },
+    {
+     "constant": 1,
+     "name": "version",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "name": "link_index",
+     "offset": 5,
+     "type": "u8"
+    },
+    {
+     "enum": "full_status_record_type",
+     "name": "record_type",
+     "note": "240 is a synthetic link record, 241 a retained EVENT",
+     "offset": 6,
+     "type": "u8"
+    },
+    {
+     "name": "record_index",
+     "offset": 7,
+     "type": "u8"
+    },
+    {
+     "name": "hw_tick32",
+     "offset": 8,
+     "type": "u32"
+    },
+    {
+     "name": "reserved",
+     "offset": 12,
+     "type": "u16"
+    },
+    {
+     "name": "payload_length",
+     "offset": 14,
+     "type": "u16"
+    },
+    {
+     "length_from": "payload_length",
+     "name": "payload",
+     "note": "verbatim record_data for real record types, event_payload for 241, link_record for 240",
+     "offset": 16,
+     "type": "bytes"
+    }
+   ],
+   "header_size": 16
+  },
+  "status_payload": {
+   "description": "kind 2 STATUS, BMCUMonitor._decode_status. Absolute offset inside a BMB1 BMCU_FRAME payload is bmcu_frame_prefix.size + link_wire.header_size + offset.",
+   "endianness": "little",
+   "fields": [
+    {
+     "name": "hw_tick32",
+     "offset": 0,
+     "type": "u32"
+    },
+    {
+     "name": "tx_drop",
+     "note": "BMCU transmit queue drops",
+     "offset": 4,
+     "type": "u16"
+    },
+    {
+     "name": "rx_drop",
+     "note": "BMCU receive drops",
+     "offset": 6,
+     "type": "u16"
+    },
+    {
+     "name": "crc_error",
+     "note": "BMCU side, compare with the Pico decoder counters to tell direction",
+     "offset": 8,
+     "type": "u16"
+    },
+    {
+     "name": "frame_error",
+     "offset": 10,
+     "type": "u16"
+    },
+    {
+     "name": "current_slot",
+     "note": "255 means none selected",
+     "offset": 12,
+     "type": "u8"
+    },
+    {
+     "bits": 4,
+     "name": "inserted_mask",
+     "note": "per-channel HARDWARE presence, latched at boot from the PULL potentiometer. Not filament.",
+     "offset": 13,
+     "type": "u8"
+    },
+    {
+     "bits": 4,
+     "name": "online_mask",
+     "note": "per-channel filament detection: the microswitch, gated by inserted_mask",
+     "offset": 14,
+     "type": "u8"
+    },
+    {
+     "count": 4,
+     "name": "motion",
+     "offset": 15,
+     "type": "u8"
+    },
+    {
+     "count": 4,
+     "name": "pull_pct",
+     "note": "50 is neutral",
+     "offset": 19,
+     "type": "u8",
+     "unit": "percent"
+    },
+    {
+     "name": "pressure",
+     "offset": 23,
+     "type": "u16"
+    },
+    {
+     "name": "led_mode",
+     "offset": 25,
+     "type": "u8"
+    },
+    {
+     "name": "control_error",
+     "offset": 26,
+     "type": "u8"
+    }
+   ],
+   "size": 27
+  },
+  "tlv": {
+   "description": "Diagnostic and log-detail triplet, pico/bmcu_binary.py write_tlv",
+   "endianness": "big",
+   "fields": [
+    {
+     "enum": "diagnostic_tags",
+     "name": "tag",
+     "offset": 0,
+     "type": "u8"
+    },
+    {
+     "enum": "value_types",
+     "name": "value_type",
+     "offset": 1,
+     "type": "u8"
+    },
+    {
+     "name": "length",
+     "offset": 2,
+     "type": "u16"
+    },
+    {
+     "length_from": "length",
+     "name": "value",
+     "offset": 4,
+     "type": "typed"
+    }
+   ],
+   "header_size": 4
+  }
+ },
+ "thresholds": [
+  {
+   "metric": "HEAP_FREE",
+   "unit": "bytes",
+   "warn_below": 20000
+  },
+  {
+   "metric": "LOOP_GAP_P99_US",
+   "unit": "microseconds",
+   "warn_above": 100000
+  },
+  {
+   "metric": "QUEUE_DEPTH",
+   "note": "the durable ring size; a depth pinned here is steady state, not a stall, if LAST_ACK_WATERMARK is advancing",
+   "warn_above": 128
+  },
+  {
+   "metric": "EXCEPTION_COUNT",
+   "note": "the 5 s log suppression hides the rate: the counter advances on every exception while only one line per window is logged",
+   "warn_above": 0
+  },
+  {
+   "metric": "UART0_CRC_ERRORS",
+   "note": "per link; healthy is zero since the DMA receive path landed",
+   "warn_above": 0
+  }
+ ]
+}

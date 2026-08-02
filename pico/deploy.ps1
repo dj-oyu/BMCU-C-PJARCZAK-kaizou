@@ -30,7 +30,7 @@ if ($modules -contains 'main.py') { $files += 'main.py' }
 # The web UI is a build artifact, not a module: web_ui.py streams it off
 # littlefs. Upload it before any module so a failure here leaves the device
 # untouched rather than half-updated.
-$assets = @('www/index.html.gz')
+$assets = @('www/index.html.gz', 'www/schema.json')
 # mkdir fails when the directory already exists, which is the normal case.
 try { & $python -m mpremote connect $Port fs mkdir ':www' 2>$null } catch { }
 $global:LASTEXITCODE = 0
