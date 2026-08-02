@@ -8,7 +8,7 @@ every journal commit: frames arrived truncated and failed CRC at ~4/s per link.
 DMA is a bus master. Moving UARTDR into SRAM involves neither the CPU nor the
 flash, so a core stalled in a flash write no longer costs bytes. A 4 KiB ring
 raises the tolerance from 3.06 ms to 391 ms, which covers the worst loop stall
-measured on this device (492 ms is covered by 8 KiB).
+measured here (492 ms is covered by 8 KiB).
 
 The same approach is already used on the BMCU side for the printer bus; see
 ``src/_bus_hardware.cpp`` and ``docs/PRINTER_RX_DMA_PARSER_SPEC.md``.
@@ -17,7 +17,7 @@ This exposes ``any``/``read``/``write``, the three methods BMCUMonitor uses, so
 nothing above it changes.
 """
 
-# RP2350 peripheral bases, confirmed on the device by reading the PrimeCell
+# RP2350 peripheral bases, confirmed on the target by reading the PrimeCell
 # identification registers at base+0xFE0 (0x11, 0x10, 0x34, 0x00).
 UART_BASE = (0x40070000, 0x40078000)
 UARTDR_OFFSET = 0x000
@@ -66,8 +66,8 @@ def treq_field(dma):
     """Locate TREQ_SEL in the control word without hardcoding bit positions.
 
     The RP2350 layout is not the RP2040 one -- it adds the reverse-increment
-    bits -- and guessing a register layout has already cost one deployment here,
-    so the field is derived from MicroPython's own packer instead.
+    bits -- so the field is derived from MicroPython's own packer rather than
+    assumed.
     """
     mask = dma.pack_ctrl(treq_sel=0) ^ dma.pack_ctrl(treq_sel=TREQ_FIELD_MAX)
     shift = 0
@@ -83,9 +83,9 @@ def release_stale_channels(dma, mem32, treqs):
     disable the hardware. The orphaned channel keeps draining the same UART FIFO
     into a buffer that no longer exists, so it steals bytes from whichever
     channel is claimed next. Deploying over WebREPL means soft-resetting on
-    every update, which made this the normal case rather than a corner case: two
-    links went silent after a dozen redeploys and only a chip reset brought them
-    back.
+    every update, which makes the orphaned state the ordinary case rather than a
+    corner one. Left unswept, repeated soft resets eventually take the whole
+    interpreter down, not just the link.
 
     Only channels paced by the caller's own TREQ are touched, so one link's
     startup cannot disturb another's, and nothing else using DMA is affected.

@@ -1,10 +1,10 @@
 """Build the self-describing schema the Pico serves at /api/schema.json.
 
-The device's diagnostic endpoints are binary for good reasons: they are read on
-a machine that fought for eight kilobytes of heap. The cost of that choice is
-paid by whoever has to decode them, and during one debugging session that meant
-writing eight throwaway decoders by hand, plus getting the layered offsets wrong
-once.
+The device's diagnostic endpoints are binary because heap and CPU on the target
+are scarce. The cost of that choice falls on whoever has to decode them: three
+layers stack before a STATUS field is reached, and the endianness flips between
+them, so every ad-hoc reader re-derives the same offsets and any one of them can
+get the sum wrong.
 
 Serving the schema removes that cost without adding a second encoder to the
 device or changing a single existing byte. The output is generated at build

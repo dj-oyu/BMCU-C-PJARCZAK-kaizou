@@ -25,7 +25,7 @@ bytes never reach MicroPython's ring buffer, so neither `uart.any()` nor the
 overflow counter can see them.
 
 A littlefs commit on RP2350 runs with interrupts disabled, because flash
-programming requires XIP to be off. Measured on the device:
+programming requires XIP to be off. Measured on a Pico 2 W:
 
 | Main-loop call | Average | Worst |
 | --- | --- | --- |
@@ -77,9 +77,9 @@ is left enabled; transmission still goes through `machine.UART`.
 Only `any`, `read` and `write` are exposed, the three methods `BMCUMonitor`
 uses, so no code above the reader changes.
 
-## 3. Values determined on the device
+## 3. Values determined on the target
 
-These are not taken from a datasheet reading; each was confirmed on the target.
+These are not taken from a datasheet reading; each was confirmed on an RP2350.
 
 **Peripheral bases.** `0x40070000` (UART0) and `0x40078000` (UART1), identified
 by reading the PrimeCell identification registers at `base + 0xFE0`, which
@@ -151,7 +151,7 @@ own overflow counter also reports this, so it is visible in the web UI.
 
 ## 7. Sizing
 
-Sized against the worst loop stall measured on this device, 492 ms:
+Sized against the worst main-loop stall measured, 492 ms:
 
 | Traffic | Bytes in 492 ms |
 | --- | --- |
@@ -160,16 +160,45 @@ Sized against the worst loop stall measured on this device, 492 ms:
 | 10.5 KB/s, full line rate | 5,166 |
 
 2 KiB covers both observed regimes with margin, and costs 8 KiB of heap for two
-links including alignment padding, on a device whose minimum free heap has
-touched 1.4 KB. Measured after the change, peak backlog was 253 and 289 bytes,
-12 to 14 percent of the ring, with overflow zero.
+links including alignment padding, which matters on a part whose free heap can
+fall into the low kilobytes. Measured after the change, peak backlog was 253 and
+289 bytes, 12 to 14 percent of the ring, with overflow zero.
 
 Full line rate is *not* covered. That is deliberate: the links are periodic
 STATUS reporters, sustained full-rate traffic would itself be a fault, and the
 overflow counter makes it visible rather than silent. Raise
 `BMCU_UART_DMA_RING_BYTES` if that counter ever moves.
 
-## 8. Fallback
+## 8. Stale channels across a soft reset
+
+MicroPython releases its claim on a DMA channel when the interpreter soft-resets
+but does not disable the hardware. The orphaned channel keeps transferring into
+a ring buffer that has been collected, so it both competes for the FIFO and
+writes into memory the allocator has since handed to something else.
+
+Each reader therefore disables any enabled channel paced by its own UART RX DREQ
+before arming. Only its own TREQ is swept, so one link cannot disturb another
+and nothing else using DMA is affected. The TREQ field is located through
+MicroPython's packer rather than by hardcoding bit positions, because the RP2350
+control word is not the RP2040 one.
+
+This matters here specifically because WebREPL deployment soft-resets on every
+update, making the orphaned state the ordinary case rather than a corner one.
+
+**Measured.** With the sweep removed, six rounds of soft reset were attempted:
+links stayed healthy for four rounds at ~1000 B/s, and on the fifth the bridge
+did not come back at all — ping answered and TCP accepted, but neither the HTTP
+server nor WebREPL responded, and only a chip reset recovered it. With the sweep
+in place the same six rounds held both links at ~1140 B/s.
+
+Note the scope of that result. It shows the sweep is necessary and that the
+failure mode is worse than link degradation: repeated soft resets take the whole
+interpreter down, which is consistent with DMA writing into freed heap. It does
+not establish that every observed link stall has this cause; a single link
+reading zero while the other still trickles is a different symptom and more
+likely physical.
+
+## 9. Fallback
 
 Every link falls back to interrupt-driven receive if DMA setup raises, and the
 reason is logged under the `uart.dma` component. This is not theoretical: the
@@ -177,7 +206,7 @@ first deployment used `int.bit_length()`, which CPython has and MicroPython does
 not, and both links fell back with every host test green. Set
 `BMCU_UART_DMA_RX = False` in `config.py` to select the fallback deliberately.
 
-## 9. Result
+## 10. Result
 
 Measured over 120 seconds on both links after the change:
 
