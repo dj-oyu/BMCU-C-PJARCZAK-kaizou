@@ -271,12 +271,67 @@ class JournalTests(unittest.TestCase):
             managed.flush_one()
             managed.flush_one()
             managed.record_ack(99, 1)
-            managed.flush_one()
+            # Watermarks reach flash on commit, not on every record written.
+            managed.commit()
             managed.file.close()
             recovered = []
             self.assertEqual(journal.recover_directory(
                 directory, lambda *args: recovered.append(args)), 1)
             self.assertEqual(recovered[0][4], 2)
+
+    def test_records_are_written_without_committing_each_one(self):
+        # The write costs ~1.6 ms on the device, the commit ~45 ms with
+        # interrupts disabled. Committing per record is what starved the UART.
+        commits = []
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(directory, 99, 1000, staging_slots=8)
+            managed.file.flush = lambda: commits.append(1)
+            for sequence in range(1, 6):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"x")
+                managed.flush_one()
+            self.assertEqual(commits, [], "no commit until one is asked for")
+            self.assertGreater(managed.uncommitted_bytes, 0)
+
+            self.assertGreater(managed.commit(), 0)
+            self.assertEqual(len(commits), 1, "one commit covers every record")
+            self.assertEqual(managed.uncommitted_bytes, 0)
+            self.assertEqual(managed.commit_count, 1)
+            managed.file.close()
+
+    def test_commit_is_free_when_nothing_is_pending(self):
+        commits = []
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(directory, 99, 1000)
+            managed.file.flush = lambda: commits.append(1)
+            self.assertEqual(managed.commit(), 0)
+            self.assertEqual(commits, [])
+            self.assertEqual(managed.commit_count, 0)
+            managed.file.close()
+
+    def test_an_unbounded_backlog_forces_a_commit(self):
+        # A power cut can only take commit_bytes of history with it.
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=8, commit_bytes=64)
+            for sequence in range(1, 9):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"y" * 8)
+                managed.flush_one()
+            self.assertGreater(managed.commit_count, 0)
+            self.assertLess(managed.uncommitted_bytes, 64)
+            managed.file.close()
+
+    def test_rotation_counts_as_a_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1, segment_size=128,
+                commit_bytes=1 << 30)
+            for sequence in range(1, 12):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"z" * 8)
+                managed.flush_one(sequence)
+            # Closing the old segment persisted it, so nothing from before the
+            # rotation is still waiting.
+            self.assertLess(managed.uncommitted_bytes, 128)
+            managed.file.close()
 
     def test_rotation_prunes_oldest_segments(self):
         # Unbounded segments filled littlefs, after which every flush_one

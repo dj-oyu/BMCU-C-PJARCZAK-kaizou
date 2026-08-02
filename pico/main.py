@@ -90,7 +90,11 @@ outbox.replay_pager()
 journal = BMJ1Journal(
     journal_path, boot_id, monotonic_us.now(),
     getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4),
-    max_segments=getattr(config, "BMCU_BINARY_JOURNAL_MAX_SEGMENTS", 8))
+    max_segments=getattr(config, "BMCU_BINARY_JOURNAL_MAX_SEGMENTS", 8),
+    commit_bytes=getattr(config, "BMCU_BINARY_JOURNAL_COMMIT_BYTES", 8192))
+# One commit covers everything written since the last one, so this is the knob
+# that decides how often the loop stalls for ~45 ms in flash.
+JOURNAL_COMMIT_MS = int(getattr(config, "BMCU_BINARY_JOURNAL_COMMIT_MS", 10000))
 outbox.journal = journal
 
 
@@ -349,6 +353,7 @@ last_loop_us = monotonic_us.now()
 last_diagnostic_ms = None
 last_gc_ms = None
 last_flush_ms = None
+last_commit_ms = None
 
 
 def record_exception(component, error):
@@ -360,7 +365,7 @@ def record_exception(component, error):
 
 def service_once(now_ms):
     global next_uart_index, last_loop_us, last_diagnostic_ms, last_gc_ms
-    global last_flush_ms
+    global last_flush_ms, last_commit_ms
     current_us = monotonic_us.now()
     metrics.observe_loop_gap(max(0, current_us - last_loop_us))
     last_loop_us = current_us
@@ -391,6 +396,17 @@ def service_once(now_ms):
             journal.failure_count += 1
             record_exception("journal.flush", error)
         last_flush_ms = now_ms
+    # Writing a record costs ~1.6 ms; committing it costs ~45 ms with
+    # interrupts disabled. One commit covers every record written since the
+    # last one, so it runs on its own, much slower schedule.
+    if last_commit_ms is None or ticks_diff(
+            now_ms, last_commit_ms) >= JOURNAL_COMMIT_MS:
+        try:
+            journal.commit()
+        except Exception as error:
+            journal.failure_count += 1
+            record_exception("journal.commit", error)
+        last_commit_ms = now_ms
     # One non-blocking HTTP accept/read/write step per loop. Gating this on
     # every UART being empty starves the UI when two BMCUs stream continuously.
     try:
