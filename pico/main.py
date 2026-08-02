@@ -3,10 +3,6 @@
 import gc
 import machine
 import time
-try:
-    import ustruct as struct
-except ImportError:
-    import struct
 
 try:
     import uos as os
@@ -17,6 +13,7 @@ from machine import UART, Pin
 import bmcu_binary as binary
 import bmcu_binary_constants as C
 from bambuddy_binary_tcp import BMB1TCPClient
+from binary_api import BinaryAPI
 from boot_session import next_boot_id
 from bmcu_binary_outbox import BMB1Outbox
 from bmcu_journal import BMJ1Journal, JournalReplayCursor
@@ -262,83 +259,7 @@ def diagnostic_message():
     return memoryview(diagnostic_frame)[:size]
 
 
-def _query_number(path, name, default, maximum):
-    marker = name + "="
-    if marker not in path:
-        return default
-    value = path.split(marker, 1)[1].split("&", 1)[0]
-    try:
-        return min(maximum, max(0, int(value)))
-    except ValueError:
-        return default
-
-
-CAPTURE_MAGIC = b"BCAP"
-CAPTURE_HEADER = 16
-
-
-def capture_records():
-    """Serialise rejected UART runs.
-
-    Deliberately not a BMB1 message: this is local diagnostic instrumentation
-    read straight off the device, and adding a transport message type would
-    mean a wire-registry change for something that is not sent to Bambuddy.
-
-    Record layout, big-endian:
-        0  4s  magic "BCAP"
-        4  B   version (1)
-        5  B   link index
-        6  B   reject reason (1 CRC, 2 bad length, 3 oversized chunk)
-        7  B   reserved
-        8  I   capture ordinal for that link
-       12  H   uptime_ms & 0xFFFF at capture time
-       14  H   payload length
-       16  ..  the rejected bytes
-    """
-    out = []
-    for monitor in monitors:
-        capture = getattr(monitor, "capture", None)
-        if capture is None:
-            continue
-        for ordinal, reason, timestamp, data in capture.records():
-            header = bytearray(CAPTURE_HEADER)
-            header[0:4] = CAPTURE_MAGIC
-            header[4] = 1
-            header[5] = monitor.link_index
-            header[6] = reason
-            struct.pack_into(
-                ">IHH", header, 8, ordinal & 0xFFFFFFFF,
-                timestamp & 0xFFFF, len(data))
-            out.append(bytes(header) + bytes(data))
-    return out
-
-
-def binary_api(path):
-    base = path.split("?", 1)[0]
-    if base == "/api/capture.bin":
-        return capture_records()
-    if base == "/api/diagnostics.bin":
-        return diagnostic_message()
-    if base in ("/api/current.bin", "/api/history/status.bin"):
-        return list(outbox.iter_current())
-    if base == "/api/logs.bin":
-        after = _query_number(path, "after", 0, 0xFFFFFFFFFFFFFFFF)
-        limit = _query_number(path, "limit", 32, 64)
-        return list(runtime_log.iter_messages(after, limit))
-    if base == "/api/events.bin":
-        after = _query_number(path, "after", 0, 0xFFFFFFFFFFFFFFFF)
-        limit = _query_number(path, "limit", 32, 64)
-        result = []
-        used = 0
-        for sequence, message, _, _ in outbox.durable.iter_records():
-            if sequence <= after:
-                continue
-            if len(result) >= limit or used + len(message) > 32768:
-                break
-            result.append(message)
-            used += len(message)
-        return result
-    return None
+binary_api = BinaryAPI(monitors, outbox, runtime_log, diagnostic_message)
 
 
 web = WebUI(

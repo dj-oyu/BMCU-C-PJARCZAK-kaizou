@@ -556,7 +556,11 @@ class BMCUMonitor:
 
     @staticmethod
     def _decode_event(data):
-        event = {"hw_tick32": _u32(data, 0), "record_type": data[4],
+        # The raw record is retained so /api/snapshot.bin can hand back exactly
+        # what arrived; re-encoding it here would put a second copy of the wire
+        # layout on the device.
+        event = {"raw": bytes(data[:16]),
+                 "hw_tick32": _u32(data, 0), "record_type": data[4],
                  "severity": data[5], "source": data[6],
                  "payload_length": data[7]}
         payload = bytes(data[8:16])
