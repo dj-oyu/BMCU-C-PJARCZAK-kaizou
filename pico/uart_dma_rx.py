@@ -50,8 +50,58 @@ REARM_THRESHOLD = 1 << 20
 CRITICAL_COUNT = 1 << 16
 
 
+DMA_BASE = 0x50000000
+DMA_CHANNEL_STRIDE = 0x40
+DMA_CTRL_OFFSET = 0x0C
+DMA_CHANNEL_COUNT = 16
+CTRL_ENABLE = 1
+TREQ_FIELD_MAX = 0x3F
+
+
 class DmaRingError(RuntimeError):
     pass
+
+
+def treq_field(dma):
+    """Locate TREQ_SEL in the control word without hardcoding bit positions.
+
+    The RP2350 layout is not the RP2040 one -- it adds the reverse-increment
+    bits -- and guessing a register layout has already cost one deployment here,
+    so the field is derived from MicroPython's own packer instead.
+    """
+    mask = dma.pack_ctrl(treq_sel=0) ^ dma.pack_ctrl(treq_sel=TREQ_FIELD_MAX)
+    shift = 0
+    while mask and not (mask >> shift) & 1:
+        shift += 1
+    return mask, shift
+
+
+def release_stale_channels(dma, mem32, treqs):
+    """Stop channels a previous soft reset left running.
+
+    A soft reset releases MicroPython's claim on a DMA channel but does not
+    disable the hardware. The orphaned channel keeps draining the same UART FIFO
+    into a buffer that no longer exists, so it steals bytes from whichever
+    channel is claimed next. Deploying over WebREPL means soft-resetting on
+    every update, which made this the normal case rather than a corner case: two
+    links went silent after a dozen redeploys and only a chip reset brought them
+    back.
+
+    Only channels paced by the caller's own TREQ are touched, so one link's
+    startup cannot disturb another's, and nothing else using DMA is affected.
+    """
+    mask, shift = treq_field(dma)
+    released = []
+    for channel in range(DMA_CHANNEL_COUNT):
+        address = DMA_BASE + channel * DMA_CHANNEL_STRIDE + DMA_CTRL_OFFSET
+        control = mem32[address]
+        if not control & CTRL_ENABLE:
+            continue
+        if ((control & mask) >> shift) not in treqs:
+            continue
+        mem32[address] = control & ~CTRL_ENABLE
+        released.append(channel)
+    return released
 
 
 def _log2_exact(value):
@@ -124,6 +174,7 @@ class DmaUartReader:
         self.overflow_count = 0
         self.rearm_count = 0
         self.lost_bytes = 0
+        self.released_channels = ()
         self._saved_imsc = None
         self._count_base = 0
 
@@ -131,6 +182,10 @@ class DmaUartReader:
         imsc = self.base + UARTIMSC_OFFSET
         self._saved_imsc = self.mem32[imsc]
         self.mem32[imsc] = self._saved_imsc & ~(IMSC_RXIM | IMSC_RTIM)
+        # Before arming, stop anything a previous soft reset left running on
+        # this UART. Our own channel may be among them and is armed next.
+        self.released_channels = release_stale_channels(
+            self.dma, self.mem32, (self.treq_sel,))
         self._arm()
         return self
 

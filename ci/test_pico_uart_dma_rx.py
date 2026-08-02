@@ -26,9 +26,13 @@ class FakeDMA:
         self.active_calls = []
         self.written = 0
 
+    # Models the real packer closely enough that the TREQ field can be located
+    # the way the module does it, at a shift the RP2040 does not use.
+    TREQ_SHIFT = 17
+
     def pack_ctrl(self, **kwargs):
         self.ctrl = kwargs
-        return 0x1234
+        return 0x1234 | (kwargs.get("treq_sel", 0) << self.TREQ_SHIFT)
 
     def config(self, read=None, write=None, count=None, ctrl=None,
                trigger=False):
@@ -115,6 +119,74 @@ class AlignmentTests(unittest.TestCase):
                                  dma=FakeDMA(3000), mem32=FakeMem(),
                                  address_of=lambda _o: 0,
                                  store=bytearray(6000))
+
+
+def control_word(treq, enabled=True):
+    return (treq << FakeDMA.TREQ_SHIFT) | (api_enable() if enabled else 0)
+
+
+def api_enable():
+    return dma_rx.CTRL_ENABLE
+
+
+def ctrl_address(channel):
+    return (dma_rx.DMA_BASE + channel * dma_rx.DMA_CHANNEL_STRIDE
+            + dma_rx.DMA_CTRL_OFFSET)
+
+
+class StaleChannelTests(unittest.TestCase):
+    """A soft reset frees the claim but leaves the hardware running.
+
+    Deployment here is WebREPL, so every update soft-resets. After a dozen the
+    orphaned channels had taken both links silent, and only a chip reset
+    recovered them.
+    """
+
+    def test_treq_field_is_derived_not_assumed(self):
+        mask, shift = dma_rx.treq_field(FakeDMA(64))
+        self.assertEqual(shift, FakeDMA.TREQ_SHIFT)
+        self.assertEqual(mask, dma_rx.TREQ_FIELD_MAX << FakeDMA.TREQ_SHIFT)
+
+    def test_a_running_channel_on_our_treq_is_disabled(self):
+        mem = FakeMem({ctrl_address(4): control_word(29)})
+        released = dma_rx.release_stale_channels(FakeDMA(64), mem, (29,))
+        self.assertEqual(released, [4])
+        self.assertEqual(mem[ctrl_address(4)] & dma_rx.CTRL_ENABLE, 0)
+
+    def test_other_peripherals_are_left_alone(self):
+        # Wi-Fi and anything else using DMA must survive our startup.
+        mem = FakeMem({
+            ctrl_address(0): control_word(11),
+            ctrl_address(1): control_word(29),
+            ctrl_address(2): control_word(31),
+        })
+        released = dma_rx.release_stale_channels(FakeDMA(64), mem, (29,))
+        self.assertEqual(released, [1])
+        self.assertEqual(mem[ctrl_address(0)], control_word(11))
+        self.assertEqual(mem[ctrl_address(2)], control_word(31))
+
+    def test_an_idle_channel_is_not_touched(self):
+        mem = FakeMem({ctrl_address(3): control_word(29, enabled=False)})
+        self.assertEqual(dma_rx.release_stale_channels(FakeDMA(64), mem, (29,)), [])
+
+    def test_only_this_links_treq_is_swept_so_links_cannot_disturb_each_other(self):
+        mem = FakeMem({ctrl_address(1): control_word(29),
+                       ctrl_address(2): control_word(31)})
+        first, _fake, _m, _u = reader(link_index=0)
+        first.mem32 = mem
+        first.start()
+        self.assertEqual(mem[ctrl_address(2)], control_word(31),
+                         "link 1's freshly armed channel must survive")
+
+    def test_start_records_what_it_released(self):
+        mem = FakeMem({
+            dma_rx.UART_BASE[0] + dma_rx.UARTIMSC_OFFSET: 0x70,
+            ctrl_address(7): control_word(29),
+        })
+        instance, _fake, _m, _u = reader()
+        instance.mem32 = mem
+        instance.start()
+        self.assertEqual(instance.released_channels, [7])
 
 
 class RingReadTests(unittest.TestCase):
