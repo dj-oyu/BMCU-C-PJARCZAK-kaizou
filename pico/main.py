@@ -3,6 +3,10 @@
 import gc
 import machine
 import time
+try:
+    import ustruct as struct
+except ImportError:
+    import struct
 
 try:
     import uos as os
@@ -21,6 +25,7 @@ from device_key_store import DeviceKeyAPI, DeviceKeyStore
 from device_metrics import DeviceMetrics, rp2_temperature_milli_c
 from runtime_log import PicoRuntimeLog
 from transport_settings import TransportSettingsAPI, TransportSettingsStore
+from uart_dma_rx import UART_BASE as DMA_UART_BASE, DmaUartReader
 from web_ui import WebUI
 from wifi import WiFiStation
 
@@ -84,7 +89,8 @@ outbox.replay_pager = lambda: replay_cursor.page_into(outbox, 16)
 outbox.replay_pager()
 journal = BMJ1Journal(
     journal_path, boot_id, monotonic_us.now(),
-    getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4))
+    getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4),
+    max_segments=getattr(config, "BMCU_BINARY_JOURNAL_MAX_SEGMENTS", 8))
 outbox.journal = journal
 
 
@@ -111,15 +117,35 @@ def enqueue_raw_metric(link_index, received_at_us, wire, metadata):
     return result
 
 
+# The PL011 FIFO holds 32 bytes, 3.06 ms at 115200 8E1, and a flash commit was
+# measured blocking interrupts for 32 ms. DMA drains the FIFO without the CPU,
+# so a stalled core no longer costs bytes. Set BMCU_UART_DMA_RX = False to fall
+# back to the interrupt-driven path.
+uart_dma_rx = bool(getattr(config, "BMCU_UART_DMA_RX", True))
+uart_dma_ring = int(getattr(config, "BMCU_UART_DMA_RING_BYTES", 4096))
+dma_readers = []
+
 for link_index, item in enumerate(link_configs):
     rxbuf = item.get("rxbuf", getattr(config, "UART_RXBUF", 2048))
     uart = UART(
         item["uart"], baudrate=item.get("baudrate", config.UART_BAUDRATE),
         bits=8, parity=0, stop=1, tx=Pin(item["tx"]), rx=Pin(item["rx"]),
         rxbuf=rxbuf)
+    source, capacity = uart, rxbuf
+    if uart_dma_rx and link_index < len(DMA_UART_BASE):
+        try:
+            reader = DmaUartReader(
+                uart, link_index, ring_bytes=uart_dma_ring).start()
+            source, capacity = reader, uart_dma_ring
+            dma_readers.append(reader)
+        except Exception as error:  # noqa: BLE001 - a link is worth more than DMA
+            runtime_log.warning(
+                "uart.dma",
+                "link %d fell back to interrupt receive: %s" %
+                (link_index, error))
     monitors.append(BMCUMonitor(
-        uart, link_id=item["id"], link_index=link_index,
-        on_valid_frame=enqueue_raw_metric, uart_capacity=rxbuf))
+        source, link_id=item["id"], link_index=link_index,
+        on_valid_frame=enqueue_raw_metric, uart_capacity=capacity))
 
 # A blocking Wi-Fi stack call can span more than 100 ms. Reserve enough work
 # to drain two full-rate UARTs on the following loop while retaining fairness.
@@ -242,8 +268,50 @@ def _query_number(path, name, default, maximum):
         return default
 
 
+CAPTURE_MAGIC = b"BCAP"
+CAPTURE_HEADER = 16
+
+
+def capture_records():
+    """Serialise rejected UART runs.
+
+    Deliberately not a BMB1 message: this is local diagnostic instrumentation
+    read straight off the device, and adding a transport message type would
+    mean a wire-registry change for something that is not sent to Bambuddy.
+
+    Record layout, big-endian:
+        0  4s  magic "BCAP"
+        4  B   version (1)
+        5  B   link index
+        6  B   reject reason (1 CRC, 2 bad length, 3 oversized chunk)
+        7  B   reserved
+        8  I   capture ordinal for that link
+       12  H   uptime_ms & 0xFFFF at capture time
+       14  H   payload length
+       16  ..  the rejected bytes
+    """
+    out = []
+    for monitor in monitors:
+        capture = getattr(monitor, "capture", None)
+        if capture is None:
+            continue
+        for ordinal, reason, timestamp, data in capture.records():
+            header = bytearray(CAPTURE_HEADER)
+            header[0:4] = CAPTURE_MAGIC
+            header[4] = 1
+            header[5] = monitor.link_index
+            header[6] = reason
+            struct.pack_into(
+                ">IHH", header, 8, ordinal & 0xFFFFFFFF,
+                timestamp & 0xFFFF, len(data))
+            out.append(bytes(header) + bytes(data))
+    return out
+
+
 def binary_api(path):
     base = path.split("?", 1)[0]
+    if base == "/api/capture.bin":
+        return capture_records()
     if base == "/api/diagnostics.bin":
         return diagnostic_message()
     if base in ("/api/current.bin", "/api/history/status.bin"):
@@ -280,6 +348,7 @@ next_uart_index = 0
 last_loop_us = monotonic_us.now()
 last_diagnostic_ms = None
 last_gc_ms = None
+last_flush_ms = None
 
 
 def record_exception(component, error):
@@ -291,6 +360,7 @@ def record_exception(component, error):
 
 def service_once(now_ms):
     global next_uart_index, last_loop_us, last_diagnostic_ms, last_gc_ms
+    global last_flush_ms
     current_us = monotonic_us.now()
     metrics.observe_loop_gap(max(0, current_us - last_loop_us))
     last_loop_us = current_us
@@ -310,12 +380,17 @@ def service_once(now_ms):
         except Exception as error:
             record_exception("bambuddy.binary", error)
     uart_idle = not any(monitor.uart.any() for monitor in monitors)
-    if uart_idle:
+    # A miswired or floating RX pin keeps uart.any() true forever, which used
+    # to starve the journal flush and the GC below for the whole uptime. Both
+    # now have a deadline that fires regardless of how busy the UARTs look.
+    if uart_idle or last_flush_ms is None or ticks_diff(
+            now_ms, last_flush_ms) >= 1000:
         try:
             journal.flush_one(monotonic_us.now())
         except Exception as error:
             journal.failure_count += 1
             record_exception("journal.flush", error)
+        last_flush_ms = now_ms
     # One non-blocking HTTP accept/read/write step per loop. Gating this on
     # every UART being empty starves the UI when two BMCUs stream continuously.
     try:
@@ -334,8 +409,9 @@ def service_once(now_ms):
             C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, monotonic_us.now(),
             payload, False)
         last_diagnostic_ms = now_ms
-    if (last_gc_ms is None or ticks_diff(now_ms, last_gc_ms) >= 60000) and \
-            uart_idle:
+    gc_elapsed = None if last_gc_ms is None else ticks_diff(now_ms, last_gc_ms)
+    if (gc_elapsed is None or gc_elapsed >= 60000) and \
+            (uart_idle or gc_elapsed is None or gc_elapsed >= 300000):
         started = monotonic_us.now()
         gc.collect()
         metrics.observe_gc(monotonic_us.now() - started)
@@ -345,6 +421,14 @@ def service_once(now_ms):
             monitor.ping_if_idle(now_ms)
         except Exception as error:
             record_exception("bmcu.ping", error)
+    for reader in dma_readers:
+        # Reloads the transfer budget for a stream that never fully drains;
+        # otherwise the channel would stop after about a day and the link would
+        # look dead with no error anywhere.
+        try:
+            reader.service()
+        except Exception as error:
+            record_exception("uart.dma", error)
 
 
 while True:
