@@ -278,6 +278,47 @@ class JournalTests(unittest.TestCase):
                 directory, lambda *args: recovered.append(args)), 1)
             self.assertEqual(recovered[0][4], 2)
 
+    def test_rotation_prunes_oldest_segments(self):
+        # Unbounded segments filled littlefs, after which every flush_one
+        # raised ENOSPC instead of dropping the oldest history.
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1, segment_size=128,
+                max_segments=3)
+            for sequence in range(1, 40):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"x" * 8)
+                managed.flush_one(sequence)
+            managed.file.close()
+            names = sorted(name for name in os.listdir(directory)
+                           if name.endswith(".bmj"))
+            self.assertEqual(len(names), 3)
+            self.assertEqual(names[-1], "%08d.bmj" % managed.segment_sequence)
+            self.assertGreater(managed.segments_removed, 0)
+
+    def test_restart_prunes_history_beyond_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(5):
+                managed = journal.BMJ1Journal(
+                    directory, 99, 1000, staging_slots=1, max_segments=2)
+                managed.stage(C.BMCU_FRAME, 0, 0, 1, 5, b"x")
+                managed.flush_one()
+                managed.file.close()
+            names = [name for name in os.listdir(directory)
+                     if name.endswith(".bmj")]
+            self.assertEqual(len(names), 2)
+
+    def test_zero_max_segments_keeps_every_segment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(4):
+                managed = journal.BMJ1Journal(
+                    directory, 99, 1000, staging_slots=1, max_segments=0)
+                managed.stage(C.BMCU_FRAME, 0, 0, 1, 5, b"x")
+                managed.flush_one()
+                managed.file.close()
+            names = [name for name in os.listdir(directory)
+                     if name.endswith(".bmj")]
+            self.assertEqual(len(names), 4)
+
     def test_corrupt_checkpoint_is_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "ack.bma")
@@ -565,6 +606,42 @@ class TCPClientTests(unittest.TestCase):
         self.assertEqual(client.last_error, "transport endpoint updated")
         with self.assertRaises(ValueError):
             client.set_endpoint("", 0, 124)
+
+    def test_short_server_ping_does_not_escape_as_struct_error(self):
+        # struct.error is outside poll()'s except clause, so a truncated PING
+        # used to surface as an uncounted runtime exception in main.py.
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+        message = binary.Message(
+            C.PING, 0, 3, 0, 99, C.GLOBAL_SCOPE, b"", b"\0\0\0")
+
+        client._handle_message(message)
+
+        self.assertEqual(client.state, tcp.ONLINE)
+
+    def test_online_send_failure_closes_instead_of_raising(self):
+        class BrokenSendSocket(ReadIntoSocket):
+            def readinto(self, _target):
+                return None
+
+            def send(self, _data):
+                raise OSError(104)
+
+        boot = 99
+        outbox = BMB1Outbox(boot, durable_slots=4)
+        client = tcp.BMB1TCPClient(
+            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
+        client.sock = BrokenSendSocket()
+        client.state = tcp.ONLINE
+        client.last_rx_ms = 0
+        outbox.enqueue_raw(0, 1000, link.encode_frame(link.EVENT, 1, bytes(16)),
+                           {"kind": link.EVENT, "sequence": 1})
+
+        client.poll(1)
+
+        self.assertEqual(client.state, tcp.BACKOFF)
 
     def test_disconnect_discards_session_bound_control_result(self):
         client = tcp.BMB1TCPClient(

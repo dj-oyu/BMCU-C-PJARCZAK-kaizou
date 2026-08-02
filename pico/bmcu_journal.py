@@ -151,10 +151,14 @@ class BMJ1Journal:
     """Small rotating-segment manager; staging remains independent of I/O."""
 
     def __init__(self, directory, pico_boot_id, created_at_us,
-                 staging_slots=4, segment_size=65536):
+                 staging_slots=4, segment_size=65536, max_segments=8):
         self.directory = directory.rstrip("/")
         self.pico_boot_id = pico_boot_id
         self.segment_size = segment_size
+        # Segments used to accumulate without bound: once littlefs filled up,
+        # every later flush_one raised ENOSPC instead of dropping old history.
+        self.max_segments = max_segments if max_segments > 0 else 0
+        self.segments_removed = 0
         self.segment_sequence = 1
         self.stager = JournalStager(
             bytearray(RECORD_MAX_SIZE * staging_slots))
@@ -168,6 +172,38 @@ class BMJ1Journal:
 
     def _path(self, sequence):
         return "%s/%08d.bmj" % (self.directory, sequence)
+
+    def _prune_segments(self):
+        """Drop the oldest segments so the directory stays bounded.
+
+        Names are zero-padded, so lexicographic order is numeric order. The
+        segment currently open is never a candidate, and ack.bma is untouched.
+        """
+        if not self.max_segments:
+            return 0
+        try:
+            import uos as os
+        except ImportError:
+            import os
+        try:
+            names = sorted(name for name in os.listdir(self.directory)
+                           if name.endswith(".bmj"))
+        except OSError:
+            return 0
+        current = self.path.rsplit("/", 1)[-1]
+        removable = [name for name in names if name != current]
+        excess = len(removable) + 1 - self.max_segments
+        if excess <= 0:
+            return 0
+        removed = 0
+        for name in removable[:excess]:
+            try:
+                os.remove(self.directory + "/" + name)
+            except OSError:
+                continue
+            removed += 1
+        self.segments_removed += removed
+        return removed
 
     def _open(self, created_at_us):
         try:
@@ -199,6 +235,7 @@ class BMJ1Journal:
         self.file.write(header)
         self.file.flush()
         self.bytes_written += SEGMENT_HEADER_SIZE
+        self._prune_segments()
 
     def stage(self, *args):
         return self.stager.stage(*args)
@@ -228,6 +265,7 @@ class BMJ1Journal:
                                  self.segment_sequence, created_at_us)
             self.file.write(header)
             self.bytes_written += SEGMENT_HEADER_SIZE
+            self._prune_segments()
         written = self.stager.flush_one(self.file)
         self.file.flush()
         self.bytes_written += written

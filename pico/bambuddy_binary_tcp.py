@@ -248,8 +248,11 @@ class BMB1TCPClient:
         elif self.state == ONLINE and message.message_type == C.CONTROL:
             self._handle_control(message)
         elif self.state == ONLINE and message.message_type == C.PING:
-            token = binary.parse_pong(message) if False else struct.unpack_from(
-                ">Q", message.payload, 0)[0]
+            # struct.error is not in poll()'s except clause, so a short PING
+            # payload would escape as an uncounted-for runtime exception.
+            if len(message.payload) < 8:
+                return
+            token = struct.unpack_from(">Q", message.payload, 0)[0]
             size = binary.write_ping(
                 self.tx_buffer, 0, C.PONG, self.outbox.pico_boot_id, token)
             self._queue_bytes(memoryview(self.tx_buffer)[:size])
@@ -434,4 +437,11 @@ class BMB1TCPClient:
                     record = memoryview(self.tx_buffer)[:len(record)]
                     self.replay_count += 1
                 self._queue_bytes(record, sequence)
-                self._send_step()
+                # Same guard as the other two _send_step call sites: an
+                # unwrapped OSError here escapes to main.py and is counted as a
+                # runtime exception on every reconnect instead of closing.
+                try:
+                    self._send_step()
+                except OSError as error:
+                    self._close(now_ms, error)
+                    return
