@@ -55,6 +55,12 @@ for a trusted LAN.
 
 ## Deployment and tests
 
-`deploy.ps1` uploads every Python module and places `main.py` last. Host tests
-live under `ci/`; canonical cross-repository binary fixtures live under
-`tests/fixtures/bmcu_binary/`.
+`deploy.ps1` uploads the staged web UI, then every Python module, and places
+`main.py` last. Host tests live under `ci/`; canonical cross-repository binary
+fixtures live under `tests/fixtures/bmcu_binary/`.
+
+The page itself is not a module. `web_ui.py` streams `www/index.html.gz` off
+littlefs with `Content-Encoding: gzip`, so only one 512-byte chunk is resident
+per request instead of the whole page sitting in the heap for the entire
+uptime. Sources and the build live in `web/`; `tools/build_web_ui.py` stages the
+artifact.

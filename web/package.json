@@ -1,0 +1,25 @@
+{
+  "name": "bmcu-monitor-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser UI for the Pico 2 W BMCU monitor, built into a single inlined page.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "preact-render-to-string": "^6.7.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.0",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^4.1.10"
+  }
+}

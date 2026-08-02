@@ -80,6 +80,18 @@ USBシリアルが認識されない個体(下記トラブルシューティン�
   `webrepl_cli.py -p <パスワード> <ファイル> <ホスト>:/<ファイル名>` で
   Wi-Fi経由の転送が可能です。パスワード等はローカル専用メモ
   (`pico/SECRETS_LOCAL.md`、Git管理外)を参照。
+  Web UIは`.py`ではなくビルド成果物なので、モジュールとは別に送る必要があります。
+  ディレクトリはWebREPLのRELP上で先に作成してください:
+
+  ```python
+  import os; os.mkdir('www')   # 既にあれば OSError になるので無視してよい
+  ```
+
+  ```powershell
+  python webrepl_cli.py -p <パスワード> pico\www\index.html.gz <ホスト>:/www/index.html.gz
+  ```
+
+  転送し忘れると`/`が503を返し、本文に`tools/build_web_ui.py`を実行するよう出ます。
 - **BOOTSEL直書き**: BOOTSELモードは通常のUSB故障の影響を受けません。
   PC上で `littlefs-python` を使いアプリ+`secrets.py` 入りのlittlefsイメージ
   (block 4096 / prog 256)を作成し、`picotool info -a <UF2>` で確認した

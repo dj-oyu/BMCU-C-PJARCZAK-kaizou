@@ -1,0 +1,3 @@
+configured=1
+host=bambuddy.local
+port=8766

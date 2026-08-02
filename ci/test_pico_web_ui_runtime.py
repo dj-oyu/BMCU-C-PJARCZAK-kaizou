@@ -1,7 +1,8 @@
+import contextlib
 import importlib.util
+import os
 import pathlib
-import subprocess
-import sys
+import tempfile
 import unittest
 
 PICO = pathlib.Path(__file__).parents[1] / "pico"
@@ -44,58 +45,91 @@ class WouldBlockReadIntoClient(ReadIntoClient):
         return None
 
 
+@contextlib.contextmanager
+def staged_index(content):
+    """Runs the server against a throwaway littlefs root.
+
+    web_ui resolves INDEX_PATH relative to the working directory, which on the
+    device is the filesystem root. Pass None to exercise a missing artifact.
+    """
+    previous = os.getcwd()
+    with tempfile.TemporaryDirectory() as root:
+        if content is not None:
+            target = pathlib.Path(root) / web_ui.INDEX_PATH
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        os.chdir(root)
+        try:
+            yield root
+        finally:
+            os.chdir(previous)
+
+
+def drain(web, limit=4096):
+    """Polls until the response is fully written and the client is closed."""
+    client = web.client
+    for _ in range(limit):
+        web.poll()
+        if web.client is None:
+            break
+    return bytes(client.sent)
+
+
 class WebUIRuntimeTests(unittest.TestCase):
     def test_listener_allows_a_small_burst_queue(self):
         self.assertEqual(web_ui.HTTP_LISTEN_BACKLOG, 4)
 
-    def test_page_uses_arraybuffer_dataview_and_delta_endpoints(self):
-        page = web_ui.PAGE
-        self.assertIn(b"arrayBuffer()", page)
-        self.assertIn(b"DataView", page)
-        self.assertIn(b"/api/diagnostics.bin", page)
-        self.assertIn(b"/api/current.bin", page)
-        self.assertIn(b"/api/logs.bin?after=", page)
-        self.assertNotIn(b"JSON.stringify", page)
-        self.assertNotIn(b"/api/devices", page)
-        self.assertIn(b"getBigUint64(o).toString()", page)
+    def test_index_is_streamed_from_littlefs_with_gzip_encoding(self):
+        staged = b"\x1f\x8b" + bytes(range(256)) * 6
+        with staged_index(staged):
+            web = web_ui.WebUI(lambda _: None)
+            web.client = Client(b"GET / HTTP/1.1\r\nHost: pico\r\n\r\n")
+            sent = drain(web)
 
-    def test_page_separates_two_bmcu_links_and_uart_health(self):
-        page = web_ui.PAGE
+        header, _, body = sent.partition(b"\r\n\r\n")
+        self.assertIn(b"200 OK", header)
+        self.assertIn(b"Content-Encoding: gzip", header)
+        self.assertIn(b"Content-Length: %d" % len(staged), header)
+        self.assertEqual(body, staged)
 
-        self.assertIn(b"Dual BMCU Loader Monitor", page)
-        self.assertIn(b"getUint8(o+28)", page)
-        self.assertIn(b"bmcu-", page)
-        self.assertIn(b"GP0 TX / GP1 RX", page)
-        self.assertIn(b"GP4 TX / GP5 RX", page)
-        self.assertIn(b"Sequence gaps", page)
-        self.assertIn(b"Overflows", page)
-        self.assertLess(len(page), 18000)
+    def test_index_response_never_holds_the_whole_page_in_ram(self):
+        # The point of streaming: at most one chunk is resident, no matter how
+        # large the staged page grows.
+        staged = bytes(range(256)) * 40
+        with staged_index(staged):
+            web = web_ui.WebUI(lambda _: None)
+            web.client = Client(b"GET / HTTP/1.1\r\nHost: pico\r\n\r\n")
+            web.poll()
+            response = web.response
+            sizes = []
+            while web.client is not None:
+                sizes.append(len(response.current()))
+                web.poll()
 
-    def test_page_has_write_only_device_key_component(self):
-        page = web_ui.PAGE
+        self.assertGreater(len(sizes), 1)
+        self.assertLessEqual(max(sizes), web_ui.FILE_CHUNK_BYTES)
 
-        self.assertIn(b"BMB1 device key", page)
-        self.assertIn(b"crypto.getRandomValues", page)
-        self.assertIn(b"/api/device-key/status", page)
-        self.assertIn(b"'X-BMCU-Key-Action':'update'", page)
-        self.assertIn(b"cannot be read back", page)
+    def test_missing_web_asset_answers_with_an_actionable_error(self):
+        with staged_index(None):
+            web = web_ui.WebUI(lambda _: None)
+            web.client = Client(b"GET / HTTP/1.1\r\nHost: pico\r\n\r\n")
+            sent = drain(web)
 
-    def test_page_has_bambuddy_endpoint_component(self):
-        page = web_ui.PAGE
+        self.assertIn(b"503 Service Unavailable", sent)
+        self.assertIn(b"tools/build_web_ui.py", sent)
 
-        self.assertIn(b"Bambuddy endpoint", page)
-        self.assertIn(b"Host or IPv4 address", page)
-        self.assertIn(b"TCP port", page)
-        self.assertIn(b"/api/transport/status", page)
-        self.assertIn(b"'X-BMCU-Settings-Action':'update'", page)
+    def test_disconnect_closes_the_staged_file_handle(self):
+        # littlefs descriptors are a bounded resource; an aborted request must
+        # not leak one per connection.
+        with staged_index(b"\x1f\x8bstaged"):
+            web = web_ui.WebUI(lambda _: None)
+            web.client = Client(b"GET / HTTP/1.1\r\nHost: pico\r\n\r\n")
+            web.poll()
+            handle = web.response.file
+            self.assertFalse(handle.closed)
+            web._close_client()
 
-    def test_embedded_javascript_has_valid_syntax(self):
-        source = web_ui.PAGE.decode().split("<script>", 1)[1].split(
-            "</script>", 1)[0]
-        result = subprocess.run(
-            ["node", "--check", "--input-type=module"], input=source,
-            text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(handle.closed)
 
     def test_binary_response_is_not_serialized_or_copied(self):
         payload = bytearray(b"BMB1-payload")

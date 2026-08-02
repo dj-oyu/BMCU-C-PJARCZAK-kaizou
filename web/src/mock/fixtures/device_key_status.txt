@@ -1,0 +1,2 @@
+configured=1
+fingerprint=3f9a c1d0 77e2 4b18
