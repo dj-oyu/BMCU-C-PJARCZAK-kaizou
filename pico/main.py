@@ -25,7 +25,8 @@ from device_key_store import DeviceKeyAPI, DeviceKeyStore
 from device_metrics import DeviceMetrics, rp2_temperature_milli_c
 from runtime_log import PicoRuntimeLog
 from transport_settings import TransportSettingsAPI, TransportSettingsStore
-from uart_dma_rx import UART_BASE as DMA_UART_BASE, DmaUartReader
+from uart_dma_rx import (DEFAULT_RING_BYTES as DMA_DEFAULT_RING_BYTES,
+                         UART_BASE as DMA_UART_BASE, DmaUartReader)
 from web_ui import WebUI
 from wifi import WiFiStation
 
@@ -126,7 +127,7 @@ def enqueue_raw_metric(link_index, received_at_us, wire, metadata):
 # so a stalled core no longer costs bytes. Set BMCU_UART_DMA_RX = False to fall
 # back to the interrupt-driven path.
 uart_dma_rx = bool(getattr(config, "BMCU_UART_DMA_RX", True))
-uart_dma_ring = int(getattr(config, "BMCU_UART_DMA_RING_BYTES", 4096))
+uart_dma_ring = int(getattr(config, "BMCU_UART_DMA_RING_BYTES", DMA_DEFAULT_RING_BYTES))
 dma_readers = []
 
 for link_index, item in enumerate(link_configs):

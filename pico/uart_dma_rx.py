@@ -30,7 +30,16 @@ IMSC_RTIM = 1 << 6
 # table is shifted from RP2040 because RP2350 adds PIO2.
 UART_RX_DREQ = (29, 31)
 
-DEFAULT_RING_BYTES = 4096
+# Sized against the worst loop stall measured here, 492 ms. At the 668 B/s the
+# links settled to once the resync storm stopped that is 329 bytes; even at the
+# 2.9 KB/s seen during the storm it is 1,427. 2 KiB covers both, and is still
+# 196 ms at the full 10.5 KB/s line rate.
+#
+# Two links cost 8 KiB of heap including alignment padding, which matters on a
+# device that has been down to 1.4 KB free. Overflow is not silent: the monitor
+# reports it once the backlog reaches this capacity. Raise it with
+# BMCU_UART_DMA_RING_BYTES if that counter ever moves.
+DEFAULT_RING_BYTES = 2048
 # TRANS_COUNT is reloaded well before it can reach zero; at full line rate this
 # is over a day of traffic, and re-arming is counted so it stays visible.
 INITIAL_COUNT = 0x0FFFFFFF
