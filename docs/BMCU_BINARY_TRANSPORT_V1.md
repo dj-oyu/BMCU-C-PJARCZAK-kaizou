@@ -478,6 +478,16 @@ The journal writer buffers records in preallocated RAM and writes a bounded
 chunk only after UART servicing. A flash write must never be performed inline
 from the UART callback or frame parser.
 
+Writing a record and committing it are separate operations. Measured on a
+Pico 2 W, writing costs about 1.6 ms while the littlefs commit costs about
+45 ms with interrupts disabled, and one commit covers every record written
+since the last one; record size does not affect the per-call cost. Committing
+per record therefore paid the expensive half every time. Records are written as
+they drain and committed on a much slower schedule, bounded by
+`BMCU_BINARY_JOURNAL_COMMIT_MS` and by a `commit_bytes` ceiling so a power cut
+can only take a bounded amount of history. ACK watermarks are persisted by the
+commit, not by the write.
+
 On startup, scanning stops at the first truncated or invalid record in the
 newest segment. Earlier valid records remain usable. The invalid tail may be
 discarded when the segment is next rotated.
@@ -492,6 +502,18 @@ removed first. Unacknowledged critical records have the highest retention
 priority. Every forced loss is represented by a durable
 `TRANSPORT_DROP`.
 
+**Implementation gap.** The Pico currently retains the newest
+`BMCU_BINARY_JOURNAL_MAX_SEGMENTS` (default 8) by segment number and does not
+consider ACK state or record class when choosing what to drop, so an
+unacknowledged critical record in an old segment is not protected and no
+`TRANSPORT_DROP` is emitted for it. This is weaker than the paragraph above and
+is the state of the code, not the intended design.
+
+Retention exists at all because it did not before: segments accumulated without
+bound until littlefs filled at 36 segments of a roughly 2.5 MB filesystem, after
+which every write failed and the exception counter advanced about 40 times a
+second. Bounding growth was the fix for that; ACK-aware eviction is still owed.
+
 ## 11. Scheduling
 
 The Pico cooperative loop observes this strict priority:
@@ -501,14 +523,28 @@ The Pico cooperative loop observes this strict priority:
 3. update minimum local state;
 4. service TCP receive/ACK/CONTROL;
 5. service bounded TCP send work;
-6. flush a bounded journal chunk when UART backlog is empty;
-7. service local HTTP diagnostics;
-8. perform maintenance and garbage collection only at a safe point.
+6. write a bounded journal chunk, preferring an empty UART backlog but subject
+   to a deadline, so a link that never goes idle cannot starve the journal for
+   the whole uptime;
+7. commit the journal on its own, much slower schedule;
+8. service local HTTP diagnostics;
+9. perform maintenance and garbage collection only at a safe point, again
+   subject to a deadline for the same reason as step 6.
 
 Dual UART draining is round-robin. A pass continues while backlog exists,
 subject to an explicit total byte/time budget so one link cannot starve the
 other or permanently starve networking. The former single 128-byte read per
 link is not the v1 scheduling contract.
+
+The decoder must parse every byte handed to it. It previously kept only the
+last 128 bytes of any larger chunk, discarding the rest before parsing, which
+against a 512-byte drain chunk silently dropped up to 384 bytes of intact
+frames per read. The 128-byte bound belongs on the retained *unparsed
+remainder*, which is at most one legal frame, not on the arriving chunk.
+
+Ingress is by DMA where the platform supports it, which removes the interrupt
+latency budget from this priority list entirely; see
+[Pico BMCU-link DMA RX](PICO_UART_DMA_RX.md).
 
 Transport and journal buffers are allocated during startup. HTTP request
 handling must not invoke unconditional garbage collection. No socket send,
