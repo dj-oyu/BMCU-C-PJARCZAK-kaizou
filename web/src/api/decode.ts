@@ -226,6 +226,12 @@ export function linkCounters(
 export interface Telemetry {
   readonly diagnostics: Map<number, TlvValue>
   readonly statuses: Map<number, LoaderStatus>
+  /**
+   * The undecoded BMCU_FRAME payloads, kept so the diagnostics page can read
+   * the BMCU's own error counters and place them beside the Pico's. Those
+   * fields are not part of LoaderStatus because no operational view wants them.
+   */
+  readonly payloads: Map<number, DataView>
 }
 
 /** Folds a /api/current.bin and /api/diagnostics.bin pair into UI state. */
@@ -239,12 +245,16 @@ export function readTelemetry(
     for (const [tag, value] of parseTlvs(message.payload)) merged.set(tag, value)
   }
   const statuses = new Map<number, LoaderStatus>()
+  const payloads = new Map<number, DataView>()
   for (const message of current) {
     if (message.messageType !== MessageType.BmcuFrame) continue
     const status = parseStatus(message.payload)
-    if (status) statuses.set(message.linkIndex, status)
+    if (status) {
+      statuses.set(message.linkIndex, status)
+      payloads.set(message.linkIndex, message.payload)
+    }
   }
-  return { diagnostics: merged, statuses }
+  return { diagnostics: merged, statuses, payloads }
 }
 
 /**

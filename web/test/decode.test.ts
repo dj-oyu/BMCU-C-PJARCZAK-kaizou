@@ -142,6 +142,12 @@ describe('mock telemetry', () => {
   })
 
   it('falls back to every configured link when nothing has reported', () => {
-    expect(activeLinks({ diagnostics: new Map(), statuses: new Map() })).toEqual([0, 1])
+    expect(
+      activeLinks({
+        diagnostics: new Map(),
+        statuses: new Map(),
+        payloads: new Map(),
+      }),
+    ).toEqual([0, 1])
   })
 })
