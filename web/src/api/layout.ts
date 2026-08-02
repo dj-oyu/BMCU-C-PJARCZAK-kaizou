@@ -82,6 +82,76 @@ export const Tlv = {
   HeaderSize: 4,
 } as const
 
+/** EVENT payload, BMCUMonitor._decode_event. Little-endian. */
+export const EventPayload = {
+  HwTickOffset: 0,
+  RecordTypeOffset: 4,
+  SeverityOffset: 5,
+  SourceOffset: 6,
+  PayloadLengthOffset: 7,
+  DetailOffset: 8,
+  DetailSize: 8,
+  Size: 16,
+} as const
+
+/** /api/snapshot.bin record header, pico/binary_api.py _snapshot_record. */
+export const SnapshotRecord = {
+  Magic: 0x42534e50, // "BSNP"
+  Version: 1,
+  HeaderSize: 16,
+  VersionOffset: 4,
+  LinkIndexOffset: 5,
+  RecordTypeOffset: 6,
+  RecordIndexOffset: 7,
+  HwTickOffset: 8,
+  PayloadLengthOffset: 14,
+} as const
+
+/**
+ * FULL_STATUS record types, from the constants in pico/bmcu_link.py. 240 and
+ * 241 are synthetic and added by the device's snapshot endpoint.
+ */
+export const SnapshotKind = {
+  Channel: 2,
+  PrinterAuth: 5,
+  PrinterRxCore: 6,
+  PrinterRxLoss: 7,
+  PrinterRxDma: 8,
+  PrinterTxCore: 9,
+  PrinterTxFault: 10,
+  AmsService: 11,
+  AmsRegistration: 12,
+  Link: 0xf0,
+  Event: 0xf1,
+} as const
+
+/** Synthetic link record, pico/binary_api.py _link_record. Big-endian. */
+export const LinkRecord = {
+  StateOffset: 0,
+  ChannelsPresentOffset: 1,
+  BootSessionOffset: 4,
+  TickHzOffset: 8,
+  SequenceGapOffset: 12,
+} as const
+
+/** Channel record body, BMCUMonitor._handle_snapshot record_type 2. */
+export const ChannelRecord = {
+  ChannelOffset: 0,
+  AmsMotionOffset: 1,
+  InsertedOffset: 2,
+  OnlineOffset: 3,
+  PullPercentOffset: 4,
+  SensorValidityOffset: 5,
+  FlagsOffset: 6,
+  RawAngleOffset: 8,
+  PositionDeltaOffset: 10,
+  MotorPwmOffset: 12,
+  MotionFaultOffset: 14,
+  ControllerMotionOffset: 15,
+  SensorOnlineBit: 1 << 2,
+  SensorGoodBit: 1 << 3,
+} as const
+
 /** Channels per BMCU loader; the STATUS masks and arrays are all this wide. */
 export const SLOT_COUNT = 4
 

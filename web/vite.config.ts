@@ -53,6 +53,7 @@ function mockPico(): Plugin {
         try {
           if (url === '/api/current.bin') return send(binary('current.bin'))
           if (url === '/api/diagnostics.bin') return send(binary('diagnostics.bin'))
+          if (url === '/api/snapshot.bin') return send(binary('snapshot.bin'))
           if (url === '/api/logs.bin') {
             const after = new URLSearchParams(query).get('after') ?? '0'
             return send(logsAfter(binary('logs.bin'), BigInt(after)))

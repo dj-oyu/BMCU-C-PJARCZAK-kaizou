@@ -68,7 +68,17 @@ async function post(
   })
 }
 
+/** Raw bytes rather than BMB1 messages: snapshot.bin is its own local format. */
+async function fetchBytes(path: string): Promise<ArrayBuffer> {
+  return serialize(async () => {
+    const response = await fetch(path, { cache: 'no-store' })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    return response.arrayBuffer()
+  })
+}
+
 export const api = {
+  snapshot: () => fetchBytes('/api/snapshot.bin'),
   current: () => fetchBinary('/api/current.bin'),
   diagnostics: () => fetchBinary('/api/diagnostics.bin'),
   logs: (after: bigint, limit: number) =>

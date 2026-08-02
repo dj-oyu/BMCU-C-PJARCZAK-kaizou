@@ -5,6 +5,7 @@ goes through the real ``pico/`` codec so a mock response can never drift from
 what the hardware actually serves.
 """
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import bmcu_binary as binary  # noqa: E402
 import bmcu_binary_constants as C  # noqa: E402
 import bmcu_link as link  # noqa: E402
 import device_metrics  # noqa: E402
+from binary_api import BinaryAPI  # noqa: E402
 from device_metrics import DeviceMetrics  # noqa: E402
 
 OUTPUT = ROOT / "web" / "src" / "mock" / "fixtures"
@@ -117,6 +119,86 @@ def main():
     # newline="\n" above is not cosmetic: the device writes "%d\n" from
     # transport_settings.status_body, and a CRLF fixture made the mock report
     # "Not configured" for a configured endpoint.
+    # Snapshot: built through the real BinaryAPI so the mock cannot encode a
+    # record shape the device would never produce.
+    channel_records = []
+    for channel, (inserted, online, pull, angle, delta, pwm, fault) in enumerate((
+        (1, 1, 61, 2048, 12, 480, 0),
+        (1, 0, 50, 1310, 0, 0, 0),
+        (1, 1, 58, 3072, -6, -420, 0),
+        (1, 0, 50, 200, 0, 0, 3),
+    )):
+        body = bytearray(16)
+        body[0] = channel
+        body[1] = 2 if online else 0
+        body[2] = inserted
+        body[3] = online
+        body[4] = pull
+        body[5] = 1
+        struct.pack_into("<H", body, 6, 0x000C if fault == 0 else 0x0004)
+        struct.pack_into("<Hhh", body, 8, angle, delta, pwm)
+        body[14] = fault
+        body[15] = 0x80 | 3
+        channel_records.append({"record_type": 2, "hw_tick32": 900 + channel,
+                                "record_data": bytes(body)})
+
+    def counters(record_type, values):
+        body = bytearray(16)
+        for index, value in enumerate(values):
+            struct.pack_into("<I", body, index * 4, value)
+        return {"record_type": record_type, "hw_tick32": 950,
+                "record_data": bytes(body)}
+
+    snapshot = channel_records + [
+        counters(6, (918273, 91820, 3, 1)),          # printer rx core
+        counters(7, (12, 0, 0, 0)),                  # printer rx loss
+        counters(8, (0, 4471, 96, 0)),               # printer rx dma
+        counters(9, (91820, 91818, 2, 0)),           # printer tx core
+        counters(10, (0, 0, 1, 4)),                  # printer tx fault
+        counters(11, (12, 480, 96, 3120)),           # ams service
+    ]
+    registration = bytearray(16)
+    struct.pack_into("<7H", registration, 0, 41, 39, 4, 7, 1, 3, 0)
+    registration[14] = 0x03
+    snapshot.append({"record_type": 12, "hw_tick32": 950,
+                     "record_data": bytes(registration)})
+    auth = bytearray(16)
+    struct.pack_into("<4H", auth, 0, 0x040D, 118, 117, 8)
+    struct.pack_into("<I", auth, 8, 88120)
+    auth[12:16] = bytes((0, 0, 12, 0x5A))
+    snapshot.append({"record_type": 5, "hw_tick32": 950,
+                     "record_data": bytes(auth)})
+
+    events = []
+    for hw_tick, record_type, severity, source, detail in (
+        (88010, 4, 1, 1, bytes((3, 0, 0, 0, 1, 0, 0, 0))),
+        (88120, 9, 2, 2, bytes((0x0D, 0x04, 1, 0, 0, 8, 12, 0x5A))),
+        (88200, 4, 3, 1, bytes((1, 3, 0, 0, 3, 0, 0, 0))),
+    ):
+        raw = bytearray(16)
+        struct.pack_into("<I", raw, 0, hw_tick)
+        raw[4:8] = bytes((record_type, severity, source, len(detail)))
+        raw[8:16] = detail
+        events.append(link.BMCUMonitor._decode_event(bytes(raw)))
+
+    class SnapshotMonitor:
+        def __init__(self, index, state, parts, event_list):
+            self.link_index = index
+            self.link_state = state
+            self.snapshot = parts
+            self.events = event_list
+            self.channels = [object()] * 4 if parts else [None] * 4
+            self.bmcu_boot_session = 3
+            self.tick_hz = 144000000
+            self.sequence_gap_count = 0
+            self.capture = None
+
+    api = BinaryAPI(
+        [SnapshotMonitor(0, "online", snapshot, events),
+         SnapshotMonitor(1, "resyncing", [], [])],
+        None, None, lambda: b"")
+    (OUTPUT / "snapshot.bin").write_bytes(b"".join(api.snapshot_records()))
+
     (OUTPUT / "transport_status.txt").write_text(
         "configured=1\nhost=bambuddy.local\nport=8766\n", encoding="utf-8", newline="\n")
     (OUTPUT / "device_key_status.txt").write_text(
