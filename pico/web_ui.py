@@ -241,9 +241,11 @@ class WebUI:
         elif method != b"GET":
             self.response = self._http_response(
                 "405 Method Not Allowed", "text/plain", b"GET only\n")
-        elif path == b"/":
+        elif path.split(b"?", 1)[0] == b"/":
+            # The binary routes already strip the query string; the page did
+            # not, so any link carrying one answered 404 instead of the UI.
             self.response = self._static_response(INDEX_PATH)
-        elif path == b"/api/schema.json":
+        elif path.split(b"?", 1)[0] == b"/api/schema.json":
             # Self-description so a reader can decode every binary endpoint
             # without the device source. Generated at build time, so serving it
             # costs no heap and no CPU beyond the file stream.

@@ -109,6 +109,25 @@ class WebUIRuntimeTests(unittest.TestCase):
         self.assertGreater(len(sizes), 1)
         self.assertLessEqual(max(sizes), web_ui.FILE_CHUNK_BYTES)
 
+    def test_a_query_string_still_reaches_the_page_and_the_schema(self):
+        # The binary routes always stripped it; these two matched exactly, so a
+        # link carrying any query answered 404 instead of the UI.
+        staged = b"\x1f\x8bpage"
+        for target, request in (
+            (web_ui.INDEX_PATH, b"GET /?probe=1 HTTP/1.1\r\nHost: pico\r\n\r\n"),
+            (web_ui.SCHEMA_PATH,
+             b"GET /api/schema.json?v=2 HTTP/1.1\r\nHost: pico\r\n\r\n"),
+        ):
+            with staged_index(None) as root:
+                path = pathlib.Path(root) / target
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(staged)
+                web = web_ui.WebUI(lambda _: None)
+                web.client = Client(request)
+                sent = drain(web)
+            self.assertIn(b"200 OK", sent, target)
+            self.assertTrue(sent.endswith(staged), target)
+
     def test_missing_web_asset_answers_with_an_actionable_error(self):
         with staged_index(None):
             web = web_ui.WebUI(lambda _: None)
