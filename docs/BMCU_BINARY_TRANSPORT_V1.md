@@ -295,6 +295,36 @@ The Pico rejects an expired, replayed, unauthenticated, unknown, or unsafe
 command and returns a `CONTROL_RESULT`. No motor, slot, or filament movement
 command is introduced by this transport specification.
 
+#### 7.3.1 What CONTROL authentication does and does not establish
+
+CONTROL is authenticated with a session key derived from the pre-shared device
+key, so reaching the transport is not sufficient to issue one: a party that does
+not hold the device key cannot produce an accepted CONTROL.
+
+A separate, `device:reset`-scoped control key, distinct from the telemetry
+credential, has been considered and is **deliberately not specified**. It would
+be defence in depth against compromise of the telemetry path, and it buys
+nothing while the Pico's own local HTTP interface is unauthenticated: that
+interface accepts a device-key rotation from anyone who can reach it, so
+whatever can reach the Pico can already obtain the ability to issue CONTROL.
+Separating the keys is only worth doing together with authenticating that
+interface.
+
+The intended deployment therefore places the trust boundary at the network:
+Bambuddy on a private host, no external exposure, remote access through a
+private overlay network only. Under that boundary the device key authenticates
+the *link*, not the *operator*.
+
+What actually prevents harm is not the credential but the safety gate, and that
+gate is not on this side. The Pico refuses a soft reset unless the link is
+online with a complete snapshot, all four channels have reported, and every
+channel is idle; the BMCU re-checks independently and is the final authority.
+An accepted-but-unwanted CONTROL can therefore reset an idle loader and nothing
+more.
+
+Revisit this if the Pico's local interface gains authentication, or if the
+transport is ever exposed beyond a private network.
+
 `CONTROL_RESULT` payload:
 
 ```text
