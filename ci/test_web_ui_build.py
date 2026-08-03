@@ -6,6 +6,7 @@ the build. These checks run in the ordinary Python suite so a developer without
 Node still finds out.
 """
 import gzip
+import hashlib
 import json
 import re
 import subprocess
@@ -16,7 +17,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STAGED = ROOT / "pico" / "www" / "index.html.gz"
 SCHEMA = ROOT / "pico" / "www" / "schema.json"
+LAYOUT = ROOT / "docs" / "bmcu_wire_layout.json"
 GENERATED = ROOT / "web" / "src" / "api" / "generated.ts"
+
+# A consumer fetches /api/schema.json once and caches it by revision, so the
+# revision is the only thing telling it to refetch. Nothing else enforces the
+# bump, and an unenforced version field rots. The pair below fingerprints the
+# parts of the layout the policy covers -- structures and local_enums, not
+# prose or the endpoint list. Changing either makes this test fail, and the
+# only correct fix is to bump revision in docs/bmcu_wire_layout.json and
+# record the new revision and digest here together.
+LAYOUT_REVISION = 2
+LAYOUT_DIGEST = \
+    "0717d620e380a29b77d22b0282a2d861aa25a20c4a955fe505d301f6926df263"
 
 # littlefs on the Pico 2 W also holds the journal (8 x 64 KB) and the modules.
 # A page beyond this is a signal that a dependency was pulled in by accident.
@@ -84,7 +97,21 @@ class WebUIBuildTests(unittest.TestCase):
         source = (ROOT / "pico" / "binary_api.py").read_text(encoding="utf-8")
         served = set(re.findall(r'"(/api/[a-z/]+\.bin)"', source))
         self.assertTrue(served, "no endpoints found in binary_api.py")
-        self.assertEqual(served - described - {"/api/history/status.bin"}, set())
+        self.assertEqual(served - described, set())
+
+    def test_layout_revision_moves_when_the_layout_does(self):
+        layout = json.loads(LAYOUT.read_bytes())
+        covered = json.dumps(
+            {"structures": layout["structures"],
+             "local_enums": layout.get("local_enums", {})},
+            sort_keys=True, ensure_ascii=False).encode("utf-8")
+        digest = hashlib.sha256(covered).hexdigest()
+        self.assertEqual(
+            (layout["revision"], digest), (LAYOUT_REVISION, LAYOUT_DIGEST),
+            "docs/bmcu_wire_layout.json structures or enums changed: bump its "
+            "revision and update LAYOUT_REVISION and LAYOUT_DIGEST above")
+        self.assertEqual(json.loads(SCHEMA.read_bytes())["revision"],
+                         layout["revision"])
 
     def test_api_schema_resolves_the_offsets_a_reader_needs(self):
         schema = json.loads(SCHEMA.read_bytes())

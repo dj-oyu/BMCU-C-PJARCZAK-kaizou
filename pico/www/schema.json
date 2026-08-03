@@ -61,6 +61,25 @@
     "capture_record"
    ],
    "path": "/api/capture.bin"
+  },
+  {
+   "answers": "What is each loader doing right now? Live alias of /api/current.bin, same handler and same retained set.",
+   "body": "concatenated bmb1_envelope messages, message_type BMCU_FRAME, one per link, each carrying a kind 2 STATUS frame",
+   "cadence": "changes many times a second; prefer /api/current.bin in new callers",
+   "decode": [
+    "bmb1_envelope",
+    "bmcu_frame_prefix",
+    "link_wire",
+    "status_payload"
+   ],
+   "path": "/api/history/status.bin"
+  },
+  {
+   "answers": "How is every other endpoint decoded? This document; fetch it first.",
+   "body": "uncompressed application/json, unlike every other asset, which is gzipped",
+   "cadence": "static per firmware build; refetch when revision changes",
+   "decode": [],
+   "path": "/api/schema.json"
   }
  ],
  "enums": {
@@ -563,6 +582,12 @@
      "enum": "full_status_record_type",
      "name": "record_type",
      "offset": 4,
+     "type": "u8"
+    },
+    {
+     "name": "record_flags",
+     "note": "reserved; the BMCU emits zero",
+     "offset": 5,
      "type": "u8"
     },
     {

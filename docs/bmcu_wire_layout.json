@@ -2,6 +2,7 @@
   "layout": "bmcu-wire-layout",
   "revision": 3,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
+  "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
     "bmb1_envelope": {
       "description": "BMB1 message header, pico/bmcu_binary.py write_header, format >4sBBHIQQB3s",
@@ -90,6 +91,7 @@
         {"name": "record_index", "offset": 2, "type": "u8"},
         {"name": "record_count", "offset": 3, "type": "u8"},
         {"name": "record_type", "offset": 4, "type": "u8", "enum": "full_status_record_type"},
+        {"name": "record_flags", "offset": 5, "type": "u8", "note": "reserved; the BMCU emits zero"},
         {"name": "hw_tick32", "offset": 6, "type": "u32"},
         {"name": "record_data", "offset": 10, "type": "bytes", "size": 16, "note": "for record_type 2 (channel) the u16 at record_data offset 6 carries bits 0-4 of per-record flags and bits 8-12 as the status_payload channel_flags byte shifted left by 8, same bit order"}
       ]
@@ -211,6 +213,20 @@
       "cadence": "bounded ring, newest few per link",
       "body": "concatenated capture_record",
       "decode": ["capture_record"]
+    },
+    {
+      "path": "/api/history/status.bin",
+      "answers": "What is each loader doing right now? Live alias of /api/current.bin, same handler and same retained set.",
+      "cadence": "changes many times a second; prefer /api/current.bin in new callers",
+      "body": "concatenated bmb1_envelope messages, message_type BMCU_FRAME, one per link, each carrying a kind 2 STATUS frame",
+      "decode": ["bmb1_envelope", "bmcu_frame_prefix", "link_wire", "status_payload"]
+    },
+    {
+      "path": "/api/schema.json",
+      "answers": "How is every other endpoint decoded? This document; fetch it first.",
+      "cadence": "static per firmware build; refetch when revision changes",
+      "body": "uncompressed application/json, unlike every other asset, which is gzipped",
+      "decode": []
     }
   ],
   "reading_notes": [
