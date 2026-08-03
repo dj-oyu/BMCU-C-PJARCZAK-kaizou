@@ -274,6 +274,31 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual((event["frame_type"], event["request_length"], event["payload_hash"]),
                          (0x040d, 17, 0x5a))
 
+    def test_printer_transaction_event_carries_the_resolved_class(self):
+        # command is a raw wire byte and cannot identify the frame. Without
+        # rx_class an unanswered transaction says only that something went
+        # unanswered, which is where an A1 on printer firmware 1.08 stalled:
+        # the class lived solely in the snapshot's one-slot last_rx_class.
+        data = bytes((0x04, 1, 5, 14, 13, 0, 2))
+        payload = (91).to_bytes(4, "little") + bytes((
+            link.RECORD_PRINTER_TRANSACTION, 3, 1, 7)) + data + b"\x00"
+        event = self.monitor._decode_event(payload)
+        self.assertEqual(event["event_name"], "printer_transaction")
+        self.assertEqual(
+            (event["command"], event["outcome"], event["reason"],
+             event["response_length"], event["rx_class"]),
+            (0x04, 5, 14, 0, 2))
+
+    def test_printer_transaction_without_rx_class_is_not_misread(self):
+        # A six-byte payload is the pre-rx_class encoding. Decoding it as if it
+        # carried a class would attribute a transaction to whatever byte
+        # followed, so the decoder must decline instead.
+        payload = (91).to_bytes(4, "little") + bytes((
+            link.RECORD_PRINTER_TRANSACTION, 3, 1, 6)) + bytes((0x04, 1, 5, 14, 13, 0)) + b"\x00\x00"
+        event = self.monitor._decode_event(payload)
+        self.assertNotEqual(event["event_name"], "printer_transaction")
+        self.assertNotIn("rx_class", event)
+
     def test_printer_auth_is_installed_with_complete_snapshot(self):
         self.hello()
         trace = ((0x040e).to_bytes(2, "little") + (2).to_bytes(2, "little") +

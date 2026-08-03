@@ -285,6 +285,7 @@ export const BmcuFullStatusRecordType = {
   PrinterTxFault: 10,
   AmsService: 11,
   AmsRegistration: 12,
+  Probe: 13,
 } as const
 export type BmcuFullStatusRecordType = (typeof BmcuFullStatusRecordType)[keyof typeof BmcuFullStatusRecordType]
 

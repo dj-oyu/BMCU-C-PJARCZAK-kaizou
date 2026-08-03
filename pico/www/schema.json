@@ -197,6 +197,7 @@
    "10": "printer_tx_fault",
    "11": "ams_service",
    "12": "ams_registration",
+   "13": "probe",
    "2": "channel",
    "3": "printer_bus",
    "4": "counters",
@@ -384,7 +385,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 3,
+ "revision": 4,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -739,6 +740,82 @@
     }
    ],
    "header_size": 22
+  },
+  "printer_transaction_payload": {
+   "description": "event_payload payload when record_type is 3 (printer_transaction). Emitted only for rejected or failed transactions, with a 5 s per-key repeat suppression window.",
+   "endianness": "little",
+   "fields": [
+    {
+     "name": "command",
+     "note": "raw wire byte, buf[4] for short frames and buf[11] for long ones. Does NOT identify the frame -- use rx_class",
+     "offset": 0,
+     "type": "u8"
+    },
+    {
+     "enum": "command_owner",
+     "name": "owner",
+     "offset": 1,
+     "type": "u8"
+    },
+    {
+     "enum": "outcome",
+     "name": "outcome",
+     "offset": 2,
+     "type": "u8"
+    },
+    {
+     "enum": "reason",
+     "name": "reason",
+     "offset": 3,
+     "type": "u8"
+    },
+    {
+     "name": "request_length",
+     "note": "saturating at 255",
+     "offset": 4,
+     "type": "u8"
+    },
+    {
+     "name": "response_length",
+     "note": "0 with outcome failed and reason no_response means the frame was ours, a reply was expected, and none was produced",
+     "offset": 5,
+     "type": "u8"
+    },
+    {
+     "name": "rx_class",
+     "note": "the bambubus_package_type the parser resolved: 1 filament_motion_short, 2 filament_motion_long, 3 online_detect, 4 REQx6, 5 NFC_detect, 6 set_filament_info, 7 MC_online, 8 read_filament_info, 9 set_filament_info_type2, 10 version, 11 serial_number, 12 heartbeat, 13 ETC. 0 means the frame resolved to nothing, which includes long frames addressed to another AMS",
+     "offset": 6,
+     "type": "u8"
+    }
+   ],
+   "size": 7
+  },
+  "probe_record_data": {
+   "description": "record_data of full_status_record when record_type is 13 (probe). Makes a snapshot self-describing: tick_hz is otherwise only in HELLO, which is sent once at BMCU init, so a bridge that attached or resynced later cannot convert any hw_tick32 to seconds.",
+   "endianness": "little",
+   "fields": [
+    {
+     "name": "tick_hz",
+     "note": "hardware tick rate; hw_tick32 wraps every 2^32/tick_hz seconds, about 239 s at 18 MHz",
+     "offset": 0,
+     "type": "u32"
+    },
+    {
+     "count": 3,
+     "name": "unsupported_type",
+     "note": "long-frame types the parser resolved to nothing, first-seen-wins; 0 means the slot is unused",
+     "offset": 4,
+     "type": "u16"
+    },
+    {
+     "count": 3,
+     "name": "unsupported_count",
+     "note": "occurrences of the type at the same index, saturating at 65535",
+     "offset": 10,
+     "type": "u16"
+    }
+   ],
+   "size": 16
   },
   "snapshot_record": {
    "description": "/api/snapshot.bin record. Local diagnostic format, never sent to Bambuddy.",

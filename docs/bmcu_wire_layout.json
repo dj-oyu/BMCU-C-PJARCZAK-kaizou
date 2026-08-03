@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 3,
+  "revision": 4,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -82,6 +82,20 @@
         {"name": "payload", "offset": 8, "type": "bytes", "size": 8, "note": "union, interpreted by record_type"}
       ]
     },
+    "printer_transaction_payload": {
+      "description": "event_payload payload when record_type is 3 (printer_transaction). Emitted only for rejected or failed transactions, with a 5 s per-key repeat suppression window.",
+      "endianness": "little",
+      "size": 7,
+      "fields": [
+        {"name": "command", "offset": 0, "type": "u8", "note": "raw wire byte, buf[4] for short frames and buf[11] for long ones. Does NOT identify the frame -- use rx_class"},
+        {"name": "owner", "offset": 1, "type": "u8", "enum": "command_owner"},
+        {"name": "outcome", "offset": 2, "type": "u8", "enum": "outcome"},
+        {"name": "reason", "offset": 3, "type": "u8", "enum": "reason"},
+        {"name": "request_length", "offset": 4, "type": "u8", "note": "saturating at 255"},
+        {"name": "response_length", "offset": 5, "type": "u8", "note": "0 with outcome failed and reason no_response means the frame was ours, a reply was expected, and none was produced"},
+        {"name": "rx_class", "offset": 6, "type": "u8", "note": "the bambubus_package_type the parser resolved: 1 filament_motion_short, 2 filament_motion_long, 3 online_detect, 4 REQx6, 5 NFC_detect, 6 set_filament_info, 7 MC_online, 8 read_filament_info, 9 set_filament_info_type2, 10 version, 11 serial_number, 12 heartbeat, 13 ETC. 0 means the frame resolved to nothing, which includes long frames addressed to another AMS"}
+      ]
+    },
     "full_status_record": {
       "description": "kind 115 FULL_STATUS_RECORD, BMCUMonitor._handle_snapshot",
       "endianness": "little",
@@ -94,6 +108,16 @@
         {"name": "record_flags", "offset": 5, "type": "u8", "note": "reserved; the BMCU emits zero"},
         {"name": "hw_tick32", "offset": 6, "type": "u32"},
         {"name": "record_data", "offset": 10, "type": "bytes", "size": 16, "note": "for record_type 2 (channel) the u16 at record_data offset 6 carries bits 0-4 of per-record flags and bits 8-12 as the status_payload channel_flags byte shifted left by 8, same bit order"}
+      ]
+    },
+    "probe_record_data": {
+      "description": "record_data of full_status_record when record_type is 13 (probe). Makes a snapshot self-describing: tick_hz is otherwise only in HELLO, which is sent once at BMCU init, so a bridge that attached or resynced later cannot convert any hw_tick32 to seconds.",
+      "endianness": "little",
+      "size": 16,
+      "fields": [
+        {"name": "tick_hz", "offset": 0, "type": "u32", "note": "hardware tick rate; hw_tick32 wraps every 2^32/tick_hz seconds, about 239 s at 18 MHz"},
+        {"name": "unsupported_type", "offset": 4, "type": "u16", "count": 3, "note": "long-frame types the parser resolved to nothing, first-seen-wins; 0 means the slot is unused"},
+        {"name": "unsupported_count", "offset": 10, "type": "u16", "count": 3, "note": "occurrences of the type at the same index, saturating at 65535"}
       ]
     },
     "log_payload": {

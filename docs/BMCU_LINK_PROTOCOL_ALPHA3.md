@@ -262,6 +262,36 @@ Full-status record types:
 | 10 | `PRINTER_TX_FAULT` | zero or one |
 | 11 | `AMS_SERVICE` | zero or one |
 | 12 | `AMS_REGISTRATION` | zero or one |
+| 13 | `PROBE` | zero or one |
+
+#### PROBE record_data — 16 bytes
+
+| Offset | Type | Field |
+| ---: | --- | --- |
+| 0 | u32 | `tick_hz` |
+| 4 | u16[3] | `unsupported_type` |
+| 10 | u16[3] | `unsupported_count` |
+
+Emitted with the `GLOBAL` section. It exists so a snapshot can be interpreted
+without having witnessed the link come up.
+
+`tick_hz` is otherwise carried only by `HELLO`, which is sent once, at
+`bmcu_link_init`. A bridge that attaches — or resyncs — after the BMCU booted
+never sees it, and then cannot convert any `hw_tick32` in any record to
+seconds. Note also that `hw_tick32` wraps every `2^32 / tick_hz` seconds, about
+239 s at the 18 MHz this firmware runs, so correlation across a longer window
+needs a wrap count the reader maintains itself.
+
+`unsupported_type` lists long-frame types the parser resolved to nothing, with
+the matching occurrence count at the same index. Entries are first-seen-wins and
+counts saturate at 65535; a type arriving when all three slots are taken is
+counted nowhere, so a full table under-reports rather than evicting. Zero in a
+type slot means the slot is unused.
+
+The table exists because a printer asking repeatedly for something this firmware
+does not implement is a first-class diagnostic fact, and it was previously
+invisible: `PRINTER_AUTH.last_type` holds one type, overwritten by the next long
+frame, and until this revision an `IGNORED` outcome emitted no event at all.
 
 #### GLOBAL record_data — 16 bytes
 
@@ -499,7 +529,28 @@ correlation reaches TX completion.
 
 `PRINTER_LONG_TRANSACTION (9)` preserves the complete long-frame `type:u16` and then carries
 `owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, payload_hash:u8`.
-The existing `PRINTER_TRANSACTION (3)` layout is unchanged for alpha.3 compatibility.
+
+`PRINTER_TRANSACTION (3)` carries
+`command:u8, owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, rx_class:u8`.
+
+`rx_class` is the `bambubus_package_type` the parser resolved, and it is the
+field that says *what* the transaction was. `command` is a raw wire byte —
+`buf[4]` for short frames, `buf[11]` for long ones — and does not identify the
+frame; two package types can share it. `rx_class` of 0 means the frame resolved
+to nothing at all, which on a bus carrying two AMS units routinely includes
+long frames addressed to the other one.
+
+The record is emitted only for rejected or failed transactions, and repeats are
+suppressed for 5 s per `(command, outcome, reason, rx_class)` key. `rx_class` is
+part of that key deliberately: without it, one repeating class would mask a
+different class sharing its command byte.
+
+`response_length` of 0 with `outcome=FAILED` and `reason=NO_RESPONSE` is the
+combination worth alerting on. It means the frame was addressed to this AMS, the
+parser recognised it, a reply was expected, and none was produced.
+
+`rx_class` was added after alpha.3 shipped; a `payload_length` of 6 is the
+earlier encoding and a decoder must not read a seventh byte from it.
 
 `RESET_STATE (10)` carries
 `operation_id:u32, state:u8, request_reason:u8, cancel_reason:u8, reserved:u8`.

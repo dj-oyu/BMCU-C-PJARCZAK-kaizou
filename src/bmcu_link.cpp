@@ -77,7 +77,20 @@ struct PrinterTransactionEventCache
     uint8_t command;
     uint8_t outcome;
     uint8_t reason;
+    uint8_t rx_class;
     uint8_t valid;
+};
+
+// First-seen-wins table of long-frame types the parser resolved to nothing.
+// Three slots: enough to show that a printer is asking for several things this
+// firmware does not implement, small enough to fit one snapshot record beside
+// tick_hz. Overflow is counted rather than evicting, so a full table still says
+// how much it is not showing.
+struct UnsupportedLongCache
+{
+    uint16_t type[3];
+    uint16_t count[3];
+    uint16_t overflow;
 };
 
 struct PrinterAuthCache
@@ -141,6 +154,7 @@ PrinterBusCache g_printer_bus = {};
 PrinterTransactionEventCache g_printer_transaction_event = {};
 uint32_t g_printer_transaction_event_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
+UnsupportedLongCache g_unsupported_long = {};
 bmcu_ams_service::Watch g_ams_service = {};
 uint8_t g_status_cache_valid = 0u;
 LogRecord g_events[kEventSlots];
@@ -555,6 +569,22 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
             put16(&record.data[12], static_cast<uint16_t>(telemetry.motor_pwm));
             record.data[14] = telemetry.motion_fault;
             record.data[15] = static_cast<uint8_t>(0x80u | telemetry.controller_motion);
+        }
+    }
+
+    if (section_mask & FULL_SECTION_GLOBAL)
+    {
+        // tick_hz is otherwise only in HELLO, which is sent once at init. A
+        // bridge that attaches or resyncs after the BMCU booted never sees it
+        // and cannot convert a single hw_tick32 to seconds -- which is how an
+        // investigation ended up unable to date any of its own evidence.
+        // Carrying it here makes a snapshot self-describing.
+        FullStatusRecord& probe = append_full_record(FULL_RECORD_PROBE);
+        put32(&probe.data[0], time_hw_tpus * 1000000u);
+        for (uint8_t i = 0u; i < 3u; ++i)
+        {
+            put16(&probe.data[4u + i * 2u], g_unsupported_long.type[i]);
+            put16(&probe.data[10u + i * 2u], g_unsupported_long.count[i]);
         }
     }
 
@@ -1290,10 +1320,14 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 
     if (rejected)
     {
+        // rx_class is part of the key: two package types can share a command
+        // byte, and collapsing them would hide the one that matters behind the
+        // one that happens to repeat first.
         const bool same_event = g_printer_transaction_event.valid != 0u &&
             g_printer_transaction_event.command == command &&
             g_printer_transaction_event.outcome == outcome &&
-            g_printer_transaction_event.reason == reason;
+            g_printer_transaction_event.reason == reason &&
+            g_printer_transaction_event.rx_class == rx_class;
         const uint32_t repeat_interval = time_hw_tpms * 5000u;
         if (same_event && repeat_interval != 0u &&
             static_cast<uint32_t>(tick - g_printer_transaction_event.last_emit_tick) < repeat_interval)
@@ -1306,6 +1340,7 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
         g_printer_transaction_event.command = command;
         g_printer_transaction_event.outcome = outcome;
         g_printer_transaction_event.reason = reason;
+        g_printer_transaction_event.rx_class = rx_class;
         g_printer_transaction_event.valid = 1u;
 
         LogRecord record = {};
@@ -1322,8 +1357,28 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
             ? 0xFFu : static_cast<uint8_t>(request_length);
         record.payload.printer_transaction.response_length = response_length > 0xFFu
             ? 0xFFu : static_cast<uint8_t>(response_length);
+        record.payload.printer_transaction.rx_class = rx_class;
         push_log_record(record);
     }
+}
+
+static __attribute__((noinline, cold)) void note_unsupported_long(uint16_t type)
+{
+    for (uint8_t i = 0u; i < 3u; ++i)
+    {
+        if (g_unsupported_long.count[i] == 0u)
+        {
+            g_unsupported_long.type[i] = type;
+            g_unsupported_long.count[i] = 1u;
+            return;
+        }
+        if (g_unsupported_long.type[i] == type)
+        {
+            if (g_unsupported_long.count[i] != 0xFFFFu) ++g_unsupported_long.count[i];
+            return;
+        }
+    }
+    if (g_unsupported_long.overflow != 0xFFFFu) ++g_unsupported_long.overflow;
 }
 
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
@@ -1344,7 +1399,17 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
     else if (type == 0x040Eu && g_printer_auth.count_040e != 0xFFFFu)
         ++g_printer_auth.count_040e;
 
-    const bool notable = type == 0x040Du || type == 0x040Eu ||
+    // An unsupported long frame is the printer asking for something this
+    // firmware has never implemented, which is exactly what a reader wants to
+    // see and exactly what this filter used to hide: 0x0411 arrives repeatedly
+    // on printer firmware 1.08, resolves to IGNORED/UNSUPPORTED, and so was
+    // neither counted nor emitted. Only the one-slot last_type field carried
+    // it, and only until the next long frame overwrote it.
+    const bool unsupported = outcome == OUTCOME_IGNORED &&
+                             reason == REASON_UNSUPPORTED;
+    if (unsupported) note_unsupported_long(type);
+
+    const bool notable = type == 0x040Du || type == 0x040Eu || unsupported ||
                          outcome == OUTCOME_REJECTED || outcome == OUTCOME_FAILED;
     if (!notable) return;
 

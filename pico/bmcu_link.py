@@ -39,6 +39,8 @@ FULL_RECORD_PRINTER_TX_CORE = 9
 FULL_RECORD_PRINTER_TX_FAULT = 10
 FULL_RECORD_AMS_SERVICE = 11
 FULL_RECORD_AMS_REGISTRATION = 12
+FULL_RECORD_PROBE = 13
+RECORD_PRINTER_TRANSACTION = 3
 RECORD_PRINTER_LONG_TRANSACTION = 9
 RECORD_RESET_STATE = 10
 
@@ -664,6 +666,17 @@ class BMCUMonitor:
                           "outcome": payload[3], "reason": payload[4],
                           "request_length": payload[5], "response_length": payload[6],
                           "payload_hash": payload[7]})
+        elif (event["record_type"] == RECORD_PRINTER_TRANSACTION and
+              event["payload_length"] >= 7):
+            # rx_class is the bambubus_package_type the parser resolved.
+            # command is a raw wire byte and does not identify the frame, so
+            # without rx_class an unanswered transaction cannot be attributed.
+            event.update({"event_name": "printer_transaction",
+                          "command": payload[0], "owner": payload[1],
+                          "outcome": payload[2], "reason": payload[3],
+                          "request_length": payload[4],
+                          "response_length": payload[5],
+                          "rx_class": payload[6]})
         else:
             event["event_name"] = "record_%d" % event["record_type"]
         return event

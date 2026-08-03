@@ -48,7 +48,8 @@
       "9": "printer_tx_core",
       "10": "printer_tx_fault",
       "11": "ams_service",
-      "12": "ams_registration"
+      "12": "ams_registration",
+      "13": "probe"
     },
     "ack_result": {
       "0": "ok",

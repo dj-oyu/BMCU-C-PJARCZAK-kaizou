@@ -43,6 +43,7 @@ enum FullStatusRecordType : uint8_t
     FULL_RECORD_PRINTER_RX_LOSS = 7u, FULL_RECORD_PRINTER_RX_DMA = 8u,
     FULL_RECORD_PRINTER_TX_CORE = 9u, FULL_RECORD_PRINTER_TX_FAULT = 10u,
     FULL_RECORD_AMS_SERVICE = 11u, FULL_RECORD_AMS_REGISTRATION = 12u,
+    FULL_RECORD_PROBE = 13u,
 };
 
 enum AckResult : uint8_t
@@ -161,6 +162,13 @@ struct LogPrinterTransactionPayload
     DecisionReason reason;
     uint8_t request_length;
     uint8_t response_length;
+    // The bambubus_package_type the parser resolved. Without it a reader sees
+    // that a transaction went unanswered and cannot tell what went unanswered:
+    // command is buf[4] or buf[11] off the wire, not the class. Diagnosing an
+    // A1 running printer firmware 1.08 stalled on exactly this -- the class was
+    // only in the snapshot's one-slot last_rx_class field, and the snapshot
+    // does not refresh while the bridge is busy.
+    uint8_t rx_class;
 };
 
 // Appended record type: preserves the alpha.3 PRINTER_TRANSACTION payload while
@@ -250,6 +258,11 @@ struct LogRecord
 
 static_assert(sizeof(LogRecordHeader) == 8u, "LogRecordHeader ABI changed");
 static_assert(sizeof(LogRecordPayload) == 8u, "LogRecordPayload ABI changed");
+// Seven of the union's eight bytes. The remaining byte is the only room left
+// for this record; anything further needs its own record type rather than
+// silently growing LogRecord, which is fixed at 16 bytes on the wire.
+static_assert(sizeof(LogPrinterTransactionPayload) == 7u,
+              "LogPrinterTransactionPayload ABI changed");
 static_assert(sizeof(LogPrinterLongTransactionPayload) == 8u,
               "LogPrinterLongTransactionPayload ABI changed");
 static_assert(sizeof(LogResetStatePayload) == 8u,
