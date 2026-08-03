@@ -91,6 +91,18 @@ describe('channel detail', () => {
     expect(channels[3]?.sensorGood).toBe(false)
   })
 
+  it('reads the shared flags byte out of the record without disturbing bits 0..4', () => {
+    // The channel-flags byte rides in bits 8..12 of the same u16 the record's
+    // own sensor bits use, so the fold has to be readable in both directions.
+    expect(channels[0]?.channelFlags).toEqual({
+      ks: 1, lowLatch: true, jamLatch: true, dmFailLatch: false, raw: 0x0d,
+    })
+    expect(channels[2]?.channelFlags.ks).toBe(2)
+    expect(channels[2]?.channelFlags.lowLatch).toBe(false)
+    expect(channels[0]?.sensorOnline).toBe(true)
+    expect(channels[0]?.sensorGood).toBe(true)
+  })
+
   it('reports the controller phase only when the BMCU flagged it valid', () => {
     expect(channels[0]?.controllerMotion).toBe(3)
   })
