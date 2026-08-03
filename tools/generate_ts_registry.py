@@ -134,8 +134,11 @@ def main():
         # newline="" keeps read and write symmetric: .gitattributes normalises
         # this file to LF, so a Windows checkout that translated on write would
         # report drift against an identical file.
-        current = arguments.output.read_text(encoding="utf-8", newline="") \
-            if arguments.output.exists() else ""
+        # Path.read_text gained newline= only in 3.13; open() has always had it.
+        current = ""
+        if arguments.output.exists():
+            with arguments.output.open(encoding="utf-8", newline="") as handle:
+                current = handle.read()
         if current != rendered:
             raise SystemExit(
                 "%s is stale; run tools/generate_ts_registry.py"
