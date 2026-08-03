@@ -51,7 +51,7 @@ enum Stage : uint8_t
 };
 
 // Invariant: tail is only ever set while owner < kChannels. Every mutator below
-// preserves it and decode() re-establishes it, so the nine legal states are the
+// preserves it and restore() re-establishes it, so the nine legal states are the
 // only ones this struct can hold. There is deliberately no bit pattern spare
 // for an illegal one: an owner index cannot name two channels at once, so
 // "two channels hold the merger" is unrepresentable rather than merely
@@ -140,9 +140,16 @@ inline bool release(State& s, uint8_t ch)
 // This is the transition that used to be a release. It is deliberately not a
 // release now, and deliberately has no timeout back to UNLOADED -- see the
 // commentary at the LOADED_LATCH_DROP_MS call site in Motion_control.cpp.
-inline bool to_tail(State& s, uint8_t ch)
+//
+// It names no channel, unlike every other edge here. There is only one value it
+// could ever be given -- the owner, which this state already holds -- so a
+// parameter would exist solely to be checked against what it was derived from,
+// and would be one more thing a caller could get wrong. Dropping it measured as
+// zero flash either way; it is here because the edge cannot address the wrong
+// channel if it cannot address a channel at all.
+inline bool to_tail(State& s)
 {
-    if (ch >= kChannels || s.owner != ch || s.tail) return false;
+    if (is_free(s) || s.tail) return false;
 
     s.tail = 1u;
     return true;

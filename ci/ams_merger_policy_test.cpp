@@ -33,7 +33,7 @@ static int test_transition_table(void)
     CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 16);
 
     // key-zero cannot invent an owner
-    CHECK(!ams_merger::to_tail(s, 2u), 17);
+    CHECK(!ams_merger::to_tail(s), 17);
     CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 18);
 
     // --- from LOADED(2) ---
@@ -49,14 +49,8 @@ static int test_transition_table(void)
     CHECK(is(s, ams_merger::stage_loaded, 2u), 24);
 
     // key-zero -> TAIL(2), NOT UNLOADED. This is the defect.
-    CHECK(ams_merger::to_tail(s, 2u), 25);
+    CHECK(ams_merger::to_tail(s), 25);
     CHECK(is(s, ams_merger::stage_tail, 2u), 26);
-
-    // key-zero named at a channel that does not own is ignored
-    ams_merger::reset(s);
-    ams_merger::acquire(s, 2u);
-    CHECK(!ams_merger::to_tail(s, 1u), 27);
-    CHECK(is(s, ams_merger::stage_loaded, 2u), 28);
 
     // release by the owner, and release addressed to nobody in particular
     ams_merger::reset(s);
@@ -78,10 +72,10 @@ static int test_transition_table(void)
     // --- from TAIL(2) ---
     ams_merger::reset(s);
     ams_merger::acquire(s, 2u);
-    ams_merger::to_tail(s, 2u);
+    ams_merger::to_tail(s);
 
     // a repeat key-zero is idle: TAIL is where key-zero is the normal reading
-    CHECK(!ams_merger::to_tail(s, 2u), 41);
+    CHECK(!ams_merger::to_tail(s), 41);
     CHECK(is(s, ams_merger::stage_tail, 2u), 42);
 
     // the owner reloading promotes back to LOADED
@@ -91,7 +85,7 @@ static int test_transition_table(void)
     // another channel still cannot take a merger held in TAIL
     ams_merger::reset(s);
     ams_merger::acquire(s, 2u);
-    ams_merger::to_tail(s, 2u);
+    ams_merger::to_tail(s);
     CHECK(!ams_merger::acquire(s, 3u), 45);
     CHECK(is(s, ams_merger::stage_tail, 2u), 46);
 
@@ -101,14 +95,14 @@ static int test_transition_table(void)
 
     ams_merger::reset(s);
     ams_merger::acquire(s, 2u);
-    ams_merger::to_tail(s, 2u);
+    ams_merger::to_tail(s);
     CHECK(ams_merger::release(s, kNoChannel), 49);
     CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 50);
 
     // a release addressed elsewhere does not free a TAIL either
     ams_merger::reset(s);
     ams_merger::acquire(s, 2u);
-    ams_merger::to_tail(s, 2u);
+    ams_merger::to_tail(s);
     CHECK(!ams_merger::release(s, 0u), 51);
     CHECK(is(s, ams_merger::stage_tail, 2u), 52);
 
@@ -123,7 +117,7 @@ static int test_ownership_survives_the_tail(void)
     State s;
     ams_merger::reset(s);
     ams_merger::acquire(s, 1u);
-    ams_merger::to_tail(s, 1u);
+    ams_merger::to_tail(s);
 
     // allow_stop
     CHECK(s.owner == 1u, 61);
@@ -137,7 +131,7 @@ static int test_ownership_survives_the_tail(void)
     return 0;
 }
 
-// Out-of-range inputs must never produce an owner, in either mutator.
+// Out-of-range inputs must never produce an owner.
 static int test_out_of_range_inputs(void)
 {
     State s;
@@ -146,12 +140,6 @@ static int test_out_of_range_inputs(void)
     CHECK(!ams_merger::acquire(s, 4u), 71);
     CHECK(!ams_merger::acquire(s, 0xFFu), 72);
     CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 73);
-
-    ams_merger::reset(s);
-    ams_merger::acquire(s, 0u);
-    CHECK(!ams_merger::to_tail(s, 4u), 74);
-    CHECK(!ams_merger::to_tail(s, 0xFFu), 75);
-    CHECK(is(s, ams_merger::stage_loaded, 0u), 76);
 
     return 0;
 }
@@ -207,7 +195,7 @@ static int test_runout_sequence(void)
     CHECK(ams_merger::owns(s, 0u), 102);
 
     // The spool runs out: the tail passes the online key first.
-    CHECK(ams_merger::to_tail(s, 0u), 103);
+    CHECK(ams_merger::to_tail(s), 103);
 
     // The printer's retract for channel 0 arrives afterwards. allow_stop must
     // still be true or before_pull_back is refused and nothing moves.
@@ -232,7 +220,7 @@ static int test_send_out_frees_a_held_tail(void)
     State s;
     ams_merger::reset(s);
     ams_merger::acquire(s, 3u);
-    ams_merger::to_tail(s, 3u);
+    ams_merger::to_tail(s);
 
     // send_out's release is addressed to nobody: ams_state_set_unloaded(0xFF).
     CHECK(ams_merger::release(s, kNoChannel), 111);

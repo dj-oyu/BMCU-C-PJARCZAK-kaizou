@@ -155,9 +155,9 @@ void ams_state_set_unloaded(uint8_t filament_ch)
 // debounce window, so the tail is past the switch. The merger is still occupied
 // and the printer's retract must still be accepted, which is exactly what not
 // releasing here buys.
-void ams_state_set_tail(uint8_t filament_ch)
+void ams_state_set_tail(void)
 {
-    if (ams_merger::to_tail(g_merger, filament_ch)) g_state_dirty = 1u;
+    if (ams_merger::to_tail(g_merger)) g_state_dirty = 1u;
 }
 
 uint8_t ams_state_get_loaded(void)

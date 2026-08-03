@@ -29,6 +29,8 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx);
 // ams_state_is_tail as well.
 void ams_state_set_loaded(uint8_t filament_ch);
 void ams_state_set_unloaded(uint8_t filament_ch);
-void ams_state_set_tail(uint8_t filament_ch);
+// LOADED -> TAIL. Takes no channel: the merger already knows its owner, and
+// that is the only channel this edge could ever apply to.
+void ams_state_set_tail(void);
 uint8_t ams_state_get_loaded(void);
 bool ams_state_is_tail(void);

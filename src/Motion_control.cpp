@@ -3140,7 +3140,7 @@ void Motion_control_run(int error)
                                    (MC_ONLINE_key_stu[owner_ch] == 0u),
                                now_ms, LOADED_LATCH_DROP_MS))
     {
-        ams_state_set_tail(owner_ch);
+        ams_state_set_tail();
         // Bit 6 of this channel's flags has just changed. Status delivery is
         // dirty-driven, and the next printer command is not guaranteed to be
         // soon -- on a runout the printer may pause and wait for a human. The
