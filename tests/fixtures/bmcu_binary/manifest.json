@@ -18,8 +18,8 @@
       "sha256": "8f39d74a72c0905bb4adde5a3706be77007acd25108347546aa4aa10d3787ffd"
     },
     "bmcu_status.bin": {
-      "bytes": 78,
-      "sha256": "598d5b0f44d9639d3038ef937ce26cf271588039f7adb3076bf9da3e0f7f6e8c"
+      "bytes": 82,
+      "sha256": "c6ef7e03df796c4b289ffdd6aa59ee85289015aabe2c574c7bc072877b00332b"
     },
     "bmcu_unknown.bin": {
       "bytes": 53,

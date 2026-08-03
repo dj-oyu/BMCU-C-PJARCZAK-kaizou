@@ -56,7 +56,7 @@ class PicoMonitorTests(unittest.TestCase):
         # larger chunk, discarding intact frames read in the same drain.
         decoder = link.FrameDecoder()
         wire = b"".join(
-            link.encode_frame(link.STATUS, index, bytes(range(27)))
+            link.encode_frame(link.STATUS, index, bytes(range(31)))
             for index in range(1, 21))
         self.assertGreater(len(wire), link.MAX_DECODER_BUFFER * 4)
 
@@ -70,7 +70,7 @@ class PicoMonitorTests(unittest.TestCase):
     def test_frames_split_across_chunk_boundaries_still_decode(self):
         decoder = link.FrameDecoder()
         wire = b"".join(
-            link.encode_frame(link.STATUS, index, bytes(range(27)))
+            link.encode_frame(link.STATUS, index, bytes(range(31)))
             for index in range(1, 13))
         frames = []
         for offset in range(0, len(wire), 7):
@@ -87,7 +87,7 @@ class PicoMonitorTests(unittest.TestCase):
 
     def test_frames_buried_in_noise_are_recovered(self):
         decoder = link.FrameDecoder()
-        good = link.encode_frame(link.STATUS, 5, bytes(range(27)))
+        good = link.encode_frame(link.STATUS, 5, bytes(range(31)))
         frames = decoder.feed(b"\x00" * 400 + good + b"\x11" * 400)
         self.assertEqual([f["sequence"] for f in frames], [5])
 
@@ -97,7 +97,7 @@ class PicoMonitorTests(unittest.TestCase):
         capture = link.RejectCapture()
         decoder = link.FrameDecoder(capture)
         decoder.clock_ms = 4242
-        wire = bytearray(link.encode_frame(link.STATUS, 7, bytes(range(27))))
+        wire = bytearray(link.encode_frame(link.STATUS, 7, bytes(range(31))))
         wire[9] ^= 0x01  # one flipped bit inside the payload
 
         decoder.feed(bytes(wire))
@@ -137,7 +137,7 @@ class PicoMonitorTests(unittest.TestCase):
     def test_a_clean_stream_captures_nothing(self):
         capture = link.RejectCapture()
         decoder = link.FrameDecoder(capture)
-        decoder.feed(link.encode_frame(link.STATUS, 1, bytes(range(27))))
+        decoder.feed(link.encode_frame(link.STATUS, 1, bytes(range(31))))
 
         self.assertEqual(capture.captured, 0)
         self.assertEqual(list(capture.records()), [])
@@ -154,18 +154,78 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.messages[0]["link_id"], "bmcu-b")
 
     def test_status_without_hello_requests_one_full_baseline(self):
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, 15, payload), 200)
         kinds = [link.FrameDecoder().feed(wire)[0]["kind"] for wire in self.uart.writes]
         self.assertEqual(kinds, [link.GET_FULL_STATUS])
         self.monitor._handle_frame(frame(link.STATUS, 16, payload), 210)
         self.assertEqual(len(self.uart.writes), 1)
 
+    def test_channel_flags_separate_the_three_latches_and_the_switch_reading(self):
+        # The point of the byte: one red LED used to stand for all three
+        # latches, and online collapsed a four-valued switch into one bit.
+        self.assertEqual(
+            link.decode_channel_flags(0x00),
+            {"ks": 0, "low_latch": False, "jam_latch": False,
+             "dm_fail_latch": False, "raw": 0x00})
+        # ks == 2 is the state online cannot distinguish: resting on the outer
+        # switch alone, which autoloads differently from settled on both.
+        self.assertEqual(link.decode_channel_flags(0x02)["ks"], 2)
+        # low without jam: the stop latch a soft reset clears.
+        low = link.decode_channel_flags(0x04)
+        self.assertTrue(low["low_latch"])
+        self.assertFalse(low["jam_latch"])
+        # jam rides with low today, and each bit still reads independently.
+        jam = link.decode_channel_flags(0x0d)
+        self.assertEqual((jam["ks"], jam["low_latch"], jam["jam_latch"]), (1, True, True))
+        # dm_fail: the one that needs the filament withdrawn.
+        self.assertTrue(link.decode_channel_flags(0x11)["dm_fail_latch"])
+        # Reserved bits are ignored, not folded into a neighbour.
+        self.assertEqual(link.decode_channel_flags(0xe0)["raw"], 0xe0)
+        self.assertEqual(link.decode_channel_flags(0xe0)["ks"], 0)
+
+    def test_status_carries_one_channel_flags_byte_per_channel(self):
+        payload = bytearray(link.STATUS_PAYLOAD_SIZE)
+        payload[27:31] = bytes((0x01, 0x06, 0x12, 0x00))
+        decoded = link.BMCUMonitor._decode_status(bytes(payload))
+        self.assertEqual([entry["ks"] for entry in decoded["channel_flags"]],
+                         [1, 2, 2, 0])
+        self.assertEqual([entry["low_latch"] for entry in decoded["channel_flags"]],
+                         [False, True, False, False])
+        self.assertEqual([entry["dm_fail_latch"] for entry in decoded["channel_flags"]],
+                         [False, False, True, False])
+
+    def test_a_status_of_the_previous_length_is_not_decoded(self):
+        # Alpha peers ship in lock-step and the transport contract does not ask
+        # for backward compatibility, so a short STATUS is reported rather than
+        # decoded as a truncated one.
+        self.monitor._handle_frame(frame(link.STATUS, 15, bytes(27)), 200)
+        self.assertIsNone(self.monitor.status)
+        self.assertEqual(self.messages[-1]["type"], "unknown_or_invalid")
+
+    def test_channel_record_repeats_the_flags_byte_in_its_high_bits(self):
+        record_data = bytearray(16)
+        record_data[0] = 2
+        # Bits 0-4 are the record's own flags; bits 8-12 are the shared byte.
+        record_data[6:8] = ((0x0c | (0x16 << 8)).to_bytes(2, "little"))
+        payload = ((1).to_bytes(2, "little") + bytes((0, 1, 2, 0)) +
+                   (10).to_bytes(4, "little") + bytes(record_data))
+        message = {}
+        self.monitor._handle_snapshot(payload, message, 100)
+        flags = message["channel_data"]["channel_flags"]
+        self.assertEqual(flags["ks"], 2)
+        self.assertTrue(flags["low_latch"])
+        self.assertTrue(flags["dm_fail_latch"])
+        self.assertFalse(flags["jam_latch"])
+        # The record's own bits are untouched by the fold.
+        self.assertTrue(message["channel_data"]["sensor_online"])
+        self.assertTrue(message["channel_data"]["sensor_good"])
+
     def test_sequence_gap_discards_old_baseline_and_resyncs(self):
         self.hello()
         self.monitor.status = {"old": True}
         self.monitor.snapshot = [{"old": True}]
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         before = len(self.uart.writes)
         self.monitor._handle_frame(frame(link.STATUS, 15, payload), 200)
         self.assertEqual(len(self.uart.writes), before + 2)
@@ -428,7 +488,7 @@ class PicoMonitorTests(unittest.TestCase):
                                 if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
         request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
         before = len(self.uart.writes)
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
         self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
         self.assertIsNotNone(self.monitor.status)
@@ -440,7 +500,7 @@ class PicoMonitorTests(unittest.TestCase):
         get_status_wire = next(wire for wire in self.uart.writes
                                 if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
         request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
         self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
         self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 210)
@@ -451,7 +511,7 @@ class PicoMonitorTests(unittest.TestCase):
         get_status_wire = next(wire for wire in self.uart.writes
                                 if link.FrameDecoder().feed(wire)[0]["kind"] == link.GET_STATUS)
         request_sequence = link.FrameDecoder().feed(get_status_wire)[0]["sequence"]
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, request_sequence, payload), 200)
         self.assertFalse(any(item.get("type") == "resync" for item in self.messages))
         # The solicited reply must not have advanced _last_unsolicited_sequence, so the
@@ -527,7 +587,7 @@ class PicoMonitorTests(unittest.TestCase):
         # frame (an unsolicited STATUS advancing the sequence) requests a fresh
         # snapshot instead of staying stuck forever.
         writes_before_recovery = self._full_status_write_count()
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, 11, payload), retry_at_4 + 50)
         self.assertEqual(self._full_status_write_count(), writes_before_recovery + 1)
 
@@ -537,7 +597,7 @@ class PicoMonitorTests(unittest.TestCase):
         stale_sequence, sent_at = self.monitor._outstanding_get_status[0]
 
         past_expiry = sent_at + link.BMCUMonitor.OUTSTANDING_GET_STATUS_TTL_MS + 1
-        payload = (25).to_bytes(4, "little") + bytes(23)
+        payload = (25).to_bytes(4, "little") + bytes(link.STATUS_PAYLOAD_SIZE - 4)
         self.monitor._handle_frame(frame(link.STATUS, stale_sequence, payload), past_expiry)
 
         # Expired: the stale solicited sequence must not swallow this frame -- it is

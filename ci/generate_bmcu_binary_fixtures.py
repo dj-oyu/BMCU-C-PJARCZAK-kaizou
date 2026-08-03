@@ -144,7 +144,7 @@ def main():
         b"recovered crash", b"")
 
     for name, kind, sequence, payload in (
-        ("bmcu_status.bin", 2, 1, bytes(range(27))),
+        ("bmcu_status.bin", 2, 1, bytes(range(31))),
         ("bmcu_event.bin", 3, 2, bytes(range(16))),
         ("bmcu_full_status.bin", 115, 3, bytes(range(26))),
         ("bmcu_unknown.bin", 126, 4, b"\xDE\xAD"),

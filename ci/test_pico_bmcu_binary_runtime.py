@@ -45,7 +45,7 @@ class FakeUART:
 
 class RawAndSchedulingTests(unittest.TestCase):
     def test_validated_callback_preserves_exact_wire(self):
-        wire = link.encode_frame(link.STATUS, 3, bytes(range(27)))
+        wire = link.encode_frame(link.STATUS, 3, bytes(range(31)))
         accepted = []
         monitor = link.BMCUMonitor(
             FakeUART(wire), link_id="a", link_index=1,
@@ -57,7 +57,7 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(accepted[0][3], link.STATUS)
 
     def test_invalid_crc_never_reaches_callback(self):
-        wire = bytearray(link.encode_frame(link.STATUS, 3, bytes(range(27))))
+        wire = bytearray(link.encode_frame(link.STATUS, 3, bytes(range(31))))
         wire[-1] ^= 1
         accepted = []
         monitor = link.BMCUMonitor(
@@ -67,7 +67,7 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(monitor.decoder.crc_errors, 1)
 
     def test_round_robin_is_bounded_and_fair(self):
-        one = FakeUART(link.encode_frame(link.STATUS, 1, bytes(27)) * 8)
+        one = FakeUART(link.encode_frame(link.STATUS, 1, bytes(31)) * 8)
         two = FakeUART(link.encode_frame(link.EVENT, 2, bytes(16)) * 8)
         accepted = [0, 0]
         monitors = [
@@ -89,8 +89,8 @@ class RawAndSchedulingTests(unittest.TestCase):
 
     def test_outbox_coalesces_status_before_allocating_sequence(self):
         outbox = BMB1Outbox(99, link_count=2, durable_slots=4)
-        wire1 = link.encode_frame(link.STATUS, 1, bytes(27))
-        wire2 = link.encode_frame(link.STATUS, 2, bytes(range(27)))
+        wire1 = link.encode_frame(link.STATUS, 1, bytes(31))
+        wire2 = link.encode_frame(link.STATUS, 2, bytes(range(31)))
         meta = {"kind": link.STATUS, "sequence": 1}
         outbox.enqueue_raw(0, 1000, wire1, meta)
         outbox.enqueue_raw(0, 2000, wire2, meta)

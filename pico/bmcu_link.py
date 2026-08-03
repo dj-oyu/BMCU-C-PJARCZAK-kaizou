@@ -14,6 +14,10 @@ SYNC = b"\xa5\x5a"
 MAX_DECODER_BUFFER = 128
 VERSION_ALPHA3 = 0x83
 MAX_PAYLOAD = 57
+# The alpha wire is lock-step: BMCU and monitor ship together and the transport
+# contract states backward compatibility is not required, so this is an exact
+# length rather than a minimum with a tolerated legacy 27.
+STATUS_PAYLOAD_SIZE = 31
 
 HELLO = 0x01
 STATUS = 0x02
@@ -60,6 +64,25 @@ def _u32(data, offset):
 def _i16(data, offset):
     value = _u16(data, offset)
     return value - 0x10000 if value & 0x8000 else value
+
+
+# Per-channel fault/switch byte, STATUS offset 27 and channel-record flag bits
+# 8..12. Shifted explicitly here rather than mirrored from the firmware union
+# in src/bmcu_link.h, whose bitfield order the compiler picks; only the raw
+# byte is contract. See docs/bmcu_wire_layout.json.
+def decode_channel_flags(raw):
+    return {
+        # 0 none, 1 both switches, 2 external only, 3 internal only. Builds
+        # without the DM dual microswitch only ever report 0 or 1.
+        "ks": raw & 0x03,
+        # Pull fell below 40% during pressure control on use; motor latched off.
+        "low_latch": bool(raw & 0x04),
+        # The jam variant of low_latch, which also raises HMS 0xF06F.
+        "jam_latch": bool(raw & 0x08),
+        # DM autoload stage 1 or 2 failed. Clears only on a full withdrawal.
+        "dm_fail_latch": bool(raw & 0x10),
+        "raw": raw,
+    }
 
 def _i32(data, offset):
     value = _u32(data, offset)
@@ -575,7 +598,7 @@ class BMCUMonitor:
                 self._invalidate_baseline(now_ms, "sequence_gap")
                 message["sequence_gap"] = {"expected": expected, "received": frame["sequence"]}
 
-        if kind == STATUS and len(payload) == 27:
+        if kind == STATUS and len(payload) == STATUS_PAYLOAD_SIZE:
             self.status = self._decode_status(payload)
             message.update({"type": "status", "data": self.status})
             self._extend_hw_tick(self.status["hw_tick32"], message)
@@ -607,7 +630,9 @@ class BMCUMonitor:
                 "crc_error": _u16(data, 8), "frame_error": _u16(data, 10), "current_slot": data[12],
                 "inserted_mask": data[13], "online_mask": data[14], "motion": list(data[15:19]),
                 "pull_pct": list(data[19:23]), "pressure": _u16(data, 23),
-                "led_mode": data[25], "control_error": data[26]}
+                "led_mode": data[25], "control_error": data[26],
+                "channel_flags": [decode_channel_flags(data[27 + index])
+                                  for index in range(4)]}
 
     @staticmethod
     def _decode_event(data):
@@ -690,6 +715,9 @@ class BMCUMonitor:
                 "pull_pct": record_data[4], "sensor_validity": record_data[5],
                 "flags": flags, "sensor_online": bool(flags & (1 << 2)),
                 "sensor_good": bool(flags & (1 << 3)),
+                # Bits 8..12 are the STATUS channel-flags byte for this channel,
+                # shifted up whole so one decoder serves both carriers.
+                "channel_flags": decode_channel_flags((flags >> 8) & 0xff),
                 "raw_angle": _u16(record_data, 8),
                 "position_delta": _i16(record_data, 10),
                 "motor_pwm": _i16(record_data, 12),
