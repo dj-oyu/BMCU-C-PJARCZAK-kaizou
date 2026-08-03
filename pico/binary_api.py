@@ -6,6 +6,7 @@ page needs is another serialised round trip. A page-shaped API would also have
 to re-serialise the boot-time snapshot on every three-second poll.
 
     /api/current.bin      latest STATUS per link          changes many times a second
+    /api/history/status.bin  same handler as current.bin  kept for existing callers
     /api/diagnostics.bin  bridge counters                 recomputed every 15 s
     /api/snapshot.bin     per-link detail                 arrives once per link session
     /api/logs.bin         runtime log                     cursor paginated
