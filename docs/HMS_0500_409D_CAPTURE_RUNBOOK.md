@@ -20,6 +20,11 @@ are flowing — all in one snapshot.
 
 ## 0. Fixed parameters of every dataset
 
+**Read state over HTTP, not WebREPL.** `GET /api/snapshot.bin` returns the same per-channel and per-link
+data without interrupting the bridge. Reaching the same numbers through WebREPL costs a Ctrl-C and a soft
+reset of the Pico, after which both links sit in `resyncing` for roughly 20 seconds and every reading is
+meaningless until they recover — long enough to lose the window this runbook is trying to capture.
+
 Record these before any measurement. A dataset without them is not comparable.
 
 | Parameter | Why it matters |
@@ -98,17 +103,27 @@ a between-confirms maximum may have been lost; `gap_max_ms` remains the loss-pro
 4. From AMS_SERVICE, record `gap_now_ms` and `gap_max_ms`.
 5. **Now reset ONLY the BMCU, using the soft-reset control.** Leave the printer running and untouched.
 
-   Use the Bambuddy/Pico web UI button **"Request `<link-id>` soft reset"** (type `RESET BMCU` to confirm),
-   or equivalently `POST /api/devices/<link-id>/soft-reset` — see `docs/PICO_USER_GUIDE.md` §6. That path
-   issues `NVIC_SystemReset()` on the BMCU, so all firmware RAM is reinitialized and the `have_registered`
-   latch is cleared, while the printer never loses power or bus continuity.
+   **As of 2026-08-03 there is no way to issue the soft reset, so use the power cycle below.** The command
+   itself is implemented at both ends — the BMCU accepts `KIND_REQUEST_SOFT_RESET` and the Pico accepts
+   `CONTROL_SOFT_RESET` over BMB1 (`pico/main.py`, `binary_control`) — but nothing calls it. The local HTTP
+   route this step used to name, `POST /api/devices/<link-id>/soft-reset`, existed at `aeaf263` and was
+   removed by the binary transport migration at `9e1f235`; no `/api/devices` route survives anywhere in
+   `pico/`. Bambuddy has CONTROL framing but defines no soft-reset command and offers no control for it. Until
+   an invoker is built, the two paths this step used to offer are both dead.
+
+   **Use a genuine BMCU power cycle**: remove BMCU power at the supply, wait for the LEDs to go out, and
+   reapply. Leave the printer running and untouched throughout.
 
    **Do not simply unplug or reseat the RS-485 cable.** Interrupting only the data connection can leave the
    BMCU powered and its RAM state — including `have_registered` — intact, so a "no recovery" result would
    look like H2 when nothing was actually cleared. This is the single discriminating step of the runbook; the
-   mechanism has to be one that provably clears BMCU RAM. If the soft-reset control is unavailable (link
-   offline, safety guard refuses because motion is not idle), the fallback is a genuine BMCU **power** cycle:
-   remove BMCU power at the supply, wait for the LEDs to go out, and reapply — not a cable reseat.
+   mechanism has to be one that provably clears BMCU RAM.
+
+   A power cycle clears strictly more than the soft reset would, so it does not weaken the experiment — it
+   only means the result cannot distinguish "BMCU RAM cleared" from "BMCU power cycled". If the outcome table
+   ends up depending on that distinction, the run has to be repeated once an invoker exists. When it does, the
+   soft reset issues `NVIC_SystemReset()`, reinitialising all firmware RAM and clearing the `have_registered`
+   latch while the printer never loses power or bus continuity.
 
    The guard accepts a channel resting in `pressure_ctrl_idle`, so filament being loaded is not by itself a
    refusal — which matters here, because 0500_409D is reached with filament loaded. What it still refuses is
@@ -123,7 +138,8 @@ a between-confirms maximum may have been lost; `gap_max_ms` remains the loss-pro
    - `hw_tick32` is small — seconds since boot, not the large value from step 1 (printed by
      `tools/bmcu_debug.py full-status`), and
    - `bmcu_boot_session` has advanced past the value in the step-1 snapshot (the Pico bridge counts BMCU
-     boots per link; read it from `GET /api/devices`).
+     boots per link; it is carried in the synthetic link record, type 240, of `GET /api/snapshot.bin` —
+     see `link_record` in `docs/bmcu_wire_layout.json`).
 
    Also expect `gap_max_ms`, `confirm_count`, and `reset_count` to have restarted from zero. If the boot
    session is unchanged, the BMCU did not reboot — the experiment is void, and its result must not be entered
