@@ -391,7 +391,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 6,
+ "revision": 7,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -1010,7 +1010,7 @@
       {
        "mask": 1,
        "name": "loaded",
-       "note": "this channel holds g_loaded_ch, the flash-backed loaded latch. Cleared the instant a loaded channel's key reads 0 and re-latched only by a printer-commanded load, so one brief switch blip desynchronises it from the printer permanently; an unload addressed to that channel then does nothing and leaves no trace. At most one channel sets it.",
+       "note": "this channel holds g_loaded_ch, the flash-backed loaded latch. Re-latched only by a printer-commanded load, so clearing it wrongly desynchronises it from the printer permanently; an unload addressed to that channel then does nothing and leaves no trace. A printer-commanded unload clears it at once, while a key reading empty must do so continuously for LOADED_LATCH_DROP_MS. This bit is the latch as held, with no separate mid-debounce encoding: during that window it still reads 1, alongside ks 0 on the same channel. At most one channel sets it.",
        "shift": 5
       },
       {

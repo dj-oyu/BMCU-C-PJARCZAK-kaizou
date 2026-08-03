@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 6,
+  "revision": 7,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -65,7 +65,7 @@
           {"name": "low", "shift": 2, "mask": 1, "note": "g_on_use_low_latch: pull fell below 40% during pressure_ctrl_on_use, motor stopped"},
           {"name": "jam", "shift": 3, "mask": 1, "note": "g_on_use_jam_latch: the jam variant of low, also raises HMS 0xF06F. Set only together with low."},
           {"name": "dm_fail", "shift": 4, "mask": 1, "note": "dm_fail_latch: DM autoload stage 1 or 2 failed. Clears only on ks==0, a full withdrawal."},
-          {"name": "loaded", "shift": 5, "mask": 1, "note": "this channel holds g_loaded_ch, the flash-backed loaded latch. Cleared the instant a loaded channel's key reads 0 and re-latched only by a printer-commanded load, so one brief switch blip desynchronises it from the printer permanently; an unload addressed to that channel then does nothing and leaves no trace. At most one channel sets it."},
+          {"name": "loaded", "shift": 5, "mask": 1, "note": "this channel holds g_loaded_ch, the flash-backed loaded latch. Re-latched only by a printer-commanded load, so clearing it wrongly desynchronises it from the printer permanently; an unload addressed to that channel then does nothing and leaves no trace. A printer-commanded unload clears it at once, while a key reading empty must do so continuously for LOADED_LATCH_DROP_MS. This bit is the latch as held, with no separate mid-debounce encoding: during that window it still reads 1, alongside ks 0 on the same channel. At most one channel sets it."},
           {"name": "reserved", "shift": 6, "mask": 3, "note": "sent as zero, ignore on receive"}
         ], "note": "per-channel fault latches and raw switch state. Decode with explicit shifts; the firmware union in src/bmcu_link.h is MCU-internal and its bitfield order is compiler-defined."}
       ]
