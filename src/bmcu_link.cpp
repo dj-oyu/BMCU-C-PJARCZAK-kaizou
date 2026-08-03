@@ -452,7 +452,7 @@ void apply_status_changes(uint32_t reasons, bool emit_events)
         __builtin_memcpy(g_status_cache.pull_pct, MC_PULL_pct, sizeof(g_status_cache.pull_pct));
     g_status_cache_valid = 1u;
 }
-void build_status_payload(uint8_t payload[27])
+void build_status_payload(uint8_t payload[31])
 {
     if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
     put32(&payload[0], time_ticks32());
@@ -471,6 +471,12 @@ void build_status_payload(uint8_t payload[27])
     put16(&payload[23], g_status_cache.pressure);
     payload[25] = g_status_cache.led_mode;
     payload[26] = g_status_cache.control_error;
+    // Read live, like time_ticks32/g_tx_drop/g_rx_crc_error above, rather than
+    // through the status cache. These are level states: a host reads whatever
+    // is true when the STATUS is built. Caching them would only buy an
+    // edge-triggered EVENT, which #15 does not ask for.
+    for (uint8_t ch = 0u; ch < 4u; ++ch)
+        payload[27u + ch] = Motion_control_get_channel_flags(ch);
 }
 
 FullStatusRecord& append_full_record(uint8_t type)
@@ -538,6 +544,11 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
             if (telemetry.sensor_online) flags |= 1u << 2;
             if (telemetry.sensor_good) flags |= 1u << 3;
             if (telemetry.motion_fault != MOTION_FAULT_NONE) flags |= 1u << 4;
+            // record.data[0..15] is otherwise full, so the high byte of this
+            // u16 is the only free space left in a channel record. Bits 8..12
+            // are the STATUS channel-flags byte shifted up whole: same order,
+            // contiguous, so one decoder table serves both carriers.
+            flags |= static_cast<uint16_t>(Motion_control_get_channel_flags(ch)) << 8;
             put16(&record.data[6], flags);
             put16(&record.data[8], telemetry.raw_angle);
             put16(&record.data[10], static_cast<uint16_t>(telemetry.position_delta));
@@ -679,10 +690,10 @@ void restore_status_changes(uint32_t reasons)
 bool send_status(uint16_t sequence)
 {
     if (!tx_has_capacity(0u)) return false;
-    uint8_t* payload = reserve_payload(KIND_STATUS, sequence, 27u);
+    uint8_t* payload = reserve_payload(KIND_STATUS, sequence, 31u);
     if (payload == nullptr) return false;
     build_status_payload(payload);
-    commit_payload(27u);
+    commit_payload(31u);
     return true;
 }
 
