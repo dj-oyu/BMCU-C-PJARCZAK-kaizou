@@ -54,6 +54,7 @@ motorを動かす場合、`root_owner=PRINTER`、`executor=BMCU_LOCAL` である
 | `LED_OVERRIDE` | USER | timeout付き。通常表示へ必ず復帰 |
 | `DIAGNOSTICS` | shared read-only | S0として常時利用可能 |
 | `SAFETY_LATCH` | SAFETY | USERはack可。解除・再開とは分離 |
+| `DEVICE_RESET` | USER | S2として実装済み（`REQUEST_SOFT_RESET`, `BMCU_MANAGEMENT_INTERFACE.md` §7.2）。この文書のresource/leaseモデルは未実装だが、既にidle-only条件とoperation IDで排他されている |
 
 FILAMENT_PATHを使う操作は対象MOTION_CHも同時に取得する。必要resourceを全部取得
 できない場合は、部分的にstateを変更せず要求全体を拒否する。
