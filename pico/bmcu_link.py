@@ -225,10 +225,16 @@ class BMCUMonitor:
     # comfortably longer than SNAPSHOT_TIMEOUT_MS so a refresh requested on a
     # refused attempt has time to complete before the caller retries.
     MAX_SNAPSHOT_AGE_MS = 3000
-    # filament_motion_enum values a soft reset may be requested from: stop, and
-    # pressure_ctrl_idle where a loaded channel rests. See
-    # soft_reset_guard_error for why the loaded case has to be included.
-    RESET_IDLE_MOTIONS = (3, 7)
+    # filament_motion_enum values a soft reset may be requested from. Mirrors
+    # kMotionParked in the firmware's Motion_control.cpp, which carries the
+    # per-state reasoning; keep the two in step.
+    #
+    # These are controller phases. The AMS-side _filament_motion enum in ams.h
+    # reuses the same numbers for different states -- 3 is stop here and
+    # before_pull_back there -- so read them against the right enum.
+    MOTION_STOP = 3
+    MOTION_PRESSURE_CTRL_IDLE = 7
+    RESET_IDLE_MOTIONS = (MOTION_STOP, MOTION_PRESSURE_CTRL_IDLE)
     SNAPSHOT_MAX_RETRIES = 3
     OUTSTANDING_GET_STATUS_TTL_MS = 3000
 

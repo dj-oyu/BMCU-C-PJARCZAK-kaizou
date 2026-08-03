@@ -840,6 +840,27 @@ static constexpr uint16_t kMotionHold =
     kMotionPressureIdle | kMotionPressureOnUse |
     kMotionBeforeOnUse | kMotionStopOnUse;
 
+// The two states motor_motion_switch converges a channel to once the bus goes
+// quiet: stop for an unloaded, jammed or faulted channel, pressure_ctrl_idle
+// for one holding filament (:2441-2448, :2586-2598, :2611-2614). Everything
+// else is either printing or a transition into it:
+//
+//   send (0)                  drives, ramped          printer-commanded feed
+//   redetect (1)              drives                  local re-detect, no bus command
+//   pull (2)                  drives                  retract
+//   stop (3)                  cannot drive            parked
+//   before_on_use (4)         drives                  printing
+//   stop_on_use (5)           drives                  printing
+//   pressure_ctrl_on_use (6)  drives at full PWM_lim  printing
+//   pressure_ctrl_idle (7)    drives, clamped +-800   parked
+//   before_pull_back (8)      drives                  transition
+//
+// Parked does not mean the motor cannot move: pressure_ctrl_idle keeps the
+// pressure PID live and is the only state DM autoload runs from. It means no
+// operation is in flight, so the instantaneous g_motor_pwm reading is the
+// whole story. Motion_control_is_reset_safe pairs the two.
+static constexpr uint16_t kMotionParked = kMotionStop | kMotionPressureIdle;
+
 
 
 // ===== Motor control =====
@@ -3117,29 +3138,34 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     return true;
 }
 
+// Whether every channel is parked with nothing in flight, so a reset cannot
+// interrupt an operation. kMotionParked carries the per-state reasoning.
+//
+// The controller and AMS phases are both tested because neither implies the
+// other. A bus that is idle does not mean the controller is parked: redetect
+// is entered locally with no bus command at all and drives the motor. A parked
+// controller does not mean the bus is idle: when the online key reads empty,
+// motor_motion_switch forces pressure_ctrl_idle regardless of what the printer
+// asked for, so the bus can still be mid send_out or pull_back.
+//
+// Note the two enums overlap numerically with different meanings -- 3 is
+// filament_motion_stop here and _filament_motion::before_pull_back in ams.h.
+//
+// No DM autoload check is needed. Motion_control_init derives
+// dm_autoload_gate = (ks != 0) and dm_loaded = (ks == 1) at boot, so after the
+// reboot this reset performs: ks == 1 closes the entry condition, ks == 2 is
+// blocked by the gate, and ks 0 and 3 have no transition out of DM_AUTO_IDLE.
+// A reset taken while filament sits on the outer switch alone therefore leaves
+// autoload gated until that filament is withdrawn to ks == 0.
 bool Motion_control_is_reset_safe(void)
 {
     const _ams& state = ams[BAMBU_BUS_AMS_NUM];
     for (uint8_t channel = 0u; channel < kChCount; ++channel)
     {
         if (g_motor_pwm[channel] != 0 ||
+            (MOTOR_CONTROL[channel].motion_mask & kMotionParked) == 0u ||
             state.filament[channel].motion != _filament_motion::idle)
             return false;
-
-        // pressure_ctrl_idle is where a loaded channel rests: the PID still
-        // runs, but clamped, and nothing commands motion on its own. Demanding
-        // filament_motion_stop instead made this gate unreachable with filament
-        // loaded, which is the state 0500_409D recovery starts from.
-        const filament_motion_enum motion = MOTOR_CONTROL[channel].motion;
-        if (motion != filament_motion_enum::filament_motion_stop &&
-            motion != filament_motion_enum::filament_motion_pressure_ctrl_idle)
-            return false;
-
-        // No DM autoload check is needed here. Motion_control_init derives
-        // dm_autoload_gate = (ks != 0) and dm_loaded = (ks == 1) at boot, so
-        // after the reboot this reset performs: ks == 1 closes the entry
-        // condition, ks == 2 is blocked by the gate, and ks 0 and 3 have no
-        // transition out of DM_AUTO_IDLE. The reset cannot start a push.
     }
     return true;
 }
