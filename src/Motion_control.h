@@ -10,6 +10,7 @@ enum MotionControlFault : uint8_t
     MOTION_FAULT_NONE = 0u,
     MOTION_FAULT_PULL_NO_PROGRESS = 1u,
     MOTION_FAULT_PULL_TRAVEL_BUDGET = 2u,
+    MOTION_FAULT_REDETECT_TIMEOUT = 3u,
 };
 
 bool Motion_control_save_dm_key_none_thresholds(void);

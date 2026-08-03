@@ -2285,6 +2285,22 @@ static int8_t  before_pb_sign[4]             = {0,0,0,0};
 static constexpr int32_t BEFORE_PB_SIGN_COUNTS = distance_m_to_counts(0.0005f);
 static constexpr int32_t BEFORE_PB_MAX_COUNTS  = distance_m_to_counts(2.0f);
 
+// Redetect pushes filament back toward the online key and waits for it to
+// register. If the filament is withdrawn past the switches while this runs the
+// key never reports, so the state needs a bound of its own -- without one the
+// channel drives indefinitely at the fixed output filament_motion_redetect
+// commands, keeps reporting online to the printer, and holds the pull-back
+// sequencer's wait flag, which suppresses motor_motion_switch for every
+// channel.
+//
+// The bound counts time spent driving, not time in the state: it is armed in
+// the drive branch and disarmed whenever driving stops. Generous relative to
+// the travel involved, which is millimetres at near-full PWM -- this is a
+// backstop for filament that is no longer there, not a limit on a redetect
+// that is making progress.
+static constexpr uint32_t REDETECT_TIMEOUT_MS = 10000u;
+static uint32_t redetect_t0_ms[4] = {0u,0u,0u,0u};
+
 static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, uint8_t fault, uint32_t time_now)
 {
     auto &A = ams[motion_control_ams_num];
@@ -2295,9 +2311,16 @@ static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, ui
     bmcu_link_motion_fault(channel, previous_fault, fault);
     motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
     filament_now_position[channel] = filament_idle;
+    redetect_t0_ms[channel] = 0u;
     g_pull_remain_counts[channel] = 0;
     g_pull_speed_set_q[channel] = -PULL_V_FAST_Q;
     g_pull_pwm_floor[channel] = PULL_PWM_MIN;
+
+    // Match the successful exits, which clear this alongside the motion. Left
+    // set, the reply builder keeps transmitting the pull_back flag while the
+    // motion beside it reads idle, so the printer sees the two contradict
+    // until its next command overwrites the flag.
+    A.filament_use_flag = 0x00;
 
     if (A.filament[channel].motion != _filament_motion::idle)
     {
@@ -2402,14 +2425,11 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
         {
             MC_STU_RGB_set_latch(i, 0xFFu, 0xFFu, 0x00u, time_now, 0u);
 
-            if (MC_ONLINE_key_stu[i] == 0)
-            {
-                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_redetect, 100, time_now);
-            }
-            else
+            if (MC_ONLINE_key_stu[i] != 0)
             {
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
                 filament_now_position[i] = filament_idle;
+                redetect_t0_ms[i] = 0u;
 
                 A.filament_use_flag = 0x00;
                 if (A.filament[i].motion != _filament_motion::idle)
@@ -2417,6 +2437,27 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                     A.filament[i].motion = _filament_motion::idle;
                     bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
                 }
+            }
+            else if (redetect_t0_ms[i] != 0u &&
+                     (time_now - redetect_t0_ms[i]) >= REDETECT_TIMEOUT_MS)
+            {
+                // The key never reported. Treat it as filament that is gone
+                // rather than pushing forever: latch_pull_fault stops the
+                // motor, returns the channel to idle and clears the AMS-side
+                // motion, which lets online fall away and releases the wait.
+                redetect_t0_ms[i] = 0u;
+                latch_pull_fault(i, MOTION_FAULT_REDETECT_TIMEOUT, time_now);
+                break;
+            }
+            else
+            {
+                // Armed here rather than on entry so the bound measures time
+                // spent driving. A bus error skips this sequencer entirely and
+                // parks every motor, and that dead time must not be charged
+                // against a redetect that has not been given a chance to push.
+                if (redetect_t0_ms[i] == 0u)
+                    redetect_t0_ms[i] = time_now ? time_now : 1u;
+                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_redetect, 100, time_now);
             }
 
             wait = true;
@@ -2781,7 +2822,13 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
     else
     {
         for (uint8_t i = 0; i < kChCount; i++)
+        {
             MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+            // The sequencer above is skipped while the bus is in error, so a
+            // channel left in redetect stops driving but keeps its position.
+            // Disarm the bound; it re-arms when driving resumes.
+            redetect_t0_ms[i] = 0u;
+        }
     }
 
     for (uint8_t i = 0; i < kChCount; i++)
