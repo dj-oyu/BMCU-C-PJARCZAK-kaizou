@@ -317,6 +317,68 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.soft_reset_guard_error(),
                          "BMCU motion is not idle")
 
+    def _idle_snapshot(self, at_ms=1000):
+        self.monitor.link_state = "online"
+        self.monitor.snapshot = [{}]
+        self.monitor.snapshot_at_ms = at_ms
+        idle = {"motor_pwm": 0, "controller_motion": 3, "ams_motion": 0}
+        self.monitor.channels = [dict(idle) for _ in range(4)]
+
+    def test_soft_reset_refuses_a_snapshot_older_than_the_limit(self):
+        # The gate reads motor state from the snapshot, which is only requested
+        # when the baseline is invalidated. Without an age check a snapshot
+        # taken while idle keeps permitting a reset after motion has started.
+        self._idle_snapshot(at_ms=1000)
+        fresh = 1000 + self.monitor.MAX_SNAPSHOT_AGE_MS - 1
+        stale = 1000 + self.monitor.MAX_SNAPSHOT_AGE_MS
+
+        self.assertIsNone(self.monitor.soft_reset_guard_error(fresh))
+        self.assertEqual(self.monitor.soft_reset_guard_error(stale),
+                         "BMCU status is stale; retry once it refreshes")
+
+    def test_soft_reset_refuses_when_the_snapshot_has_no_timestamp(self):
+        self._idle_snapshot(at_ms=1000)
+        self.monitor.snapshot_at_ms = None
+        self.assertEqual(self.monitor.soft_reset_guard_error(5000),
+                         "BMCU status is stale; retry once it refreshes")
+
+    def test_omitting_the_clock_keeps_the_previous_contract(self):
+        # Callers that cannot supply a clock still get the completeness and
+        # idleness checks rather than an exception.
+        self._idle_snapshot(at_ms=1000)
+        self.assertIsNone(self.monitor.soft_reset_guard_error())
+
+    def test_a_completed_snapshot_records_when_it_arrived(self):
+        self.hello()
+        self.monitor._handle_frame(
+            frame(link.FULL_STATUS_RECORD, 2, snapshot_payload(7, 0, 1)), 4242)
+        self.assertEqual(self.monitor.snapshot_at_ms, 4242)
+
+    def test_invalidating_the_baseline_clears_the_snapshot_timestamp(self):
+        self._idle_snapshot(at_ms=1000)
+        self.monitor._invalidate_baseline(2000, "test")
+        self.assertIsNone(self.monitor.snapshot_at_ms)
+        self.assertEqual(self.monitor.soft_reset_guard_error(2000),
+                         "complete fresh BMCU status is required")
+
+    def test_refresh_is_requested_once_while_one_is_outstanding(self):
+        self._idle_snapshot()
+        self.assertTrue(self.monitor.refresh_snapshot_if_idle())
+        decoded = link.FrameDecoder().feed(self.uart.writes[-1])[0]
+        self.assertEqual(decoded["kind"], link.GET_FULL_STATUS)
+
+        before = len(self.uart.writes)
+        self.assertFalse(self.monitor.refresh_snapshot_if_idle())
+        self.assertEqual(len(self.uart.writes), before)
+
+    def test_the_guard_never_sends_anything(self):
+        # Requesting a refresh belongs to the caller; a predicate that probes
+        # the link cannot be evaluated safely from a diagnostic view.
+        self._idle_snapshot(at_ms=1000)
+        before = len(self.uart.writes)
+        self.monitor.soft_reset_guard_error(1000 + 10 ** 6)
+        self.assertEqual(len(self.uart.writes), before)
+
     def test_soft_reset_request_and_ack_are_tracked(self):
         sequence = self.monitor.request_soft_reset(0x12345678, reason=2, ttl_ms=4000)
         decoded = link.FrameDecoder().feed(self.uart.writes[-1])[0]

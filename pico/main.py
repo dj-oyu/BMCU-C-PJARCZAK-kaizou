@@ -162,8 +162,13 @@ def binary_control(link_index, command, arguments):
     if command != C.CONTROL_SOFT_RESET or link_index >= len(monitors):
         raise ValueError("unsupported")
     monitor = monitors[link_index]
-    guard = monitor.soft_reset_guard_error()
+    guard = monitor.soft_reset_guard_error(time.ticks_ms())
     if guard:
+        # A stale refusal is recoverable: ask for a fresh snapshot now so the
+        # caller's retry has current motor state to judge. Requesting it here
+        # rather than inside the guard keeps the guard free of side effects.
+        if "stale" in guard:
+            monitor.refresh_snapshot_if_idle()
         raise ValueError(guard)
     reason = arguments[0] if len(arguments) else 0
     operation_id = (time.ticks_ms() & 0xFFFFFFFF) or 1

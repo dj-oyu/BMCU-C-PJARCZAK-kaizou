@@ -220,6 +220,11 @@ def encode_frame(kind, sequence, payload=b""):
 class BMCUMonitor:
     """Protocol state machine; ``on_message`` receives typed dictionaries."""
     SNAPSHOT_TIMEOUT_MS = 1200
+    # A snapshot describes motor state, which can change in milliseconds, so
+    # the soft-reset gate treats anything older than this as unusable. It is
+    # comfortably longer than SNAPSHOT_TIMEOUT_MS so a refresh requested on a
+    # refused attempt has time to complete before the caller retries.
+    MAX_SNAPSHOT_AGE_MS = 3000
     SNAPSHOT_MAX_RETRIES = 3
     OUTSTANDING_GET_STATUS_TTL_MS = 3000
 
@@ -241,6 +246,7 @@ class BMCUMonitor:
         self.tick_hz = None
         self.status = None
         self.snapshot = None
+        self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
@@ -313,15 +319,40 @@ class BMCUMonitor:
     def ping(self, token):
         return self._send(PING, struct.pack("<I", token & 0xffffffff))
 
-    def soft_reset_guard_error(self):
+    def soft_reset_guard_error(self, now_ms=None):
+        """Why a soft reset must be refused, or None if it may proceed.
+
+        The idle test needs motor PWM and controller phase, which only the
+        FULL_STATUS snapshot carries; live STATUS has neither. A snapshot is
+        requested only when the baseline is invalidated, so in steady operation
+        it can be arbitrarily old, and this gate used to claim freshness it
+        never checked: a snapshot taken while idle would keep permitting a reset
+        long after motion had started.
+
+        Pure by design. The caller decides whether to request a refresh.
+        """
         if self.link_state != "online" or self.snapshot is None:
             return "complete fresh BMCU status is required"
         if any(channel is None for channel in self.channels):
             return "complete channel status is required"
+        if now_ms is not None:
+            age = (self.MAX_SNAPSHOT_AGE_MS if self.snapshot_at_ms is None
+                   else self._ticks_diff(now_ms, self.snapshot_at_ms))
+            if age >= self.MAX_SNAPSHOT_AGE_MS or age < 0:
+                return "BMCU status is stale; retry once it refreshes"
         if any(channel["motor_pwm"] != 0 or channel["controller_motion"] != 3 or
                channel["ams_motion"] != 0 for channel in self.channels):
             return "BMCU motion is not idle"
         return None
+
+    def refresh_snapshot_if_idle(self):
+        """Ask for a new FULL_STATUS unless one is already on its way."""
+        if (self._snapshot_parts is not None or
+                self._snapshot_deadline_ms is not None or
+                self._snapshot_retry_ms is not None):
+            return False
+        self.get_full_status()
+        return True
 
     def request_soft_reset(self, operation_id, reason=0, ttl_ms=5000):
         if not 1 <= operation_id <= 0xffffffff:
@@ -365,6 +396,7 @@ class BMCUMonitor:
     def _invalidate_baseline(self, now_ms, reason):
         self.status = None
         self.snapshot = None
+        self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
@@ -764,6 +796,7 @@ class BMCUMonitor:
                 if part.get("ams_registration_data") is not None:
                     ams_registration = part["ams_registration_data"]
             self.channels = channels
+            self.snapshot_at_ms = now_ms
             self.printer_auth = printer_auth
             self.printer_rx = printer_rx or None
             self.printer_tx = printer_tx or None
