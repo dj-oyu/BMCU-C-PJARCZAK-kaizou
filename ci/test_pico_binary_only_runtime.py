@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import struct
 import sys
 import unittest
 
@@ -30,6 +31,49 @@ class Monitor:
 
 
 class BinaryOnlyRuntimeTests(unittest.TestCase):
+    def test_device_metrics_avoids_cpython_only_int_bit_length(self):
+        source = (PICO / "device_metrics.py").read_text(encoding="utf-8")
+
+        self.assertNotIn(".bit_length(", source)
+
+    def test_web_poll_is_not_gated_by_uart_idle(self):
+        import ast
+
+        source = (PICO / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        service = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "service_once")
+        parents = {
+            child: parent for parent in ast.walk(service)
+            for child in ast.iter_child_nodes(parent)
+        }
+        web_calls = [
+            node for node in ast.walk(service)
+            if isinstance(node, ast.Call) and
+            isinstance(node.func, ast.Attribute) and
+            isinstance(node.func.value, ast.Name) and
+            node.func.value.id == "web" and node.func.attr == "poll"]
+        self.assertEqual(len(web_calls), 1)
+        ancestor = parents.get(web_calls[0])
+        while ancestor is not None:
+            if isinstance(ancestor, ast.If):
+                self.assertNotIn("uart_idle", ast.unparse(ancestor.test))
+            ancestor = parents.get(ancestor)
+
+    def test_default_config_has_two_links_and_4k_uart_headroom(self):
+        namespace = {}
+        source = (PICO / "config_example.py").read_text(encoding="utf-8")
+        exec(compile(source, "config_example.py", "exec"), namespace)
+
+        self.assertEqual(namespace["UART_RXBUF"], 4096)
+        self.assertEqual(namespace["BMCU_UART_DRAIN_BUDGET"], 4096)
+        self.assertEqual(namespace["BMCU_UART_DRAIN_CHUNK"], 512)
+        self.assertEqual(
+            [(item["uart"], item["tx"], item["rx"])
+             for item in namespace["BMCU_LINKS"]],
+            [(0, 0, 1), (1, 4, 5)])
+
     def test_metric_window_is_fixed_and_reports_tail_quantiles(self):
         window = device_metrics.MetricWindow()
         for value in (1, 2, 3, 4, 1000):
@@ -46,15 +90,32 @@ class BinaryOnlyRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(window.average(), 64)
         self.assertLessEqual(window.average(), 128)
 
+    def test_rp2_temperature_conversion_uses_documented_transfer_function(self):
+        reading_at_27c = 706000 * 65535 // 3300000
+        measured = device_metrics.rp2_temperature_milli_c(reading_at_27c)
+        self.assertGreaterEqual(measured, 26900)
+        self.assertLessEqual(measured, 27100)
+
     def test_diagnostic_is_bounded_typed_tlv(self):
         metrics = device_metrics.DeviceMetrics()
         for value in range(1, 50):
             metrics.observe_loop_gap(value)
-        payload = metrics.snapshot(123, [Monitor()])
+        payload = metrics.snapshot(
+            123, [Monitor()], wifi_rssi=-47,
+            temperature_milli_c=31500)
         items = list(binary.parse_tlvs(payload))
         tags = {item[0] for item in items}
         self.assertIn(C.DIAG_LOOP_GAP_P95_US, tags)
         self.assertIn(C.DIAG_UART0_DRAIN_BYTES, tags)
+        self.assertIn(C.DIAG_TEMPERATURE_MILLI_C, tags)
+        self.assertIn(C.DIAG_WIFI_RSSI_DBM, tags)
+        signed_values = {
+            tag: struct.unpack(">i", bytes(value))[0]
+            for tag, value_type, value in items
+            if value_type == C.VALUE_INT32
+        }
+        self.assertEqual(signed_values[C.DIAG_TEMPERATURE_MILLI_C], 31500)
+        self.assertEqual(signed_values[C.DIAG_WIFI_RSSI_DBM], -47)
         self.assertIn(C.DIAG_UART0_OVERFLOW_COUNT, tags)
         self.assertLessEqual(len(payload), C.MAX_PAYLOAD_SIZE)
         outbox = BMB1Outbox(9, durable_slots=2, large_slots=2)

@@ -9,11 +9,13 @@ binary. There is no JSON WebSocket or HTTPS NDJSON compatibility mode.
 
 Copy `config_example.py` to `config.py` and configure:
 
-- `BMCU_LINKS` for UART IDs and pins;
+- `BMCU_LINKS` for UART IDs and pins (the default maps `bmcu-a` to GP0/GP1
+  and `bmcu-b` to GP4/GP5);
+- `UART_RXBUF` for per-link receive headroom (4096 bytes by default);
 - `BMCU_BINARY_HOST` and `BMCU_BINARY_PORT`;
 - `BMCU_BINARY_DEVICE_ID`;
-- `BMCU_BINARY_DEVICE_KEY`, a provisioned 256-bit key encoded as 64 hex
-  characters;
+- `BMCU_BINARY_DEVICE_KEY`, an optional bootstrap 256-bit key encoded as 64 hex
+  characters (the local UI can provision or replace it);
 - journal and queue sizes when the defaults are unsuitable.
 
 Wi-Fi credentials remain in separately provisioned `secrets.py`.
@@ -41,8 +43,24 @@ The root page is static and fetches binary snapshots/deltas:
 
 JavaScript performs BMB1 and TLV decoding with `DataView`.
 
+The **Connection settings** section manages the Bambuddy BMB1 host and TCP port
+alongside device authentication. Host and port changes are persisted and cause
+an immediate reconnect without rebooting. The device-key card can generate a
+cryptographically random 256-bit key, copy it once for Bambuddy, accept an
+existing 64-hex-character key, and persist it without rebooting. The saved key
+is write-only: the read API exposes only configured state and a 48-bit SHA-256
+fingerprint. Mutations require a non-simple content type and action header so a
+cross-origin form cannot silently replace settings. The UI is intended only
+for a trusted LAN.
+
 ## Deployment and tests
 
-`deploy.ps1` uploads every Python module and places `main.py` last. Host tests
-live under `ci/`; canonical cross-repository binary fixtures live under
-`tests/fixtures/bmcu_binary/`.
+`deploy.ps1` uploads the staged web UI, then every Python module, and places
+`main.py` last. Host tests live under `ci/`; canonical cross-repository binary
+fixtures live under `tests/fixtures/bmcu_binary/`.
+
+The page itself is not a module. `web_ui.py` streams `www/index.html.gz` off
+littlefs with `Content-Encoding: gzip`, so only one 512-byte chunk is resident
+per request instead of the whole page sitting in the heap for the entire
+uptime. Sources and the build live in `web/`; `tools/build_web_ui.py` stages the
+artifact.

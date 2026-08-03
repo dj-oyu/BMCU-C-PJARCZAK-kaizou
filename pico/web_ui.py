@@ -6,9 +6,23 @@ try:
     import errno
 except ImportError:
     import uerrno as errno
+try:
+    import uos as os
+except ImportError:
+    import os
 
 MAX_REQUEST_BYTES = 2048
+MAX_BODY_BYTES = 256
+MAX_RECV_BYTES = 256
+MAX_SEND_BYTES = 256
+HTTP_LISTEN_BACKLOG = 4
 BINARY_TYPE = "application/vnd.bmcu-monitor.v1"
+# The page is built by web/ and staged by tools/build_web_ui.py. Serving it from
+# littlefs instead of a module-level literal keeps ~14 KB off a heap that the UI
+# itself flags as low below 20 KB.
+INDEX_PATH = "www/index.html.gz"
+SCHEMA_PATH = "www/schema.json"
+FILE_CHUNK_BYTES = 512
 
 
 def _would_block(error):
@@ -17,15 +31,6 @@ def _would_block(error):
         getattr(errno, "EAGAIN", -1),
         getattr(errno, "EWOULDBLOCK", -1),
     )
-
-
-PAGE = b"""<!doctype html><meta name=viewport content="width=device-width"><title>BMCU Monitor</title><style>body{max-width:900px;margin:auto;padding:20px;font:15px system-ui;background:#0b1018;color:#edf4ff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.card{padding:12px;background:#151d29;border:1px solid #2a3b52;border-radius:10px}.muted{color:#9eafc5}pre{white-space:pre-wrap}</style><h1>BMCU Monitor</h1><p id=s class=muted>Connecting...</p><h2>Loader state</h2><div id=d class=grid></div><h2>Hardware and communications</h2><div id=m class=grid></div><h2>Device log</h2><pre id=l></pre><script>
-const td=new TextDecoder(),u64=(v,o)=>v.getBigUint64(o).toString(),names={1:'uptime ms',4:'heap free',6:'heap min',12:'loop avg us',13:'loop p95 us',14:'loop p99 us',11:'loop max us',32:'queue',33:'drops',48:'exceptions',49:'GC us',50:'GC max us',64:'UART0 backlog',65:'UART0 max backlog',66:'UART0 bytes',67:'UART0 CRC',68:'UART0 frame',69:'UART0 gaps',72:'UART1 backlog',73:'UART1 max backlog',74:'UART1 bytes',75:'UART1 CRC',76:'UART1 frame',77:'UART1 gaps'};
-function frames(b){let v=new DataView(b),a=[],o=0;while(o+32<=b.byteLength){if(v.getUint32(o)!==0x424d4231||v.getUint8(o+4)!==1)break;let n=v.getUint32(o+8);if(n>4096||o+32+n>b.byteLength)break;a.push([v.getUint8(o+5),new DataView(b,o+32,n)]);o+=32+n}return a}
-function tlvs(v){let a=[],o=0;while(o+4<=v.byteLength){let t=v.getUint8(o),k=v.getUint8(o+1),n=v.getUint16(o+2);o+=4;if(o+n>v.byteLength)break;let x=k===4&&n===8?u64(v,o):(k===7&&n===4?v.getInt32(o):td.decode(new Uint8Array(v.buffer,v.byteOffset+o,n)));a.push([t,x]);o+=n}return a}
-async function get(p){let r=await fetch(p,{cache:'no-store'});if(!r.ok)throw Error(r.status);return frames(await r.arrayBuffer())}
-function status(v){if(v.byteLength<44||v.getUint8(13)!==2)return'';let slot=v.getUint8(29),ins=v.getUint8(30),on=v.getUint8(31),h='';for(let i=0;i<4;i++)h+='<div class=card><b>Slot '+(i+1)+(slot===i?' / selected':'')+'</b><br>Filament '+((ins>>i)&1)+' / Online '+((on>>i)&1)+'<br>Motion '+v.getUint8(32+i)+' / Pull '+v.getUint8(36+i)+'%</div>';return h}
-let last=0n;async function refresh(){try{let cur=await get('/api/current.bin'),slots='';for(let [t,v] of cur)if(t===16)slots+=status(v);d.innerHTML=slots||'<span class=muted>No STATUS received</span>';let diag=await get('/api/diagnostics.bin'),h='';for(let [t,v] of diag)if(t===19)for(let [k,x] of tlvs(v))h+='<div class=card><span class=muted>'+(names[k]||'metric '+k)+'</span><br>'+x+'</div>';m.innerHTML=h;s.textContent='Binary live snapshot / refresh 3 s';let logs=await get('/api/logs.bin?after='+last.toString()+'&limit=32'),lines=[];for(let [t,v] of logs)if(t===20){let q=BigInt(u64(v,0)),up=u64(v,8),sev=v.getUint8(16),cn=v.getUint8(17),mn=v.getUint16(18),o=22,c=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,cn));o+=cn;let msg=td.decode(new Uint8Array(v.buffer,v.byteOffset+o,mn));if(q>last)last=q;lines.push('['+up+' ms] '+sev+' '+c+': '+msg)}if(lines.length)l.textContent=(lines.join('\\n')+'\\n'+l.textContent).slice(0,12000)}catch(e){s.textContent='Refresh error: '+e}}refresh();setInterval(refresh,3000)</script>"""
 
 
 class _Response:
@@ -37,13 +42,14 @@ class _Response:
             self.parts.append(body)
         self.offset = 0
 
-    def current(self):
+    def current(self, maximum=None):
         while self.parts and self.offset >= len(self.parts[0]):
             self.parts.pop(0)
             self.offset = 0
         if not self.parts:
             return b""
-        return memoryview(self.parts[0])[self.offset:]
+        value = memoryview(self.parts[0])[self.offset:]
+        return value[:maximum] if maximum and len(value) > maximum else value
 
     def consume(self, count):
         while count and self.parts:
@@ -61,16 +67,74 @@ class _Response:
     def __contains__(self, value):
         return any(value in part for part in self.parts)
 
+    def close(self):
+        pass
+
+
+class _FileResponse:
+    """Streams a staged file one bounded chunk at a time.
+
+    Reading the whole page into RAM per request would trade a permanent 14 KB
+    allocation for a recurring one, which is worse: the recurring version
+    fragments the heap. Only ``chunk_size`` bytes are live at any moment.
+    """
+
+    def __init__(self, header, file_object, length,
+                 chunk_size=FILE_CHUNK_BYTES):
+        self.file = file_object
+        self.remaining = length
+        self.pending = memoryview(header)
+        self.chunk_size = chunk_size
+
+    def current(self, maximum=None):
+        if not len(self.pending):
+            if self.remaining <= 0:
+                return b""
+            data = self.file.read(min(self.chunk_size, self.remaining))
+            if not data:
+                # A truncated file must end the response rather than spin: the
+                # client already has our Content-Length and will notice.
+                self.remaining = 0
+                return b""
+            self.remaining -= len(data)
+            self.pending = memoryview(data)
+        value = self.pending
+        return value[:maximum] if maximum and len(value) > maximum else value
+
+    def consume(self, count):
+        if count >= len(self.pending):
+            self.pending = memoryview(b"")
+            return
+        self.pending = self.pending[count:]
+
+    def done(self):
+        return not len(self.pending) and self.remaining <= 0
+
+    def __contains__(self, _value):
+        # Staged bytes are gzip; substring assertions do not apply.
+        return False
+
+    def close(self):
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
 
 class WebUI:
-    def __init__(self, binary_provider, port=80, error_handler=None):
+    def __init__(self, binary_provider, port=80, error_handler=None,
+                 settings_provider=None):
         self.binary_provider = binary_provider
         self.error_handler = error_handler
+        self.settings_provider = settings_provider
         self.port = port
         self.server = None
         self.servers = []
         self.client = None
-        self.request = bytearray()
+        self.request = bytearray(MAX_REQUEST_BYTES)
+        self.request_view = memoryview(self.request)
+        self.request_length = 0
+        self.request_meta = None
         self.response = None
         self.close_at_ms = None
         self.client_deadline_ms = None
@@ -82,7 +146,7 @@ class WebUI:
         if ipv6_only:
             server.setsockopt(41, 27, 1)
         server.bind((address, port))
-        server.listen(1)
+        server.listen(HTTP_LISTEN_BACKLOG)
         server.setblocking(False)
         return server
 
@@ -96,24 +160,103 @@ class WebUI:
         self.servers.append(self.server)
 
     @staticmethod
-    def _http_response(status, content_type, body):
+    def _header(status, content_type, size, extra=""):
+        return ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
+                "Referrer-Policy: no-referrer\r\n%sConnection: close\r\n\r\n" %
+                (status, content_type, size, extra)).encode()
+
+    @classmethod
+    def _http_response(cls, status, content_type, body):
         size = sum(len(item) for item in body) if isinstance(
             body, (list, tuple)) else len(body)
-        header = ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n" %
-                  (status, content_type, size)).encode()
-        return _Response(header, body)
+        return _Response(cls._header(status, content_type, size), body)
+
+    @classmethod
+    def _static_response(cls, path, content_type="text/html; charset=utf-8",
+                         rebuild="tools/build_web_ui.py", gzipped=True):
+        """Streams a staged asset; the Pico never compresses at runtime."""
+        try:
+            size = os.stat(path)[6]
+            handle = open(path, "rb")
+        except OSError:
+            return cls._http_response(
+                "503 Service Unavailable", "text/plain",
+                ("asset missing; run %s\n" % rebuild).encode())
+        header = cls._header("200 OK", content_type, size,
+                             "Content-Encoding: gzip\r\n" if gzipped else "")
+        return _FileResponse(header, handle, size)
+
+    def _request_metadata(self):
+        if self.request_meta is not None:
+            return self.request_meta
+        marker = self.request.find(b"\r\n\r\n", 0, self.request_length)
+        if marker < 0:
+            return None
+        lines = bytes(self.request_view[:marker]).split(b"\r\n")
+        request_line = lines[0].split() if lines else ()
+        method = request_line[0] if request_line else b""
+        path = request_line[1] if len(request_line) > 1 else b""
+        headers = {}
+        for line in lines[1:]:
+            if b":" not in line:
+                continue
+            name, value = line.split(b":", 1)
+            headers[name.strip().lower().decode()] = value.strip().decode()
+        try:
+            length = int(headers.get("content-length", "0"))
+        except ValueError:
+            length = -1
+        self.request_meta = method, path, headers, length, marker + 4
+        return self.request_meta
+
+    def _request_complete(self):
+        metadata = self._request_metadata()
+        if metadata is None:
+            return False
+        length, body_start = metadata[3], metadata[4]
+        return length < 0 or length > MAX_BODY_BYTES or \
+            self.request_length - body_start >= length
 
     def _finish_request(self):
-        line = bytes(self.request).split(b"\r\n", 1)[0].split()
-        method = line[0] if line else b""
-        path = line[1] if len(line) > 1 else b""
-        if method != b"GET":
+        method, path, headers, length, body_start = \
+            self._request_metadata()
+        if length < 0:
+            self.response = self._http_response(
+                "400 Bad Request", "text/plain", b"invalid content length\n")
+            return
+        if length > MAX_BODY_BYTES:
+            self.response = self._http_response(
+                "413 Payload Too Large", "text/plain", b"body too large\n")
+            return
+        body = bytes(self.request_view[body_start:body_start + length]) \
+            if length else b""
+        if (path.startswith(b"/api/device-key") or
+                path.startswith(b"/api/transport")) and self.settings_provider:
+            result = self.settings_provider(
+                method.decode(), path.decode(), headers, body)
+            self.response = self._http_response(*result) if result else \
+                self._http_response("404 Not Found", "text/plain",
+                                    b"Not found\n")
+        elif method != b"GET":
             self.response = self._http_response(
                 "405 Method Not Allowed", "text/plain", b"GET only\n")
-        elif path == b"/":
-            self.response = self._http_response(
-                "200 OK", "text/html; charset=utf-8", PAGE)
+        elif path.split(b"?", 1)[0] == b"/":
+            # The binary routes already strip the query string; the page did
+            # not, so any link carrying one answered 404 instead of the UI.
+            self.response = self._static_response(INDEX_PATH)
+        elif path.split(b"?", 1)[0] == b"/api/schema.json":
+            # Self-description so a reader can decode every binary endpoint
+            # without the device source. Generated at build time, so serving it
+            # costs no heap and no CPU beyond the file stream.
+            #
+            # Served uncompressed on purpose: this is the entry point, and the
+            # notes explaining that everything else is gzipped are inside it.
+            # urllib does not transparently inflate, so a naive first read of a
+            # gzipped schema fails before it can tell the reader why.
+            self.response = self._static_response(
+                SCHEMA_PATH, "application/json; charset=utf-8",
+                "tools/generate_api_schema.py", gzipped=False)
         elif path.startswith(b"/api/") and b".bin" in path:
             value = self.binary_provider(path.decode())
             self.response = self._http_response(
@@ -125,13 +268,18 @@ class WebUI:
                 "404 Not Found", "text/plain", b"Not found\n")
 
     def _close_client(self):
+        if self.response is not None:
+            # A file-backed response owns an open handle; dropping the reference
+            # would leak a littlefs descriptor on every aborted request.
+            self.response.close()
         if self.client:
             try:
                 self.client.close()
             except OSError:
                 pass
         self.client = None
-        self.request = bytearray()
+        self.request_length = 0
+        self.request_meta = None
         self.response = None
         self.close_at_ms = None
         self.client_deadline_ms = None
@@ -152,7 +300,7 @@ class WebUI:
             return
         if self.client and self.response is not None:
             try:
-                sent = self.client.send(self.response.current())
+                sent = self.client.send(self.response.current(MAX_SEND_BYTES))
             except OSError as error:
                 if _would_block(error):
                     return
@@ -168,22 +316,34 @@ class WebUI:
                 self._touch()
             return
         if self.client:
+            if self.request_length >= MAX_REQUEST_BYTES:
+                self.response = self._http_response(
+                    "413 Payload Too Large", "text/plain", b"Too large\n")
+                return
+            maximum = min(
+                MAX_RECV_BYTES, MAX_REQUEST_BYTES - self.request_length)
+            target = self.request_view[
+                self.request_length:self.request_length + maximum]
             try:
-                data = self.client.recv(256)
+                try:
+                    count = self.client.readinto(target)
+                except AttributeError:
+                    data = self.client.recv(maximum)
+                    count = len(data)
+                    target[:count] = data
             except OSError as error:
                 if _would_block(error):
                     return
                 self._close_client()
                 return
-            if not data:
+            if count is None:
+                return
+            if count == 0:
                 self._close_client()
                 return
-            self.request.extend(data)
+            self.request_length += count
             self._touch()
-            if len(self.request) > MAX_REQUEST_BYTES:
-                self.response = self._http_response(
-                    "413 Payload Too Large", "text/plain", b"Too large\n")
-            elif b"\r\n\r\n" in self.request:
+            if self._request_complete():
                 try:
                     self._finish_request()
                 except Exception as error:

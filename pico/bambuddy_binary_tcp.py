@@ -92,6 +92,7 @@ class BMB1TCPClient:
         self.sock = None
         self.parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 2))
         self.rx_buffer = bytearray(512)
+        self._receive_into = None
         self.tx_buffer = bytearray(C.MAX_MESSAGE_SIZE)
         self.auth_buffer = bytearray(512)
         self.control_buffer = bytearray(256)
@@ -133,6 +134,7 @@ class BMB1TCPClient:
             except Exception:
                 pass
         self.sock = None
+        self._receive_into = None
         self.tx_view = None
         self.tx_offset = 0
         self.control_pending_length = 0
@@ -193,14 +195,18 @@ class BMB1TCPClient:
 
     def _receive(self, now_ms):
         try:
-            count = self.sock.recv_into(self.rx_buffer)
-        except AttributeError:
-            return True
+            if self._receive_into is None:
+                self._receive_into = getattr(self.sock, "readinto", None)
+                if self._receive_into is None:
+                    self._receive_into = self.sock.recv_into
+            count = self._receive_into(self.rx_buffer)
         except OSError as error:
             if (error.args[0] if error.args else None) in (11, 35, 10035):
                 return True
             raise
-        if not count:
+        if count is None:
+            return True
+        if count == 0:
             return False
         self.last_rx_ms = now_ms
         self.rx_bytes += count
@@ -242,8 +248,11 @@ class BMB1TCPClient:
         elif self.state == ONLINE and message.message_type == C.CONTROL:
             self._handle_control(message)
         elif self.state == ONLINE and message.message_type == C.PING:
-            token = binary.parse_pong(message) if False else struct.unpack_from(
-                ">Q", message.payload, 0)[0]
+            # struct.error is not in poll()'s except clause, so a short PING
+            # payload would escape as an uncounted-for runtime exception.
+            if len(message.payload) < 8:
+                return
+            token = struct.unpack_from(">Q", message.payload, 0)[0]
             size = binary.write_ping(
                 self.tx_buffer, 0, C.PONG, self.outbox.pico_boot_id, token)
             self._queue_bytes(memoryview(self.tx_buffer)[:size])
@@ -307,8 +316,32 @@ class BMB1TCPClient:
     def attach_connected_socket(self, sock):
         """Test/embedded hook after a nonblocking connect has completed."""
         self.sock = sock
+        self._receive_into = None
         self.state = CHALLENGE_WAIT
         self.state_deadline_ms = self.ticks_add(self.clock_ms(), 5000)
+
+    def set_device_key(self, device_key, now_ms):
+        """Replace the authentication key and reconnect without a reboot."""
+        if len(device_key) != 32:
+            raise ValueError("device key must be 32 bytes")
+        self.device_key = bytes(device_key)
+        if self.sock is not None:
+            self._close(now_ms, "device key updated")
+        else:
+            self.state = WIFI_WAIT
+            self.next_action_ms = 0
+
+    def set_endpoint(self, host, port, now_ms):
+        """Replace the TCP endpoint and reconnect without a reboot."""
+        if not host or int(port) < 1 or int(port) > 65535:
+            raise ValueError("invalid endpoint")
+        self.host = host
+        self.port = int(port)
+        if self.sock is not None:
+            self._close(now_ms, "transport endpoint updated")
+        else:
+            self.state = WIFI_WAIT
+            self.next_action_ms = 0
 
     def poll(self, now_ms, wifi_online=True):
         if not wifi_online:
@@ -404,4 +437,11 @@ class BMB1TCPClient:
                     record = memoryview(self.tx_buffer)[:len(record)]
                     self.replay_count += 1
                 self._queue_bytes(record, sequence)
-                self._send_step()
+                # Same guard as the other two _send_step call sites: an
+                # unwrapped OSError here escapes to main.py and is counted as a
+                # runtime exception on every reconnect instead of closing.
+                try:
+                    self._send_step()
+                except OSError as error:
+                    self._close(now_ms, error)
+                    return

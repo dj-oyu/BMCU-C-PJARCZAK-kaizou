@@ -151,10 +151,15 @@ class BMJ1Journal:
     """Small rotating-segment manager; staging remains independent of I/O."""
 
     def __init__(self, directory, pico_boot_id, created_at_us,
-                 staging_slots=4, segment_size=65536):
+                 staging_slots=4, segment_size=65536, max_segments=8,
+                 commit_bytes=8192):
         self.directory = directory.rstrip("/")
         self.pico_boot_id = pico_boot_id
         self.segment_size = segment_size
+        # Segments used to accumulate without bound: once littlefs filled up,
+        # every later flush_one raised ENOSPC instead of dropping old history.
+        self.max_segments = max_segments if max_segments > 0 else 0
+        self.segments_removed = 0
         self.segment_sequence = 1
         self.stager = JournalStager(
             bytearray(RECORD_MAX_SIZE * staging_slots))
@@ -162,12 +167,47 @@ class BMJ1Journal:
         self.watermarks = load_watermarks(self.directory)
         self.checkpoint_dirty = False
         self.bytes_written = 0
+        self.uncommitted_bytes = 0
+        self.commit_bytes = commit_bytes
+        self.commit_count = 0
         self.failure_count = 0
         self.file = None
         self._open(created_at_us)
 
     def _path(self, sequence):
         return "%s/%08d.bmj" % (self.directory, sequence)
+
+    def _prune_segments(self):
+        """Drop the oldest segments so the directory stays bounded.
+
+        Names are zero-padded, so lexicographic order is numeric order. The
+        segment currently open is never a candidate, and ack.bma is untouched.
+        """
+        if not self.max_segments:
+            return 0
+        try:
+            import uos as os
+        except ImportError:
+            import os
+        try:
+            names = sorted(name for name in os.listdir(self.directory)
+                           if name.endswith(".bmj"))
+        except OSError:
+            return 0
+        current = self.path.rsplit("/", 1)[-1]
+        removable = [name for name in names if name != current]
+        excess = len(removable) + 1 - self.max_segments
+        if excess <= 0:
+            return 0
+        removed = 0
+        for name in removable[:excess]:
+            try:
+                os.remove(self.directory + "/" + name)
+            except OSError:
+                continue
+            removed += 1
+        self.segments_removed += removed
+        return removed
 
     def _open(self, created_at_us):
         try:
@@ -199,18 +239,23 @@ class BMJ1Journal:
         self.file.write(header)
         self.file.flush()
         self.bytes_written += SEGMENT_HEADER_SIZE
+        self._prune_segments()
 
     def stage(self, *args):
         return self.stager.stage(*args)
 
     def flush_one(self, created_at_us=0):
+        """Write one staged record. Persisting it is ``commit``'s job.
+
+        Measured on a Pico 2 W: the write costs about 1.6 ms while the littlefs
+        commit costs about 45 ms with interrupts disabled, and one commit covers
+        any number of writes. Committing per record therefore paid the expensive
+        half every time, which is what starved the UART receive path.
+        """
         if self.file is None:
             return 0
         current = self.stager.ring.peek()
         if current is None:
-            if self.checkpoint_dirty:
-                save_watermarks(self.directory, self.watermarks)
-                self.checkpoint_dirty = False
             return 0
         record_size = len(current[1])
         try:
@@ -220,6 +265,8 @@ class BMJ1Journal:
         if position and position + record_size > self.segment_size:
             self.file.flush()
             self.file.close()
+            # Closing persisted everything written into the old segment.
+            self.uncommitted_bytes = 0
             self.segment_sequence += 1
             self.path = self._path(self.segment_sequence)
             self.file = open(self.path, "wb")
@@ -228,10 +275,29 @@ class BMJ1Journal:
                                  self.segment_sequence, created_at_us)
             self.file.write(header)
             self.bytes_written += SEGMENT_HEADER_SIZE
+            self._prune_segments()
         written = self.stager.flush_one(self.file)
-        self.file.flush()
         self.bytes_written += written
+        self.uncommitted_bytes += written
+        if self.uncommitted_bytes >= self.commit_bytes:
+            # Bound how much history a power cut can take with it. A soft reset
+            # keeps everything; only losing power before a commit costs data.
+            self.commit()
         return written
+
+    def commit(self):
+        """Persist what flush_one has written, and the ACK watermarks."""
+        if self.uncommitted_bytes == 0 and not self.checkpoint_dirty:
+            return 0
+        pending = self.uncommitted_bytes
+        if self.file is not None and pending:
+            self.file.flush()
+        self.uncommitted_bytes = 0
+        if self.checkpoint_dirty:
+            save_watermarks(self.directory, self.watermarks)
+            self.checkpoint_dirty = False
+        self.commit_count += 1
+        return pending
 
     def record_ack(self, pico_boot_id, watermark):
         previous = self.watermarks.get(pico_boot_id, 0)
@@ -285,19 +351,32 @@ def scan_available_ranges(directory):
             current[1] = max(current[1], sequence)
 
     recover_directory(directory, found)
+    # Dict insertion order follows the segment scan, so the retained tail is
+    # the most recent history rather than arbitrary numeric boot IDs.
     return tuple((boot, value[0], value[1])
-                 for boot, value in sorted(ranges.items()))
+                 for boot, value in ranges.items())
 
 
 class JournalReplayCursor:
-    """Pages all unacknowledged journal records into bounded RAM."""
+    """Pages recent unacknowledged journal records into bounded RAM."""
 
     def __init__(self, directory):
         self.directory = directory.rstrip("/")
         self.watermarks = load_watermarks(directory)
         self.pending = None
+        ranges = scan_available_ranges(directory)
+        historical_limit = max(0, C.MAX_REPLAY_BOOT_RANGES - 1)
+        self.available_ranges = ranges[-historical_limit:] \
+            if historical_limit else ()
+        self.allowed_boots = {
+            boot_id for boot_id, _oldest, _newest in self.available_ranges
+        }
+        self.next_sequences = {
+            boot_id: max(self.watermarks.get(boot_id, 0) + 1, oldest)
+            for boot_id, oldest, _newest in self.available_ranges
+        }
+        self.drop_payload = bytearray(32)
         self._iterator = self._records()
-        self.available_ranges = scan_available_ranges(directory)
 
     def _records(self):
         try:
@@ -317,6 +396,8 @@ class JournalReplayCursor:
                             source, scratch):
                         _, kind, flags, link, sequence, received, payload = \
                             record
+                        if boot_id not in self.allowed_boots:
+                            continue
                         if sequence <= self.watermarks.get(boot_id, 0):
                             continue
                         yield (boot_id, kind, flags, link, sequence, received,
@@ -332,12 +413,32 @@ class JournalReplayCursor:
                     self.pending = next(self._iterator)
                 except StopIteration:
                     break
+            boot_id, _kind, _flags, _link, sequence, received, _payload = \
+                self.pending
+            expected = self.next_sequences.get(boot_id, sequence)
+            if sequence > expected:
+                last = min(sequence - 1, expected + 0xFFFFFFFF - 1)
+                struct.pack_into(
+                    ">QQQIB3s", self.drop_payload, 0, received,
+                    expected, last, last - expected + 1,
+                    C.DROP_JOURNAL_CORRUPT, b"\0\0\0")
+                if not outbox.restore(
+                        boot_id, C.TRANSPORT_DROP, C.FLAG_CRITICAL,
+                        C.GLOBAL_SCOPE, expected, received,
+                        self.drop_payload):
+                    break
+                self.next_sequences[boot_id] = last + 1
+                loaded += 1
+                continue
+            if sequence < expected:
+                self.pending = None
+                continue
             if not outbox.restore(*self.pending):
                 break
+            self.next_sequences[boot_id] = sequence + 1
             self.pending = None
             loaded += 1
         return loaded
-
 
 def load_watermarks(directory):
     path = directory.rstrip("/") + "/ack.bma"

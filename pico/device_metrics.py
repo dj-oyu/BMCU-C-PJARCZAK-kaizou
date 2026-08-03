@@ -10,6 +10,20 @@ import bmcu_binary as binary
 import bmcu_binary_constants as C
 
 
+def _bit_length(value):
+    """Return the positive integer bit length on MicroPython and CPython."""
+    length = 0
+    while value:
+        length += 1
+        value >>= 1
+    return length
+
+
+def rp2_temperature_milli_c(reading):
+    """Convert an RP2040/RP2350 temperature ADC reading to milli-Celsius."""
+    voltage_uv = max(0, min(65535, int(reading))) * 3300000 // 65535
+    return 27000 - ((voltage_uv - 706000) * 1000 // 1721)
+
 class MetricWindow:
     """Approximate quantiles with fixed power-of-two microsecond buckets."""
 
@@ -22,7 +36,7 @@ class MetricWindow:
     def add(self, value):
         value = max(0, int(value))
         bucket = min(len(self.buckets) - 1,
-                     value.bit_length() if value else 0)
+                     _bit_length(value))
         self.buckets[bucket] += 1
         self.count += 1
         self.total += value
@@ -89,7 +103,8 @@ class DeviceMetrics:
             memoryview(self.value)[:4])
 
     def snapshot(self, uptime_ms, monitors, outbox=None, client=None,
-                 journal=None, wifi_rssi=None, exception_count=0):
+                 journal=None, wifi_rssi=None, exception_count=0,
+                 temperature_milli_c=None):
         heap_free = gc.mem_free() if hasattr(gc, "mem_free") else 0
         if self.heap_min_free is None or heap_free < self.heap_min_free:
             self.heap_min_free = heap_free
@@ -131,6 +146,10 @@ class DeviceMetrics:
              journal.failure_count if journal else 0),
         ):
             offset = self._u64(offset, tag, value)
+        if temperature_milli_c is not None:
+            offset = self._i32(
+                offset, C.DIAG_TEMPERATURE_MILLI_C,
+                temperature_milli_c)
         if wifi_rssi is not None:
             offset = self._i32(offset, C.DIAG_WIFI_RSSI_DBM, wifi_rssi)
         uart_tags = (

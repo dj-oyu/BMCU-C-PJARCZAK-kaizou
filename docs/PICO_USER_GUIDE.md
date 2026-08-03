@@ -76,10 +76,27 @@ RS-485ではありません。H1-3(3.3 V)は絶対に接続しないでくださ
 USBシリアルが認識されない個体(下記トラブルシューティング参照)でも、
 次の2経路でデプロイできます。
 
+> **注**: まず§4の通常手順を試し、駄目なときだけ以下に落ちてください。
+> WebREPL経由はデプロイのたびにソフトリセットすることになり、DMAチャンネルが
+> 解放されない問題(`pico/uart_dma_rx.py` §8)を踏みやすくなります。
+> USBが列挙されない個体でも、接触不良が原因で後から復活する例があります。
+
 - **WebREPL(OTA)**: デバイス側でWebREPLを有効化済みなら、
   `webrepl_cli.py -p <パスワード> <ファイル> <ホスト>:/<ファイル名>` で
   Wi-Fi経由の転送が可能です。パスワード等はローカル専用メモ
   (`pico/SECRETS_LOCAL.md`、Git管理外)を参照。
+  Web UIは`.py`ではなくビルド成果物なので、モジュールとは別に送る必要があります。
+  ディレクトリはWebREPLのRELP上で先に作成してください:
+
+  ```python
+  import os; os.mkdir('www')   # 既にあれば OSError になるので無視してよい
+  ```
+
+  ```powershell
+  python webrepl_cli.py -p <パスワード> pico\www\index.html.gz <ホスト>:/www/index.html.gz
+  ```
+
+  転送し忘れると`/`が503を返し、本文に`tools/build_web_ui.py`を実行するよう出ます。
 - **BOOTSEL直書き**: BOOTSELモードは通常のUSB故障の影響を受けません。
   PC上で `littlefs-python` を使いアプリ+`secrets.py` 入りのlittlefsイメージ
   (block 4096 / prog 256)を作成し、`picotool info -a <UF2>` で確認した
@@ -155,7 +172,8 @@ USBシリアルが認識されない個体(下記トラブルシューティン�
 | Web UIが開けない | `secrets.py` のWi-Fi設定、`/api/pico/logs` かUSBシリアルでログ確認 |
 | ソフトリセットが拒否される | エラーメッセージ参照。アイドル条件(§6)を満たしているか |
 | Bambuddyに届かない | `/settings` の接続状態表示、URL・トークン、サーバ起動 |
-| USBシリアル(COM)が出ない | まず充電専用ケーブルを疑う(給電されるが認識されない)。BOOTSELモードで`RP2350`/`RPI-RP2`ドライブが見えるならデータ線は正常。**BOOTSELだけ動きMicroPythonでは全ビルドでCOMが出ない個体はUSB系のハード不良**(Wi-Fi・UARTは無事なことが多い)。§4の代替デプロイで運用可能 |
+| USBシリアル(COM)が出ない | まず充電専用ケーブルを疑う(給電されるが認識されない)。BOOTSELモードで`RP2350`/`RPI-RP2`ドライブが見えるならデータ線は正常。**BOOTSELだけ動きMicroPythonでは全ビルドでCOMが出ない場合はUSB系の不良を疑う**(Wi-Fi・UARTは無事なことが多い)。§4の代替デプロイで運用可能。ただしハード不良と断ずる前に、コネクタの抜き差しと基板の清掃を試すこと(接触不良で列挙されず、後から復活する例がある) |
+| 応答しないがpingは通る(TCPはacceptするがHTTPが返らない) | `main.py` が起動に失敗してREPLに落ちている。USBが使えるなら `mpremote connect COMx exec "import gc; print(gc.mem_free())"` で確認でき、空きヒープが400KB超なら本体は動いていない。`mpremote connect COMx reset` のハードリセットで復帰する。ソフトリセットでは復帰しないことがある |
 
 片リンクの障害はそのリンクだけを止め、他のリンクやPico本体は動き続けます。
 Picoの電源が落ちてもBMCU単体の動作には影響しません。

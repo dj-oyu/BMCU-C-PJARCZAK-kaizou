@@ -50,7 +50,101 @@ class PicoMonitorTests(unittest.TestCase):
         decoder = link.FrameDecoder()
         decoder.feed(b"x" * 10000)
         self.assertLessEqual(len(decoder._buffer), link.MAX_DECODER_BUFFER)
-        self.assertGreater(decoder.frame_errors, 0)
+
+    def test_a_chunk_larger_than_the_noise_bound_is_fully_parsed(self):
+        # The decoder used to keep only the last MAX_DECODER_BUFFER bytes of a
+        # larger chunk, discarding intact frames read in the same drain.
+        decoder = link.FrameDecoder()
+        wire = b"".join(
+            link.encode_frame(link.STATUS, index, bytes(range(27)))
+            for index in range(1, 21))
+        self.assertGreater(len(wire), link.MAX_DECODER_BUFFER * 4)
+
+        frames = decoder.feed(wire)
+
+        self.assertEqual([f["sequence"] for f in frames], list(range(1, 21)))
+        self.assertEqual(decoder.crc_errors, 0)
+        self.assertEqual(decoder.frame_errors, 0)
+        self.assertEqual(decoder.discarded_bytes, 0)
+
+    def test_frames_split_across_chunk_boundaries_still_decode(self):
+        decoder = link.FrameDecoder()
+        wire = b"".join(
+            link.encode_frame(link.STATUS, index, bytes(range(27)))
+            for index in range(1, 13))
+        frames = []
+        for offset in range(0, len(wire), 7):
+            frames.extend(decoder.feed(wire[offset:offset + 7]))
+
+        self.assertEqual([f["sequence"] for f in frames], list(range(1, 13)))
+        self.assertEqual(decoder.crc_errors, 0)
+
+    def test_pure_noise_is_counted_as_discarded_not_as_frame_errors(self):
+        decoder = link.FrameDecoder()
+        decoder.feed(b"x" * 10000)
+        self.assertEqual(decoder.frame_errors, 0)
+        self.assertEqual(decoder.crc_errors, 0)
+
+    def test_frames_buried_in_noise_are_recovered(self):
+        decoder = link.FrameDecoder()
+        good = link.encode_frame(link.STATUS, 5, bytes(range(27)))
+        frames = decoder.feed(b"\x00" * 400 + good + b"\x11" * 400)
+        self.assertEqual([f["sequence"] for f in frames], [5])
+
+    def test_crc_rejection_captures_the_whole_candidate_frame(self):
+        # Counters alone cannot tell a flipped bit from a truncated frame, so
+        # the rejected bytes have to survive for offline analysis.
+        capture = link.RejectCapture()
+        decoder = link.FrameDecoder(capture)
+        decoder.clock_ms = 4242
+        wire = bytearray(link.encode_frame(link.STATUS, 7, bytes(range(27))))
+        wire[9] ^= 0x01  # one flipped bit inside the payload
+
+        decoder.feed(bytes(wire))
+
+        self.assertEqual(decoder.crc_errors, 1)
+        records = list(capture.records())
+        self.assertEqual(len(records), 1)
+        ordinal, reason, timestamp, data = records[0]
+        self.assertEqual((ordinal, reason, timestamp), (1, link.REJECT_CRC, 4242))
+        self.assertEqual(bytes(data), bytes(wire))
+
+    def test_capture_keeps_the_most_recent_runs_and_drops_older_ones(self):
+        capture = link.RejectCapture(slots=3)
+        for index in range(5):
+            capture.add(link.REJECT_CRC, bytes((index,)) * 4, index)
+
+        ordinals = [record[0] for record in capture.records()]
+        self.assertEqual(capture.captured, 5)
+        self.assertEqual(ordinals, [3, 4, 5], "oldest first, newest retained")
+
+    def test_capture_truncates_a_run_longer_than_a_slot(self):
+        capture = link.RejectCapture(slots=1, size=8)
+        capture.add(link.REJECT_LENGTH, bytes(range(40)), 1)
+        _ordinal, _reason, _timestamp, data = next(iter(capture.records()))
+        self.assertEqual(bytes(data), bytes(range(8)))
+
+    def test_bad_length_byte_is_captured_with_its_context(self):
+        capture = link.RejectCapture()
+        decoder = link.FrameDecoder(capture)
+        decoder.feed(link.SYNC + b"\x83\x02\x01\x00\xff" + b"junkjunk")
+
+        self.assertEqual(decoder.frame_errors, 1)
+        _ordinal, reason, _timestamp, data = next(iter(capture.records()))
+        self.assertEqual(reason, link.REJECT_LENGTH)
+        self.assertTrue(bytes(data).startswith(link.SYNC))
+
+    def test_a_clean_stream_captures_nothing(self):
+        capture = link.RejectCapture()
+        decoder = link.FrameDecoder(capture)
+        decoder.feed(link.encode_frame(link.STATUS, 1, bytes(range(27))))
+
+        self.assertEqual(capture.captured, 0)
+        self.assertEqual(list(capture.records()), [])
+
+    def test_monitor_capture_is_wired_to_its_decoder(self):
+        self.assertIsNotNone(self.monitor.capture)
+        self.assertIs(self.monitor.decoder.capture, self.monitor.capture)
 
     def test_hello_starts_one_atomic_baseline(self):
         self.hello()
@@ -222,6 +316,68 @@ class PicoMonitorTests(unittest.TestCase):
         self.monitor.channels[2]["motor_pwm"] = 1
         self.assertEqual(self.monitor.soft_reset_guard_error(),
                          "BMCU motion is not idle")
+
+    def _idle_snapshot(self, at_ms=1000):
+        self.monitor.link_state = "online"
+        self.monitor.snapshot = [{}]
+        self.monitor.snapshot_at_ms = at_ms
+        idle = {"motor_pwm": 0, "controller_motion": 3, "ams_motion": 0}
+        self.monitor.channels = [dict(idle) for _ in range(4)]
+
+    def test_soft_reset_refuses_a_snapshot_older_than_the_limit(self):
+        # The gate reads motor state from the snapshot, which is only requested
+        # when the baseline is invalidated. Without an age check a snapshot
+        # taken while idle keeps permitting a reset after motion has started.
+        self._idle_snapshot(at_ms=1000)
+        fresh = 1000 + self.monitor.MAX_SNAPSHOT_AGE_MS - 1
+        stale = 1000 + self.monitor.MAX_SNAPSHOT_AGE_MS
+
+        self.assertIsNone(self.monitor.soft_reset_guard_error(fresh))
+        self.assertEqual(self.monitor.soft_reset_guard_error(stale),
+                         "BMCU status is stale; retry once it refreshes")
+
+    def test_soft_reset_refuses_when_the_snapshot_has_no_timestamp(self):
+        self._idle_snapshot(at_ms=1000)
+        self.monitor.snapshot_at_ms = None
+        self.assertEqual(self.monitor.soft_reset_guard_error(5000),
+                         "BMCU status is stale; retry once it refreshes")
+
+    def test_omitting_the_clock_keeps_the_previous_contract(self):
+        # Callers that cannot supply a clock still get the completeness and
+        # idleness checks rather than an exception.
+        self._idle_snapshot(at_ms=1000)
+        self.assertIsNone(self.monitor.soft_reset_guard_error())
+
+    def test_a_completed_snapshot_records_when_it_arrived(self):
+        self.hello()
+        self.monitor._handle_frame(
+            frame(link.FULL_STATUS_RECORD, 2, snapshot_payload(7, 0, 1)), 4242)
+        self.assertEqual(self.monitor.snapshot_at_ms, 4242)
+
+    def test_invalidating_the_baseline_clears_the_snapshot_timestamp(self):
+        self._idle_snapshot(at_ms=1000)
+        self.monitor._invalidate_baseline(2000, "test")
+        self.assertIsNone(self.monitor.snapshot_at_ms)
+        self.assertEqual(self.monitor.soft_reset_guard_error(2000),
+                         "complete fresh BMCU status is required")
+
+    def test_refresh_is_requested_once_while_one_is_outstanding(self):
+        self._idle_snapshot()
+        self.assertTrue(self.monitor.refresh_snapshot_if_idle())
+        decoded = link.FrameDecoder().feed(self.uart.writes[-1])[0]
+        self.assertEqual(decoded["kind"], link.GET_FULL_STATUS)
+
+        before = len(self.uart.writes)
+        self.assertFalse(self.monitor.refresh_snapshot_if_idle())
+        self.assertEqual(len(self.uart.writes), before)
+
+    def test_the_guard_never_sends_anything(self):
+        # Requesting a refresh belongs to the caller; a predicate that probes
+        # the link cannot be evaluated safely from a diagnostic view.
+        self._idle_snapshot(at_ms=1000)
+        before = len(self.uart.writes)
+        self.monitor.soft_reset_guard_error(1000 + 10 ** 6)
+        self.assertEqual(len(self.uart.writes), before)
 
     def test_soft_reset_request_and_ack_are_tracked(self):
         sequence = self.monitor.request_soft_reset(0x12345678, reason=2, ttl_ms=4000)

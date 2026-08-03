@@ -145,6 +145,27 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(outbox.acknowledge(99, 4), 1)
         self.assertIsNone(outbox.peek())
 
+    def test_drop_marker_has_a_reserved_slot_during_replay_saturation(self):
+        outbox = BMB1Outbox(99, durable_slots=2)
+        event = link.encode_frame(link.EVENT, 1, bytes(16))
+        self.assertEqual(outbox.enqueue_raw(0, 1000, event, link.EVENT), 1)
+        self.assertEqual(outbox.enqueue_raw(0, 1001, event, link.EVENT), 0)
+
+        self.assertEqual(outbox.queue_depth, 1)
+        outbox.peek()
+        self.assertEqual(outbox.queue_depth, 2)
+        self.assertEqual(outbox.forced_drop_count, 0)
+
+        outbox.acknowledge(99, 1)
+        sequence, message, protected, _ = outbox.peek()
+        self.assertEqual(sequence, 2)
+        self.assertTrue(protected)
+        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+        parser.feed(message)
+        drop = parser.next_message()
+        self.assertEqual(drop.message_type, C.TRANSPORT_DROP)
+        self.assertEqual(binary.parse_transport_drop(drop)[1:4], (2, 2, 1))
+
     def test_recovered_boot_ranges_are_reported_current_first(self):
         outbox = BMB1Outbox(99, durable_slots=4)
         payload = b"x"
@@ -152,6 +173,28 @@ class RawAndSchedulingTests(unittest.TestCase):
                        C.GLOBAL_SCOPE, 3, 1, payload)
         self.assertEqual(outbox.available_boot_ranges(),
                          ((99, 0, 0), (7, 3, 3)))
+
+    def test_historical_replay_cannot_jump_a_live_ack_gap(self):
+        outbox = BMB1Outbox(99, durable_slots=4, large_slots=4)
+        self.assertTrue(outbox.restore(
+            7, C.PICO_LOG, C.FLAG_JOURNALED,
+            C.GLOBAL_SCOPE, 500, 1, b"old"))
+        first = outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, 2, b"x" * 200)
+        second = outbox.enqueue_payload(
+            C.LINK_STATE, 0, 0, 3, b"small")
+        third = outbox.enqueue_payload(
+            C.PICO_DIAGNOSTIC, 0, C.GLOBAL_SCOPE, 4, b"y" * 200)
+        self.assertEqual((first, second, third), (1, 2, 3))
+
+        seen = []
+        for boot, watermark in ((99, 1), (99, 2), (99, 3), (7, 500)):
+            sequence, message, _, _ = outbox.peek()
+            seen.append((
+                int.from_bytes(bytes(message[20:28]), "big"), sequence))
+            self.assertEqual(outbox.acknowledge(boot, watermark), 1)
+        self.assertEqual(seen, [(99, 1), (99, 2), (99, 3), (7, 500)])
+        self.assertIsNone(outbox.peek())
 
 
 class JournalTests(unittest.TestCase):
@@ -228,12 +271,108 @@ class JournalTests(unittest.TestCase):
             managed.flush_one()
             managed.flush_one()
             managed.record_ack(99, 1)
-            managed.flush_one()
+            # Watermarks reach flash on commit, not on every record written.
+            managed.commit()
             managed.file.close()
             recovered = []
             self.assertEqual(journal.recover_directory(
                 directory, lambda *args: recovered.append(args)), 1)
             self.assertEqual(recovered[0][4], 2)
+
+    def test_records_are_written_without_committing_each_one(self):
+        # The write costs ~1.6 ms on the device, the commit ~45 ms with
+        # interrupts disabled. Committing per record is what starved the UART.
+        commits = []
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(directory, 99, 1000, staging_slots=8)
+            managed.file.flush = lambda: commits.append(1)
+            for sequence in range(1, 6):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"x")
+                managed.flush_one()
+            self.assertEqual(commits, [], "no commit until one is asked for")
+            self.assertGreater(managed.uncommitted_bytes, 0)
+
+            self.assertGreater(managed.commit(), 0)
+            self.assertEqual(len(commits), 1, "one commit covers every record")
+            self.assertEqual(managed.uncommitted_bytes, 0)
+            self.assertEqual(managed.commit_count, 1)
+            managed.file.close()
+
+    def test_commit_is_free_when_nothing_is_pending(self):
+        commits = []
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(directory, 99, 1000)
+            managed.file.flush = lambda: commits.append(1)
+            self.assertEqual(managed.commit(), 0)
+            self.assertEqual(commits, [])
+            self.assertEqual(managed.commit_count, 0)
+            managed.file.close()
+
+    def test_an_unbounded_backlog_forces_a_commit(self):
+        # A power cut can only take commit_bytes of history with it.
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=8, commit_bytes=64)
+            for sequence in range(1, 9):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"y" * 8)
+                managed.flush_one()
+            self.assertGreater(managed.commit_count, 0)
+            self.assertLess(managed.uncommitted_bytes, 64)
+            managed.file.close()
+
+    def test_rotation_counts_as_a_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1, segment_size=128,
+                commit_bytes=1 << 30)
+            for sequence in range(1, 12):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"z" * 8)
+                managed.flush_one(sequence)
+            # Closing the old segment persisted it, so nothing from before the
+            # rotation is still waiting.
+            self.assertLess(managed.uncommitted_bytes, 128)
+            managed.file.close()
+
+    def test_rotation_prunes_oldest_segments(self):
+        # Unbounded segments filled littlefs, after which every flush_one
+        # raised ENOSPC instead of dropping the oldest history.
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1, segment_size=128,
+                max_segments=3)
+            for sequence in range(1, 40):
+                managed.stage(C.BMCU_FRAME, 0, 0, sequence, sequence, b"x" * 8)
+                managed.flush_one(sequence)
+            managed.file.close()
+            names = sorted(name for name in os.listdir(directory)
+                           if name.endswith(".bmj"))
+            self.assertEqual(len(names), 3)
+            self.assertEqual(names[-1], "%08d.bmj" % managed.segment_sequence)
+            self.assertGreater(managed.segments_removed, 0)
+
+    def test_restart_prunes_history_beyond_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(5):
+                managed = journal.BMJ1Journal(
+                    directory, 99, 1000, staging_slots=1, max_segments=2)
+                managed.stage(C.BMCU_FRAME, 0, 0, 1, 5, b"x")
+                managed.flush_one()
+                managed.file.close()
+            names = [name for name in os.listdir(directory)
+                     if name.endswith(".bmj")]
+            self.assertEqual(len(names), 2)
+
+    def test_zero_max_segments_keeps_every_segment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for _ in range(4):
+                managed = journal.BMJ1Journal(
+                    directory, 99, 1000, staging_slots=1, max_segments=0)
+                managed.stage(C.BMCU_FRAME, 0, 0, 1, 5, b"x")
+                managed.flush_one()
+                managed.file.close()
+            names = [name for name in os.listdir(directory)
+                     if name.endswith(".bmj")]
+            self.assertEqual(len(names), 4)
 
     def test_corrupt_checkpoint_is_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -269,6 +408,42 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(seen, list(range(1, 201)))
             self.assertIn((99, 1, 200), outbox.historical_ranges)
 
+    def test_cursor_synthesizes_drop_for_sparse_journal_sequences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            managed = journal.BMJ1Journal(
+                directory, 99, 1000, staging_slots=1)
+            for sequence in (1, 4):
+                managed.stage(
+                    C.BMCU_FRAME, C.FLAG_CRITICAL, 0, sequence,
+                    sequence, b"x")
+                managed.flush_one()
+            managed.file.close()
+            cursor = journal.JournalReplayCursor(directory)
+            outbox = BMB1Outbox(100, durable_slots=4)
+            outbox.replay_pager = lambda: cursor.page_into(outbox, 4)
+            outbox.replay_pager()
+
+            seen = []
+            drop_range = None
+            while True:
+                current = outbox.peek()
+                if current is None:
+                    break
+                sequence, message, _, _ = current
+                parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+                parser.feed(message)
+                decoded = parser.next_message()
+                seen.append((sequence, decoded.message_type))
+                if decoded.message_type == C.TRANSPORT_DROP:
+                    drop_range = binary.parse_transport_drop(decoded)[1:4]
+                outbox.acknowledge(decoded.pico_boot_id, sequence)
+            self.assertEqual(seen, [
+                (1, C.BMCU_FRAME),
+                (2, C.TRANSPORT_DROP),
+                (4, C.BMCU_FRAME),
+            ])
+            self.assertEqual(drop_range, (2, 3, 2))
+
 
 class FakeSocket:
     def __init__(self, receive=b"", send_limit=13):
@@ -291,6 +466,29 @@ class FakeSocket:
 
     def close(self):
         pass
+
+
+class ReadIntoSocket:
+    def __init__(self, receive=b""):
+        self.receive = bytearray(receive)
+        self.sent = bytearray()
+
+    def readinto(self, target):
+        if not self.receive:
+            raise OSError(11)
+        count = min(len(target), len(self.receive))
+        target[:count] = self.receive[:count]
+        del self.receive[:count]
+        return count
+
+    def send(self, data):
+        self.sent.extend(data)
+        return len(data)
+
+
+class WouldBlockReadIntoSocket(ReadIntoSocket):
+    def readinto(self, _target):
+        return None
 
 
 class TCPClientTests(unittest.TestCase):
@@ -333,6 +531,31 @@ class TCPClientTests(unittest.TestCase):
         fake.receive.extend(self.frame(C.ACK, ack_payload, boot))
         client.poll(131)
         self.assertEqual(outbox.queue_depth, 0)
+
+    def test_micropython_readinto_receives_server_challenge(self):
+        boot = 0x1122334455667788
+        challenge = self.frame(C.SERVER_CHALLENGE, bytes(range(32)))
+        fake = ReadIntoSocket(challenge)
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(boot, durable_slots=4), "host", 1234, b"device",
+            bytes(range(32)), b"1.0", ((0, b"bmcu-a"),))
+        client.attach_connected_socket(fake)
+
+        client.poll(1)
+
+        self.assertEqual(client.state, tcp.ACCEPT_WAIT)
+        self.assertTrue(fake.sent)
+
+    def test_micropython_readinto_none_means_would_block(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1234, b"device", b"k" * 32,
+            b"1.0", ((0, b"bmcu-a"),))
+        client.attach_connected_socket(WouldBlockReadIntoSocket())
+
+        client.poll(1)
+
+        self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
+        self.assertIsNone(client.last_error)
 
     def test_control_uses_session_relative_ttl(self):
         now = [20]
@@ -406,6 +629,73 @@ class TCPClientTests(unittest.TestCase):
         self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
         now[0] = ticks_add(16000, 5000)
         client.poll(now[0])
+        self.assertEqual(client.state, tcp.BACKOFF)
+
+    def test_device_key_update_reconnects_without_reboot(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
+            ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+
+        client.set_device_key(b"n" * 32, 123)
+
+        self.assertEqual(client.device_key, b"n" * 32)
+        self.assertEqual(client.state, tcp.BACKOFF)
+        self.assertEqual(client.last_error, "device key updated")
+        with self.assertRaises(ValueError):
+            client.set_device_key(b"short", 124)
+
+    def test_endpoint_update_reconnects_without_reboot(self):
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "old.local", 1000, b"d", b"k" * 32, b"1",
+            ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+
+        client.set_endpoint("bambuddy.local", 8766, 123)
+
+        self.assertEqual(client.host, "bambuddy.local")
+        self.assertEqual(client.port, 8766)
+        self.assertEqual(client.state, tcp.BACKOFF)
+        self.assertEqual(client.last_error, "transport endpoint updated")
+        with self.assertRaises(ValueError):
+            client.set_endpoint("", 0, 124)
+
+    def test_short_server_ping_does_not_escape_as_struct_error(self):
+        # struct.error is outside poll()'s except clause, so a truncated PING
+        # used to surface as an uncounted runtime exception in main.py.
+        client = tcp.BMB1TCPClient(
+            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
+        client.sock = FakeSocket()
+        client.state = tcp.ONLINE
+        message = binary.Message(
+            C.PING, 0, 3, 0, 99, C.GLOBAL_SCOPE, b"", b"\0\0\0")
+
+        client._handle_message(message)
+
+        self.assertEqual(client.state, tcp.ONLINE)
+
+    def test_online_send_failure_closes_instead_of_raising(self):
+        class BrokenSendSocket(ReadIntoSocket):
+            def readinto(self, _target):
+                return None
+
+            def send(self, _data):
+                raise OSError(104)
+
+        boot = 99
+        outbox = BMB1Outbox(boot, durable_slots=4)
+        client = tcp.BMB1TCPClient(
+            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
+        client.sock = BrokenSendSocket()
+        client.state = tcp.ONLINE
+        client.last_rx_ms = 0
+        outbox.enqueue_raw(0, 1000, link.encode_frame(link.EVENT, 1, bytes(16)),
+                           {"kind": link.EVENT, "sequence": 1})
+
+        client.poll(1)
+
         self.assertEqual(client.state, tcp.BACKOFF)
 
     def test_disconnect_discards_session_bound_control_result(self):

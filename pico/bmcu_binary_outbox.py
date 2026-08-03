@@ -12,7 +12,7 @@ from byte_ring import ByteRing, RingFull, RecordTooLarge
 BMCU_STATUS_KIND = 0x02
 BMCU_EVENT_KIND = 0x03
 DELIVERY_SLOT_SIZE = 128
-LARGE_SLOT_SIZE = 1024
+LARGE_SLOT_SIZE = C.MAX_MESSAGE_SIZE
 STATUS_SLOT_SIZE = 80
 
 
@@ -25,6 +25,10 @@ class BMB1Outbox:
             bytearray(DELIVERY_SLOT_SIZE * durable_slots), DELIVERY_SLOT_SIZE)
         self.large = ByteRing(
             bytearray(LARGE_SLOT_SIZE * large_slots), LARGE_SLOT_SIZE)
+        # Historical journal replay must not share the live size-class rings.
+        # An older boot at a FIFO head can otherwise hide lower live
+        # sequences and stall the peer's contiguous ACK forever.
+        self.replay = ByteRing(bytearray(LARGE_SLOT_SIZE), LARGE_SLOT_SIZE)
         self.latest_status = ByteRing(
             bytearray(STATUS_SLOT_SIZE * link_count), STATUS_SLOT_SIZE)
         self.current_status = ByteRing(
@@ -70,9 +74,20 @@ class BMB1Outbox:
             return self.large
         return None
 
-    def _append_message(self, sequence, size, protected):
+    def _append_message(self, sequence, size, protected,
+                        use_drop_reserve=False):
         target = self._ring_for_size(size)
-        if target is None or len(target) == target.capacity:
+        if target is None:
+            return False
+        limit = target.capacity
+        if (target is self.durable and target.capacity > 1 and
+                not use_drop_reserve):
+            # A loss marker is the only way the peer can advance its durable
+            # ACK across records rejected while this ring is saturated.
+            # Keep one slot available so replay traffic cannot deadlock that
+            # marker behind a permanently full queue.
+            limit -= 1
+        if len(target) >= limit:
             return False
         try:
             target.append(sequence, memoryview(self.encode_buffer)[:size],
@@ -142,7 +157,8 @@ class BMB1Outbox:
             self.forced_drop_first, self.forced_drop_last,
             self.forced_drop_count,
             C.DROP_RAM_QUEUE_FULL)
-        if not self._append_message(sequence, size, True):
+        if not self._append_message(
+                sequence, size, True, use_drop_reserve=True):
             return False
         if self.journal is not None:
             try:
@@ -179,13 +195,19 @@ class BMB1Outbox:
     def _head(ring):
         return ring.peek()
 
-    def _next_head(self):
+    def _next_live_head(self):
         left, right = self._head(self.durable), self._head(self.large)
         if left is None:
             return self.large, right
         if right is None or left[0] <= right[0]:
             return self.durable, left
         return self.large, right
+
+    def _next_head(self):
+        ring, current = self._next_live_head()
+        if current is not None:
+            return ring, current
+        return self.replay, self._head(self.replay)
 
     def _page_replay(self):
         if self.replay_pager is not None:
@@ -199,16 +221,21 @@ class BMB1Outbox:
 
     def acknowledge(self, pico_boot_id, watermark):
         released = 0
-        while True:
-            ring, current = self._next_head()
-            if current is None:
-                break
-            sequence, message, _, _ = current
-            header_boot = struct.unpack_from(">Q", message, 20)[0]
-            if header_boot != pico_boot_id or sequence > watermark:
-                break
-            ring.release_one()
-            released += 1
+        if pico_boot_id == self.pico_boot_id:
+            while True:
+                ring, current = self._next_live_head()
+                if current is None or current[0] > watermark:
+                    break
+                ring.release_one()
+                released += 1
+        else:
+            current = self.replay.peek()
+            if current is not None:
+                sequence, message, _, _ = current
+                header_boot = struct.unpack_from(">Q", message, 20)[0]
+                if header_boot == pico_boot_id and sequence <= watermark:
+                    self.replay.release_one()
+                    released += 1
         if self.journal is not None:
             self.journal.record_ack(pico_boot_id, watermark)
         if pico_boot_id == self.pico_boot_id:
@@ -225,7 +252,13 @@ class BMB1Outbox:
                 sequence, pico_boot_id, link_index, payload)
         except binary.CodecError:
             return False
-        return self._append_message(sequence, size, True)
+        try:
+            self.replay.append(
+                sequence, memoryview(self.encode_buffer)[:size],
+                protected=True)
+            return True
+        except (RingFull, RecordTooLarge):
+            return False
 
     def enqueue_link_state(self, link_index, observed_at_us, state, reason):
         if self.forced_drop_count:
@@ -286,13 +319,14 @@ class BMB1Outbox:
 
     @property
     def queue_depth(self):
-        return len(self.durable) + len(self.large) + len(self.latest_status)
+        return (len(self.durable) + len(self.large) + len(self.replay) +
+                len(self.latest_status))
 
     def available_boot_ranges(self):
         ranges = {}
         for boot_id, oldest, newest in self.historical_ranges:
             ranges[boot_id] = [oldest, newest]
-        for ring in (self.durable, self.large):
+        for ring in (self.durable, self.large, self.replay):
             for sequence, message, _, _ in ring.iter_records():
                 boot_id = struct.unpack_from(">Q", message, 20)[0]
                 current = ranges.get(boot_id)

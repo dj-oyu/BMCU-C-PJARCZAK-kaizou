@@ -7,8 +7,8 @@ UART_RX_PIN = 1
 UART_BAUDRATE = 115200
 # Default UART RX ring size in bytes, overridable per link with "rxbuf".
 # The MicroPython default of 256 bytes overflows in ~22 ms at 115200 baud,
-# and provides margin while bounded TCP/journal/UI work is serviced.
-UART_RXBUF = 2048
+# and provides margin for two links while bounded TCP/journal/UI work is serviced.
+UART_RXBUF = 4096
 WEB_PORT = 80
 BRIDGE_ID = "pico-bmcu-bridge"
 PICO_FIRMWARE_VERSION = "alpha.3"
@@ -21,7 +21,8 @@ BMCU_LINKS = (
 # Legacy UART_* values remain the single-link fallback when BMCU_LINKS is empty.
 
 DEBUG_USB = False
-# Required BMB1 transport configuration.
+# BMB1 bootstrap settings. Host, port, and device key can be replaced later in
+# the local UI; persisted UI values take precedence over this file.
 BMCU_BINARY_HOST = "192.168.1.10"
 BMCU_BINARY_PORT = 8799
 BMCU_BINARY_DEVICE_ID = "pico-bmcu-bridge"
@@ -29,5 +30,5 @@ BMCU_BINARY_DEVICE_KEY = ""
 BMCU_BINARY_JOURNAL_PATH = "bmcu_history"
 BMCU_BINARY_QUEUE_SLOTS = 128
 BMCU_BINARY_JOURNAL_STAGING_SLOTS = 4
-BMCU_UART_DRAIN_BUDGET = 1024
-BMCU_UART_DRAIN_CHUNK = 128
+BMCU_UART_DRAIN_BUDGET = 4096
+BMCU_UART_DRAIN_CHUNK = 512

@@ -49,15 +49,61 @@ jobs:
       # The native tests skip themselves when zig is missing. A silent skip would
       # let a broken toolchain masquerade as a green run, so the log is checked
       # for skips after the suite passes.
+      #
+      # Match the "skipped=N" of unittest's own summary, not the bare word: the
+      # verbose log prints one line per test, and a test *named* for the skipping
+      # it asserts about — test_a_part_without_payload_is_skipped — failed this
+      # job while passing.
       - name: Host test suite (ci/)
         run: |
           set -o pipefail
           python -m unittest discover -s ci -p "test_*.py" -v 2>&1 | tee host-tests.log
-          if grep -qi "skipped" host-tests.log; then
+          if grep -q "skipped=" host-tests.log; then
             echo "::error::a host test was skipped - the toolchain is incomplete"
-            grep -i "skipped" host-tests.log
+            grep "skipped=" host-tests.log
             exit 1
           fi
 
       - name: Host test suite (tools/)
         run: python -m unittest discover -s tools -p "test_*.py" -v
+
+  # The browser UI is committed as a built artifact (deployment is WebREPL from
+  # a developer machine, not from CI), so the thing worth verifying is that the
+  # artifact still matches the sources it was built from.
+  web-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Type check
+        run: npm run check
+        working-directory: web
+
+      - name: Decoder tests against the Python-generated fixtures
+        run: npm test
+        working-directory: web
+
+      - name: Build the single-file page
+        run: npm run build
+        working-directory: web
+
+      # Catches the failure mode this layout introduces: a source change that
+      # was committed without re-staging pico/www/index.html.gz.
+      - name: Staged artifact matches the build
+        run: python tools/build_web_ui.py --skip-npm --check
+
+      - name: Generated wire registry matches docs/
+        run: python tools/generate_ts_registry.py --check

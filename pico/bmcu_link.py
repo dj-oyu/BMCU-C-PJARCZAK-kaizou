@@ -66,22 +66,101 @@ def _i32(data, offset):
     return value - 0x100000000 if value & 0x80000000 else value
 
 
+REJECT_CRC = 1
+REJECT_LENGTH = 2
+REJECT_OVERSIZED = 3
+
+CAPTURE_SLOTS = 8
+CAPTURE_BYTES = 72
+
+
+class RejectCapture:
+    """Keeps the most recent rejected byte runs so they can be inspected.
+
+    The decoder used to discard malformed input silently, leaving only counters,
+    which cannot distinguish a single flipped bit from a truncated frame. Storage
+    is preallocated because this runs inside the UART drain path.
+    """
+
+    def __init__(self, slots=CAPTURE_SLOTS, size=CAPTURE_BYTES):
+        self.slots = slots
+        self.size = size
+        self.storage = bytearray(slots * size)
+        self.lengths = bytearray(slots)
+        self.reasons = bytearray(slots)
+        self.timestamps = [0] * slots
+        self.ordinals = [0] * slots
+        self.captured = 0
+        self._next = 0
+
+    def add(self, reason, data, now_ms=0):
+        count = len(data)
+        if count > self.size:
+            count = self.size
+        start = self._next * self.size
+        self.storage[start:start + count] = data[:count]
+        self.lengths[self._next] = count
+        self.reasons[self._next] = reason
+        self.timestamps[self._next] = now_ms
+        self.captured += 1
+        self.ordinals[self._next] = self.captured
+        self._next = (self._next + 1) % self.slots
+
+    def records(self):
+        """Oldest first, so a reader sees the runs in the order they arrived."""
+        for offset in range(self.slots):
+            index = (self._next + offset) % self.slots
+            if not self.ordinals[index]:
+                continue
+            start = index * self.size
+            yield (self.ordinals[index], self.reasons[index],
+                   self.timestamps[index],
+                   memoryview(self.storage)[start:start + self.lengths[index]])
+
+
 class FrameDecoder:
     """Consumes arbitrary UART chunks and emits only valid bounded frames."""
 
-    def __init__(self):
+    def __init__(self, capture=None):
         self._buffer = bytearray()
         self.crc_errors = 0
         self.frame_errors = 0
+        # Bytes dropped as unparseable noise. Kept apart from frame_errors so a
+        # bad length byte in an otherwise healthy stream stays distinguishable
+        # from a stream the decoder cannot make sense of at all.
+        self.discarded_bytes = 0
+        self.capture = capture
+        self.clock_ms = 0
+
+    def _reject(self, reason, data):
+        if self.capture is not None:
+            self.capture.add(reason, data, self.clock_ms)
 
     def feed(self, data, on_valid_wire=None, on_frame=None):
-        if len(data) > MAX_DECODER_BUFFER:
-            self.frame_errors += 1
-            data = data[-MAX_DECODER_BUFFER:]
-        self._buffer.extend(data)
-        if len(self._buffer) > MAX_DECODER_BUFFER:
-            self._buffer = self._buffer[-MAX_DECODER_BUFFER:]
+        """Parse every byte handed in; retain only an unparsed remainder.
+
+        This used to drop all but the last MAX_DECODER_BUFFER bytes of any
+        larger chunk, before parsing. With a 512-byte drain chunk against a
+        128-byte bound that silently discarded up to 384 bytes of intact frames
+        per read, which showed up as CRC errors on whatever frame straddled the
+        cut. The noise bound belongs on the *unparsed remainder*, which is at
+        most one legal frame, not on the arriving chunk.
+        """
         frames = []
+        view = memoryview(data)
+        for start in range(0, len(view), MAX_DECODER_BUFFER) or (0,):
+            self._buffer.extend(view[start:start + MAX_DECODER_BUFFER])
+            self._parse(frames, on_valid_wire, on_frame)
+            if len(self._buffer) > MAX_DECODER_BUFFER:
+                # Nothing legal can be this long once complete frames have been
+                # consumed, so the head is noise rather than a partial frame.
+                self.discarded_bytes += len(self._buffer) - MAX_DECODER_BUFFER
+                self._reject(REJECT_OVERSIZED,
+                             self._buffer[:CAPTURE_BYTES])
+                self._buffer = self._buffer[-MAX_DECODER_BUFFER:]
+        return frames
+
+    def _parse(self, frames, on_valid_wire, on_frame):
         while True:
             start = self._buffer.find(SYNC)
             if start < 0:
@@ -98,6 +177,9 @@ class FrameDecoder:
             payload_length = self._buffer[6]
             if payload_length > MAX_PAYLOAD:
                 self.frame_errors += 1
+                # Capture the surrounding run, not just the header: a bad length
+                # byte is usually the tail of an earlier desync.
+                self._reject(REJECT_LENGTH, self._buffer[:CAPTURE_BYTES])
                 self._buffer = self._buffer[1:]
                 continue
             wire_length = payload_length + 9
@@ -107,6 +189,9 @@ class FrameDecoder:
             expected_crc = _u16(self._buffer, wire_length - 2)
             if crc16_ccitt_false(body) != expected_crc:
                 self.crc_errors += 1
+                # The whole candidate frame, so a reader can recompute the CRC
+                # offline and tell a flipped bit from a truncated frame.
+                self._reject(REJECT_CRC, self._buffer[:wire_length])
                 self._buffer = self._buffer[1:]
                 continue
             wire = bytes(self._buffer[:wire_length])
@@ -121,7 +206,6 @@ class FrameDecoder:
             else:
                 frames.append(frame)
             self._buffer = self._buffer[wire_length:]
-        return frames
 
 
 def encode_frame(kind, sequence, payload=b""):
@@ -136,15 +220,22 @@ def encode_frame(kind, sequence, payload=b""):
 class BMCUMonitor:
     """Protocol state machine; ``on_message`` receives typed dictionaries."""
     SNAPSHOT_TIMEOUT_MS = 1200
+    # A snapshot describes motor state, which can change in milliseconds, so
+    # the soft-reset gate treats anything older than this as unusable. It is
+    # comfortably longer than SNAPSHOT_TIMEOUT_MS so a refresh requested on a
+    # refused attempt has time to complete before the caller retries.
+    MAX_SNAPSHOT_AGE_MS = 3000
     SNAPSHOT_MAX_RETRIES = 3
     OUTSTANDING_GET_STATUS_TTL_MS = 3000
 
 
     def __init__(self, uart, on_message=None, link_id="bmcu-a",
-                 link_index=0, on_valid_frame=None, uart_capacity=None):
+                 link_index=0, on_valid_frame=None, uart_capacity=None,
+                 capture_slots=CAPTURE_SLOTS):
         self.uart = uart
         self.on_message = on_message
-        self.decoder = FrameDecoder()
+        self.capture = RejectCapture(capture_slots) if capture_slots else None
+        self.decoder = FrameDecoder(self.capture)
         self.link_id = link_id
         self.link_index = link_index
         self.on_valid_frame = on_valid_frame
@@ -155,6 +246,7 @@ class BMCUMonitor:
         self.tick_hz = None
         self.status = None
         self.snapshot = None
+        self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
@@ -227,15 +319,40 @@ class BMCUMonitor:
     def ping(self, token):
         return self._send(PING, struct.pack("<I", token & 0xffffffff))
 
-    def soft_reset_guard_error(self):
+    def soft_reset_guard_error(self, now_ms=None):
+        """Why a soft reset must be refused, or None if it may proceed.
+
+        The idle test needs motor PWM and controller phase, which only the
+        FULL_STATUS snapshot carries; live STATUS has neither. A snapshot is
+        requested only when the baseline is invalidated, so in steady operation
+        it can be arbitrarily old, and this gate used to claim freshness it
+        never checked: a snapshot taken while idle would keep permitting a reset
+        long after motion had started.
+
+        Pure by design. The caller decides whether to request a refresh.
+        """
         if self.link_state != "online" or self.snapshot is None:
             return "complete fresh BMCU status is required"
         if any(channel is None for channel in self.channels):
             return "complete channel status is required"
+        if now_ms is not None:
+            age = (self.MAX_SNAPSHOT_AGE_MS if self.snapshot_at_ms is None
+                   else self._ticks_diff(now_ms, self.snapshot_at_ms))
+            if age >= self.MAX_SNAPSHOT_AGE_MS or age < 0:
+                return "BMCU status is stale; retry once it refreshes"
         if any(channel["motor_pwm"] != 0 or channel["controller_motion"] != 3 or
                channel["ams_motion"] != 0 for channel in self.channels):
             return "BMCU motion is not idle"
         return None
+
+    def refresh_snapshot_if_idle(self):
+        """Ask for a new FULL_STATUS unless one is already on its way."""
+        if (self._snapshot_parts is not None or
+                self._snapshot_deadline_ms is not None or
+                self._snapshot_retry_ms is not None):
+            return False
+        self.get_full_status()
+        return True
 
     def request_soft_reset(self, operation_id, reason=0, ttl_ms=5000):
         if not 1 <= operation_id <= 0xffffffff:
@@ -279,6 +396,7 @@ class BMCUMonitor:
     def _invalidate_baseline(self, now_ms, reason):
         self.status = None
         self.snapshot = None
+        self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
         self.printer_auth = None
         self.printer_rx = None
@@ -344,6 +462,7 @@ class BMCUMonitor:
         self._last_uart_service_ms = now_ms
         available = min(backlog, max_bytes)
         self._clock_ms = now_ms
+        self.decoder.clock_ms = now_ms
         if available:
             data = self.uart.read(available)
             if data:
@@ -469,7 +588,11 @@ class BMCUMonitor:
 
     @staticmethod
     def _decode_event(data):
-        event = {"hw_tick32": _u32(data, 0), "record_type": data[4],
+        # The raw record is retained so /api/snapshot.bin can hand back exactly
+        # what arrived; re-encoding it here would put a second copy of the wire
+        # layout on the device.
+        event = {"raw": bytes(data[:16]),
+                 "hw_tick32": _u32(data, 0), "record_type": data[4],
                  "severity": data[5], "source": data[6],
                  "payload_length": data[7]}
         payload = bytes(data[8:16])
@@ -673,6 +796,7 @@ class BMCUMonitor:
                 if part.get("ams_registration_data") is not None:
                     ams_registration = part["ams_registration_data"]
             self.channels = channels
+            self.snapshot_at_ms = now_ms
             self.printer_auth = printer_auth
             self.printer_rx = printer_rx or None
             self.printer_tx = printer_tx or None
