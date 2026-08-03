@@ -150,17 +150,10 @@ kindごとに型・長さ・範囲を固定する。可変文字列、JSON、任
 
 ### 7.1 実装済み
 
-| kind | 方向 | 長さ | payload |
-| --- | --- | ---: | --- |
-| `0x01 HELLO` | BMCU→Pico | 9 | `protocol:u8, capabilities:u16, fw_major:u8, fw_minor:u8, tick_hz:u32` |
-| `0x02 STATUS` | BMCU→Pico | 27 | §7.2 |
-| `0x10 GET_STATUS` | Pico→BMCU | 0 | 即時STATUS要求 |
-| `0x11 SET_LED_MODE` | Pico→BMCU | 3 | `mode:u8, timeout_s:u16` |
-| `0x12 PING` | Pico→BMCU | 4 | `token:u32` |
-| `0x17 GET_FULL_STATUS` | Pico→BMCU | 2 | `section_mask:u8, channel_mask:u8` |
-| `0x18 REQUEST_SOFT_RESET` | Pico→BMCU | 8 | `operation_id:u32, reason:u8, flags:u8, ttl_ms:u16` |
-| `0x72 PONG` | BMCU→Pico | 8 | `token:u32, hw_tick32:u32` |
-| `0x7F ACK` | BMCU→Pico | 2 | `request_kind:u8, result:u8` |
+kindごとの方向・payload長・payload layoutは [`BMCU_LINK_PROTOCOL_ALPHA3.md`](BMCU_LINK_PROTOCOL_ALPHA3.md)
+§3.1（message kinds）と§5（implemented payloads）が正本であり、その値はwire ABIとして
+`docs/bmcu_link_enum_registry.json`（enum `kind`）にも登録されている。この節では表を
+複製せず、上記2ファイルを参照する。
 
 ### 7.2 Soft reset safety contract
 
@@ -175,41 +168,34 @@ all controller phases stopped, all AMS motions idle, and all PWM values zero.
 Reset completion requires a new HELLO/boot session and a new complete snapshot.
 Hardware validation must cover every refusal path and ACK-before-reset ordering.
 
-### 7.3 STATUS v2（27 byte）
+### 7.3 STATUS v2
 
-| offset | 型 | 名前 |
-| ---: | --- | --- |
-| 0 | u32 | hw_tick32（SysTick生カウンタ、wrapあり） |
-| 4,6,8,10 | u16 x4 | tx_drop、rx_drop、crc_error、frame_error |
-| 12 | u8 | current_slot (`0xFF`=none/unknown) |
-| 13,14 | u8 | inserted_mask、online_mask |
-| 15 | u8[4] | filament motion |
-| 19 | u8[4] | pull_pct |
-| 23 | u16 | pressure |
-| 25,26 | u8 | led_mode、control_error |
+STATUSのbyte layoutは正本を持たない。offsetの表は
+[`BMCU_LINK_PROTOCOL_ALPHA3.md`](BMCU_LINK_PROTOCOL_ALPHA3.md) §5.2、機械可読版は
+`docs/bmcu_wire_layout.json`の`structures.status_payload`（現在31 byte、per-channel
+`channel_flags`byteを含む）を見る。v2のoffsetは固定し、詳細情報は新messageで追加する。
+`hw_tick32`の差分は`(new-old)&0xffffffff`で求め、`tick_hz`で秒へ換算する。壁時計と受信時刻は
+Pico/Bambuddyが付与する。
 
-v2のoffsetを固定し、詳細情報は新messageで追加する。`hw_tick32`の差分は`(new-old)&0xffffffff`で求め、`tick_hz`で秒へ換算する。壁時計と受信時刻はPico/Bambuddyが付与する。
+### 7.4 未実装のまま残っているmessage
 
-### 7.4 必須追加message
+`EVENT`(`0x03`)、`PRINTER_TRANSACTION`(`0x04`)、`SENSOR_RECORD`(`0x05`)、`PING`(`0x12`)、
+`GET_FULL_STATUS`(`0x17`)、`PONG`(`0x72`)は実装済みであり、7.1が指す
+[`BMCU_LINK_PROTOCOL_ALPHA3.md`](BMCU_LINK_PROTOCOL_ALPHA3.md) §3.1にその通り記載されている。
+旧 `GET_SENSOR_SNAPSHOT` 案の要件は `GET_FULL_STATUS` のGLOBAL/CHANNEL固定長レコードへ統合済みである。
+
+未実装のまま残っているのは次の2つである。kind値は未確定のためJSON registryにはまだ存在しない。
 
 | kind案 | 名前 | 方向 | 固定payload |
 | --- | --- | --- | --- |
-| `0x03` | `EVENT` | BMCU→Pico | `LogRecord`（共通header＋種別別union payload） |
-| `0x04` | `PRINTER_TRANSACTION` | BMCU→Pico | command、owner、outcome、reason、request/response length |
-| `0x05` | `SENSOR_RECORD` | BMCU→Pico | sensor、slot、validity、value format、value |
-| `0x06` | `BUS_STATUS` | BMCU→Pico | online、last class、rx/valid/error/tx counters、last age |
-| `0x07` | `SENSOR_GLOBAL` | BMCU→Pico | hw_tick32、selected slot、pressure、masks、aggregate flags |
-| `0x08` | `SENSOR_CHANNEL` | BMCU→Pico | channel、sample id、raw/derived sensors、motion/PWM/latches |
-| `0x09` | `ANOMALY_EVENT` | BMCU→Pico | event、severity、channel、hw_tick32、values、flags |
-| `0x12` | `PING` | Pico→BMCU | `token:u32` |
 | `0x15` | `GET_DEVICE_INFO` | Pico→BMCU | none |
 | `0x16` | `GET_BUS_STATUS` | Pico→BMCU | none |
-| `0x17` | `GET_FULL_STATUS` | Pico→BMCU | implemented above; this supersedes the earlier sensor-snapshot candidate |
-| `0x72` | `PONG` | BMCU→Pico | `token:u32, hw_tick32:u32` |
-| `0x7E` | `DEVICE_INFO` | BMCU→Pico | protocol range、capabilities、fw/hw/build id |
 
-旧 `GET_SENSOR_SNAPSHOT` 案の要件は `GET_FULL_STATUS` のGLOBAL/CHANNEL固定長レコードへ統合済みである。
-全チャネルを1つの巨大payloadへ詰めず、同一snapshot IDの固定長レコードへ分割する。
+`GET_DEVICE_INFO`の応答として`0x7E DEVICE_INFO`（protocol range、capabilities、fw/hw/build id）を、
+`GET_BUS_STATUS`の応答として`0x06 BUS_STATUS`（online、last class、rx/valid/error/tx counters、last age）
+を想定しているが、いずれも未実装である。`0x07 SENSOR_GLOBAL`、`0x08 SENSOR_CHANNEL`、
+`0x09 ANOMALY_EVENT`も同様に未実装の候補で、全チャネルを1つの巨大payloadへ詰めず、同一snapshot ID
+の固定長レコードへ分割する方針だけを先に決めている。
 
 ### 7.5 Binary log record
 
