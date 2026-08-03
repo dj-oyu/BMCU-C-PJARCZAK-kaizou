@@ -110,6 +110,15 @@ a between-confirms maximum may have been lost; `gap_max_ms` remains the loss-pro
    offline, safety guard refuses because motion is not idle), the fallback is a genuine BMCU **power** cycle:
    remove BMCU power at the supply, wait for the LEDs to go out, and reapply — not a cable reseat.
 
+   The guard accepts a channel resting in `pressure_ctrl_idle`, so filament being loaded is not by itself a
+   refusal — which matters here, because 0500_409D is reached with filament loaded. What it still refuses is
+   any channel with motor PWM applied or a controller phase that drives, so a machine that has genuinely
+   stopped moving will pass.
+
+   On `BMCU_DM_TWO_MICROSWITCH` builds the reboot does not restart autoload: `Motion_control_init` derives the
+   autoload gate and `dm_loaded` from the switch reading at boot, which closes the gate on every channel that
+   has filament at a switch. Filament may be left loaded across the reset.
+
 6. **Verify the reset actually happened** before retrying the print. Take a snapshot and confirm **both**:
    - `hw_tick32` is small — seconds since boot, not the large value from step 1 (printed by
      `tools/bmcu_debug.py full-status`), and

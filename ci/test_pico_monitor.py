@@ -317,6 +317,24 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.soft_reset_guard_error(),
                          "BMCU motion is not idle")
 
+    def test_soft_reset_permits_a_channel_resting_in_pressure_ctrl_idle(self):
+        # A channel holding filament rests in pressure_ctrl_idle (7), never in
+        # stop (3). Requiring 3 on all four made the accept path unreachable
+        # with filament loaded, which is where 0500_409D recovery starts.
+        self._idle_snapshot()
+        self.monitor.channels[1]["controller_motion"] = 7
+        self.assertIsNone(self.monitor.soft_reset_guard_error(1000))
+
+    def test_soft_reset_still_refuses_the_moving_controller_phases(self):
+        # Everything outside stop and pressure_ctrl_idle either drives the
+        # motor or is a transition into driving it.
+        for motion in (0, 1, 2, 4, 5, 6, 8):
+            with self.subTest(controller_motion=motion):
+                self._idle_snapshot()
+                self.monitor.channels[0]["controller_motion"] = motion
+                self.assertEqual(self.monitor.soft_reset_guard_error(1000),
+                                 "BMCU motion is not idle")
+
     def _idle_snapshot(self, at_ms=1000):
         self.monitor.link_state = "online"
         self.monitor.snapshot = [{}]

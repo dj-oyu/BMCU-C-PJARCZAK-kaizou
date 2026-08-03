@@ -225,6 +225,10 @@ class BMCUMonitor:
     # comfortably longer than SNAPSHOT_TIMEOUT_MS so a refresh requested on a
     # refused attempt has time to complete before the caller retries.
     MAX_SNAPSHOT_AGE_MS = 3000
+    # filament_motion_enum values a soft reset may be requested from: stop, and
+    # pressure_ctrl_idle where a loaded channel rests. See
+    # soft_reset_guard_error for why the loaded case has to be included.
+    RESET_IDLE_MOTIONS = (3, 7)
     SNAPSHOT_MAX_RETRIES = 3
     OUTSTANDING_GET_STATUS_TTL_MS = 3000
 
@@ -329,6 +333,18 @@ class BMCUMonitor:
         never checked: a snapshot taken while idle would keep permitting a reset
         long after motion had started.
 
+        This is a pre-check, not the decision. The BMCU re-evaluates every
+        request in Motion_control_is_reset_safe() with state the link never
+        carries -- the DM autoload gate needs the tri-state microswitch reading
+        and dm_loaded, and STATUS only has one online bit per channel. So the
+        rule here is to refuse what is plainly moving and leave the rest to the
+        side that can prove it. A gate stricter than the BMCU's would only
+        relocate the refusal.
+
+        controller_motion 7 (pressure_ctrl_idle) is where a loaded channel
+        rests. Requiring 3 (stop) made this unreachable with filament loaded,
+        which is the state 0500_409D recovery starts from.
+
         Pure by design. The caller decides whether to request a refresh.
         """
         if self.link_state != "online" or self.snapshot is None:
@@ -340,7 +356,8 @@ class BMCUMonitor:
                    else self._ticks_diff(now_ms, self.snapshot_at_ms))
             if age >= self.MAX_SNAPSHOT_AGE_MS or age < 0:
                 return "BMCU status is stale; retry once it refreshes"
-        if any(channel["motor_pwm"] != 0 or channel["controller_motion"] != 3 or
+        if any(channel["motor_pwm"] != 0 or
+               channel["controller_motion"] not in self.RESET_IDLE_MOTIONS or
                channel["ams_motion"] != 0 for channel in self.channels):
             return "BMCU motion is not idle"
         return None

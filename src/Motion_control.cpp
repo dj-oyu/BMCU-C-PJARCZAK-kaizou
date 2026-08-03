@@ -3123,9 +3123,23 @@ bool Motion_control_is_reset_safe(void)
     for (uint8_t channel = 0u; channel < kChCount; ++channel)
     {
         if (g_motor_pwm[channel] != 0 ||
-            MOTOR_CONTROL[channel].motion != filament_motion_enum::filament_motion_stop ||
             state.filament[channel].motion != _filament_motion::idle)
             return false;
+
+        // pressure_ctrl_idle is where a loaded channel rests: the PID still
+        // runs, but clamped, and nothing commands motion on its own. Demanding
+        // filament_motion_stop instead made this gate unreachable with filament
+        // loaded, which is the state 0500_409D recovery starts from.
+        const filament_motion_enum motion = MOTOR_CONTROL[channel].motion;
+        if (motion != filament_motion_enum::filament_motion_stop &&
+            motion != filament_motion_enum::filament_motion_pressure_ctrl_idle)
+            return false;
+
+        // No DM autoload check is needed here. Motion_control_init derives
+        // dm_autoload_gate = (ks != 0) and dm_loaded = (ks == 1) at boot, so
+        // after the reboot this reset performs: ks == 1 closes the entry
+        // condition, ks == 2 is blocked by the gate, and ks 0 and 3 have no
+        // transition out of DM_AUTO_IDLE. The reset cannot start a push.
     }
     return true;
 }
