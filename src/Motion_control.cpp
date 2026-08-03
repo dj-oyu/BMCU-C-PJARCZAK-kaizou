@@ -848,17 +848,23 @@ static constexpr uint16_t kMotionHold =
 //   send (0)                  drives, ramped          printer-commanded feed
 //   redetect (1)              drives                  local re-detect, no bus command
 //   pull (2)                  drives                  retract
-//   stop (3)                  cannot drive            parked
+//   stop (3)                  run() commands nothing  parked
 //   before_on_use (4)         drives                  printing
 //   stop_on_use (5)           drives                  printing
 //   pressure_ctrl_on_use (6)  drives at full PWM_lim  printing
 //   pressure_ctrl_idle (7)    drives, clamped +-800   parked
 //   before_pull_back (8)      drives                  transition
 //
-// Parked does not mean the motor cannot move: pressure_ctrl_idle keeps the
-// pressure PID live and is the only state DM autoload runs from. It means no
-// operation is in flight, so the instantaneous g_motor_pwm reading is the
-// whole story. Motion_control_is_reset_safe pairs the two.
+// Parked does not mean the motor cannot move, and the column above describes
+// only what motor.run() commands. Two overrides bypass run() and write PWM
+// directly without consulting this enum at all: auto-unload, and the manual
+// empty pull, whose predicate is inserted && ks == 0 && pull above 80%. Either
+// can drive a channel whose phase reads stop. DM autoload likewise drives, and
+// only from pressure_ctrl_idle.
+//
+// So parked means no operation is in flight, not that the output is idle --
+// which is why Motion_control_is_reset_safe pairs this mask with the
+// instantaneous g_motor_pwm rather than trusting either alone.
 static constexpr uint16_t kMotionParked = kMotionStop | kMotionPressureIdle;
 
 
