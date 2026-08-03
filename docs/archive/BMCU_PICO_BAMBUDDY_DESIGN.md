@@ -45,7 +45,7 @@ A1 mini <-- 1.25 Mbps half-duplex --> BMCU <-- UART3 --> Pico 2 W --Wi-Fi--> Bam
 ## 3. 物理・UART 設定
 
 確定したH1/H2のピン配置、書き込み配線、電源上の注意、実機検証記録は
-[docs/BMCU_UART_PHYSICAL_SPEC.md](docs/BMCU_UART_PHYSICAL_SPEC.md)を正とする。
+[docs/BMCU_UART_PHYSICAL_SPEC.md](../BMCU_UART_PHYSICAL_SPEC.md)を正とする。
 
 | 項目 | 初期値 |
 | --- | --- |
@@ -170,7 +170,7 @@ Bambuddyの実際の拡張APIに合わせる薄いアダプタをRDK-X5側に実
   inbound Bambuddy接続を受け付けず、診断用read-only HTTPだけを公開する。
 
 接続状態、ACK/replay、backpressure、および診断HTTPとの分離は
-[`docs/PICO_BAMBUDDY_TRANSPORT.md`](docs/PICO_BAMBUDDY_TRANSPORT.md)を正とする。
+[`docs/PICO_BAMBUDDY_TRANSPORT.md`](../PICO_BAMBUDDY_TRANSPORT.md)を正とする。
 
 PicoがBambuddyと接続できない時は、BMCUイベントを短期バッファに保持するだけで、
 自動制御判断や状態広告を独自に行わない。

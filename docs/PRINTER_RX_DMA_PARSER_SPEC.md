@@ -3,9 +3,9 @@
 Status: Draft
 Date: 2026-07-19
 Scope: BMCU printer-facing USART1 ingress only
-Related: [BMCU Link v1 implementation plan](BMCU_LINK_V1_IMPLEMENTATION_PLAN.md),
-[Pico printer stub](PICO_PRINTER_STUB.md), and
-[BMCU validation report](BMCU_LINK_TEST_REPORT_TEMPLATE.md)
+Related: [BMCU Link v1 implementation plan](BMCU_LINK_V1_IMPLEMENTATION_PLAN.md) and
+[Pico printer stub](PICO_PRINTER_STUB.md). Validation results are recorded as comments on the
+issue that drove the run, not in a template.
 
 ## 1. Objective
 

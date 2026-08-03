@@ -10,7 +10,8 @@ Software implementation status (2026-07-19):
 - Phase 1 management-link calibration liveness: implemented; hardware timing gates open.
 - Phase 3 Pico resync/recovery: implemented and host-tested.
 - Phase 4 dual hardware-UART contexts and scoped HTTP API: implemented and host-tested.
-- See [software validation](BMCU_LINK_SOFTWARE_VALIDATION.md) for evidence and open gates.
+- 当時の測定値は [software validation](archive/BMCU_LINK_SOFTWARE_VALIDATION.md) にあるが、
+  2026-07-19時点で凍結された記録であり数値は既に古い。現在の検証状況はissue #3を見ること。
 
 関連文書:
 

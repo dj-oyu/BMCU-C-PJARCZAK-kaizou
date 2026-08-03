@@ -211,4 +211,7 @@ the only BMCU control link.
 - `src/Motion_control.cpp`: TIM2 Partial Remap required for PB10/PB11.
 - `src/_bus_hardware.cpp`: printer USART1 and RS-485 direction control.
 - `tools/bmcu_debug.py`: host monitor, active probe, and LED command client.
-- `BMCU_PICO_BAMBUDDY_DESIGN.md`: higher-level protocol and integration design.
+- `BMCU_LINK_PROTOCOL_ALPHA3.md`: the link frame this UART carries — header, kinds, payloads.
+- `BMCU_BINARY_TRANSPORT_V1.md`: the Pico↔Bambuddy transport the bridge forwards to.
+- `archive/BMCU_PICO_BAMBUDDY_DESIGN.md`: the original integration design. Archived — its pin
+  table predates multi-link and its message list predates three shipped kinds. History only.
