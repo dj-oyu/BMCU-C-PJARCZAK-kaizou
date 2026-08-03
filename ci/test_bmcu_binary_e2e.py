@@ -287,6 +287,37 @@ class BinaryTransportEndToEndTests(unittest.TestCase):
                 list(range(1, 161)))
             self.assertLessEqual(outbox.queue_depth, 4)
 
+    def test_rejection_causes_are_counted_apart(self):
+        # Every rejection becomes the same RAM_QUEUE_FULL drop marker, which
+        # says a record was lost and nothing about why. A saturated durable
+        # ring and a record too large for any size class are different
+        # problems with different fixes.
+        outbox = BMB1Outbox(self.BOOT, durable_slots=1)
+        self.assertEqual(outbox.reject_durable_full_count, 0)
+        for sequence in range(1, 5):
+            outbox.enqueue_payload(
+                C.LINK_STATE, C.FLAG_CRITICAL, 0, sequence,
+                b"\0" * 8 + bytes((C.LINK_ONLINE, 0, 0, 0)))
+        self.assertGreater(outbox.reject_durable_full_count, 0)
+        self.assertEqual(outbox.reject_oversize_count, 0)
+        self.assertEqual(outbox.reject_large_full_count, 0)
+
+    def test_durable_depth_high_water_is_tracked_apart_from_queue_depth(self):
+        # queue_depth sums four rings of different sizes, so it cannot say
+        # which one filled -- and durable is the only one whose saturation
+        # drops records.
+        outbox = BMB1Outbox(self.BOOT, durable_slots=4)
+        for sequence in range(1, 4):
+            outbox.enqueue_payload(
+                C.LINK_STATE, C.FLAG_CRITICAL, 0, sequence,
+                b"\0" * 8 + bytes((C.LINK_ONLINE, 0, 0, 0)))
+        outbox.queue_depth
+        peak = outbox.durable_depth_max
+        self.assertGreater(peak, 0)
+        outbox.durable.release_through(outbox.next_sequence)
+        outbox.queue_depth
+        self.assertEqual(outbox.durable_depth_max, peak)
+
     def test_exact_drop_marker_advances_watermark(self):
         client, peer, outbox, _ = self.make_pair()
         drive(client, peer, done=lambda: client.state == tcp.ONLINE)

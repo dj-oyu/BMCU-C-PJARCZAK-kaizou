@@ -158,6 +158,16 @@ DIAG_UART1_OVERFLOW_COUNT = 83
 # durable records could be dropped on the floor while every counter a reader
 # could see stayed at zero.
 DIAG_JOURNAL_STAGE_FAILURE_COUNT = 84
+# Why a record was rejected before it could be queued. All four used to
+# collapse into one RAM_QUEUE_FULL drop marker, which says a record was
+# lost and nothing about whether the peer stopped draining, the record was
+# malformed, or the loss-marker reserve was reached.
+DIAG_REJECT_DURABLE_FULL_COUNT = 85
+DIAG_REJECT_LARGE_FULL_COUNT = 86
+DIAG_REJECT_OVERSIZE_COUNT = 87
+DIAG_REJECT_RING_ERROR_COUNT = 88
+# High-water mark of the durable ring alone; QUEUE_DEPTH sums four rings.
+DIAG_DURABLE_DEPTH_MAX = 89
 
 MAX_DEVICE_ID_BYTES = 63
 MAX_FIRMWARE_BYTES = 63

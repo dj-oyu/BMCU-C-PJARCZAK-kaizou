@@ -176,6 +176,11 @@
    "82": "uart1_drain_bytes",
    "83": "uart1_overflow_count",
    "84": "journal_stage_failure_count",
+   "85": "reject_durable_full_count",
+   "86": "reject_large_full_count",
+   "87": "reject_oversize_count",
+   "88": "reject_ring_error_count",
+   "89": "durable_depth_max",
    "9": "loop_busy_us"
   },
   "drop_reasons": {

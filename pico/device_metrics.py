@@ -146,6 +146,16 @@ class DeviceMetrics:
              journal.failure_count if journal else 0),
             (C.DIAG_JOURNAL_STAGE_FAILURE_COUNT,
              outbox.journal_failure_count if outbox else 0),
+            (C.DIAG_REJECT_DURABLE_FULL_COUNT,
+             outbox.reject_durable_full_count if outbox else 0),
+            (C.DIAG_REJECT_LARGE_FULL_COUNT,
+             outbox.reject_large_full_count if outbox else 0),
+            (C.DIAG_REJECT_OVERSIZE_COUNT,
+             outbox.reject_oversize_count if outbox else 0),
+            (C.DIAG_REJECT_RING_ERROR_COUNT,
+             outbox.reject_ring_error_count if outbox else 0),
+            (C.DIAG_DURABLE_DEPTH_MAX,
+             outbox.durable_depth_max if outbox else 0),
         ):
             offset = self._u64(offset, tag, value)
         if temperature_milli_c is not None:

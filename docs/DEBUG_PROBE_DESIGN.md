@@ -29,8 +29,8 @@ built to do.
 | 1 | `notable` at `bmcu_link.cpp:1347` emits a long-transaction event only for `0x040D`, `0x040E`, `REJECTED` or `FAILED` | `0x0411` is `IGNORED`, so no event was ever emitted. Only a one-slot "most recent" field in a snapshot survived |
 | 2 | `tick_hz` was 0, because `HELLO` is sent once, at `bmcu_link_init` | No tick-to-seconds conversion. Every timestamp was uninterpretable |
 | 3 | `hw_tick32` runs at 18 MHz and wraps every ~238 s | Even with `tick_hz`, correlation beyond four minutes is ambiguous |
-| 4 | The event endpoint held 32 `TRANSPORT_DROP` records, `RAM_QUEUE_FULL`, and nothing else | Every BMCU event had been evicted by volume |
-| 5 | `STATUS_REPLACEMENT_COUNT` was 439,220 | Transient states are coalesced away by design; a state that exists for 200 ms may never be transmitted |
+| 4 | The event endpoint held 32 `TRANSPORT_DROP` records, `RAM_QUEUE_FULL`, and nothing else | Every BMCU event had been lost. **Cause not established** — see R4; the ACK watermark was current with one sequence outstanding, which does not fit a back-pressure story |
+| 5 | `STATUS_REPLACEMENT_COUNT` was 439,220 | Transient states are coalesced away by design; a state that exists for 200 ms may never be transmitted. Not a cause of #4 — `STATUS` uses its own rings |
 | 6 | `journal.flush` raised `OSError: 84` (`LFS_ERR_CORRUPT`) while `JOURNAL_FAILURE_COUNT` and `EXCEPTION_COUNT` both read 0 | The counters are per-boot and had been reset; the retained ERROR outlived them. A reader sees zeros and concludes healthy while the log says otherwise. Separately, the outbox's own staging-failure counter was incremented at four sites and reported at none |
 | 7 | `HEAP_MIN_FREE` was 32 bytes | The bridge was one allocation from failure while reporting itself healthy |
 | 8 | `LOOP_MAX_DELAY_US` was 627,000 | Cooperative service stalled for over half a second |
@@ -91,8 +91,28 @@ started observing so a reader knows the extension is trustworthy.
 ### R4. Rare records must survive volume
 
 A flood of `STATUS` must never evict a fault, a latch transition, or an
-unsupported-frame record. This needs reserved capacity per class, not a single
-FIFO with a drop policy. The classes are the roles in §2.
+unsupported-frame record.
+
+**This is already true, and the first draft of this document said otherwise.**
+`STATUS` never enters the durable ring: it goes to `latest_status` and
+`current_status`, each sized to the link count and keyed by `replace_key`, so a
+new `STATUS` replaces its predecessor for that link and competes with nothing.
+The 439,220 status replacements were the mechanism working, not the mechanism
+failing. Reserved capacity by class is largely built.
+
+So the requirement stands but the diagnosis behind it does not, and the reason
+the durable ring saturated on 2026-08-03 is **not established**. The readings do
+not fit a simple back-pressure story: the ACK watermark was current with a
+single sequence outstanding, which should have left the ring nearly empty, and
+it held 32 `TRANSPORT_DROP` markers and no BMCU events.
+
+Rebuilding the queueing on that unexplained observation would be the same
+mistake this document exists to catalogue. What went in instead is the
+instrumentation needed to explain it next time: the four rejection causes that
+used to collapse into one `RAM_QUEUE_FULL` marker are now counted separately,
+and the durable ring's own high-water mark is reported apart from `queue_depth`,
+which sums four rings of different purposes. Redesign after that has produced a
+reading, not before.
 
 ### R5. Silent failure is prohibited
 
@@ -217,8 +237,11 @@ today's open question come first.
    from a single snapshot. Costs a few hundred bytes of flash.
 2. **Pico: honest counters and forced snapshot refresh.** No new mechanism, and
    it removes the class of failure where the probe under-reports itself.
-3. **Pico: priority classes.** The largest change, and the one that makes the
-   probe trustworthy under load.
+3. **Pico: explain the saturated durable ring, then decide.** Blocked on a
+   reading, not on design. The rejection-cause counters and the durable
+   high-water mark landed for this; the queueing itself should not be touched
+   until they have said something. Reserved capacity by class is already
+   largely built (R4), so the remaining change may be small or may be nothing.
 4. **Pico: remote restart and journal clear.** Unblocks recovery without
    physical access.
 5. **Triggered bulk capture.** Only worth building once 1-4 hold.

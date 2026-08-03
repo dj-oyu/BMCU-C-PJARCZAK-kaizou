@@ -44,6 +44,11 @@ class BMB1Outbox:
         self.status_replacements = 0
         self.last_ack_watermark = 0
         self.journal_failure_count = 0
+        self.reject_durable_full_count = 0
+        self.reject_large_full_count = 0
+        self.reject_oversize_count = 0
+        self.reject_ring_error_count = 0
+        self.durable_depth_max = 0
 
     def _allocate_sequence(self):
         if self.forced_drop_count:
@@ -76,8 +81,17 @@ class BMB1Outbox:
 
     def _append_message(self, sequence, size, protected,
                         use_drop_reserve=False):
+        # Every rejection here becomes the same RAM_QUEUE_FULL drop marker, so
+        # the causes are counted separately. They are not the same problem: a
+        # record with no size class is a coding error, a saturated ring means
+        # the peer is not draining, and hitting the reserved slot means the
+        # ring is saturated and a loss marker is already owed. A saturated
+        # durable ring was observed on 2026-08-03 with only one unacknowledged
+        # sequence outstanding, which no single reading explains -- these
+        # counters exist so the next occurrence does not need explaining.
         target = self._ring_for_size(size)
         if target is None:
+            self.reject_oversize_count += 1
             return False
         limit = target.capacity
         if (target is self.durable and target.capacity > 1 and
@@ -88,12 +102,17 @@ class BMB1Outbox:
             # marker behind a permanently full queue.
             limit -= 1
         if len(target) >= limit:
+            if target is self.durable:
+                self.reject_durable_full_count += 1
+            else:
+                self.reject_large_full_count += 1
             return False
         try:
             target.append(sequence, memoryview(self.encode_buffer)[:size],
                           protected=protected)
             return True
         except (RingFull, RecordTooLarge):
+            self.reject_ring_error_count += 1
             return False
 
     def enqueue_raw(self, link_index, received_at_us, wire, metadata):
@@ -319,7 +338,14 @@ class BMB1Outbox:
 
     @property
     def queue_depth(self):
-        return (len(self.durable) + len(self.large) + len(self.replay) +
+        # High-water mark of the durable ring alone. queue_depth below sums
+        # four rings of different sizes and purposes, so a reader cannot tell
+        # from it which one filled -- and durable is the only one whose
+        # saturation drops records.
+        depth = len(self.durable)
+        if depth > self.durable_depth_max:
+            self.durable_depth_max = depth
+        return (depth + len(self.large) + len(self.replay) +
                 len(self.latest_status))
 
     def available_boot_ranges(self):
