@@ -6,6 +6,7 @@
  * Everything inside a record body is little-endian, like the rest of the BMCU
  * link protocol; the record header around it is big-endian, like the transport.
  */
+import { decodeChannelFlags, type ChannelFaultFlags } from './decode'
 import { BmcuSeverity, BmcuSource, LinkState } from './generated'
 import {
   ChannelRecord,
@@ -99,6 +100,8 @@ export interface ChannelDetail {
   readonly motionFault: number
   /** Null when the BMCU did not report a controller phase for this channel. */
   readonly controllerMotion: number | null
+  /** Same byte STATUS carries, folded into flag bits 8..12 of this record. */
+  readonly channelFlags: ChannelFaultFlags
 }
 
 function readChannel(body: DataView): ChannelDetail | null {
@@ -120,6 +123,9 @@ function readChannel(body: DataView): ChannelDetail | null {
     motorPwm: body.getInt16(ChannelRecord.MotorPwmOffset, true),
     motionFault: body.getUint8(ChannelRecord.MotionFaultOffset),
     controllerMotion: controller & 0x80 ? controller & 0x7f : null,
+    channelFlags: decodeChannelFlags(
+      (flags >> ChannelRecord.ChannelFlagsShift) & 0xff,
+    ),
   }
 }
 

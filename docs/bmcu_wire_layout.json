@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 1,
+  "revision": 3,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "structures": {
     "bmb1_envelope": {
@@ -44,7 +44,7 @@
     "status_payload": {
       "description": "kind 2 STATUS, BMCUMonitor._decode_status. Absolute offset inside a BMB1 BMCU_FRAME payload is bmcu_frame_prefix.size + link_wire.header_size + offset.",
       "endianness": "little",
-      "size": 27,
+      "size": 31,
       "fields": [
         {"name": "hw_tick32", "offset": 0, "type": "u32"},
         {"name": "tx_drop", "offset": 4, "type": "u16", "note": "BMCU transmit queue drops"},
@@ -58,7 +58,14 @@
         {"name": "pull_pct", "offset": 19, "type": "u8", "count": 4, "unit": "percent", "note": "50 is neutral"},
         {"name": "pressure", "offset": 23, "type": "u16"},
         {"name": "led_mode", "offset": 25, "type": "u8"},
-        {"name": "control_error", "offset": 26, "type": "u8"}
+        {"name": "control_error", "offset": 26, "type": "u8"},
+        {"name": "channel_flags", "offset": 27, "type": "u8", "count": 4, "bitfields": [
+          {"name": "ks", "shift": 0, "mask": 3, "note": "switch reading, 0=none 1=both 2=external only 3=internal only. Single-microswitch builds only ever send 0 or 1."},
+          {"name": "low", "shift": 2, "mask": 1, "note": "g_on_use_low_latch: pull fell below 40% during pressure_ctrl_on_use, motor stopped"},
+          {"name": "jam", "shift": 3, "mask": 1, "note": "g_on_use_jam_latch: the jam variant of low, also raises HMS 0xF06F. Set only together with low."},
+          {"name": "dm_fail", "shift": 4, "mask": 1, "note": "dm_fail_latch: DM autoload stage 1 or 2 failed. Clears only on ks==0, a full withdrawal."},
+          {"name": "reserved", "shift": 5, "mask": 7, "note": "sent as zero, ignore on receive"}
+        ], "note": "per-channel fault latches and raw switch state. Decode with explicit shifts; the firmware union in src/bmcu_link.h is MCU-internal and its bitfield order is compiler-defined."}
       ]
     },
     "event_payload": {
@@ -84,7 +91,7 @@
         {"name": "record_count", "offset": 3, "type": "u8"},
         {"name": "record_type", "offset": 4, "type": "u8", "enum": "full_status_record_type"},
         {"name": "hw_tick32", "offset": 6, "type": "u32"},
-        {"name": "record_data", "offset": 10, "type": "bytes", "size": 16}
+        {"name": "record_data", "offset": 10, "type": "bytes", "size": 16, "note": "for record_type 2 (channel) the u16 at record_data offset 6 carries bits 0-4 of per-record flags and bits 8-12 as the status_payload channel_flags byte shifted left by 8, same bit order"}
       ]
     },
     "log_payload": {
@@ -209,6 +216,7 @@
   "reading_notes": [
     "Endianness changes between layers. BMB1 and the local BSNP/BCAP formats are big-endian; everything inside a BMCU link frame is little-endian.",
     "A STATUS field's absolute offset inside a BMB1 payload is bmcu_frame_prefix.size (10) + link_wire.header_size (7) + the status_payload offset. Reading a slot mask at offset 13 instead of 30 is the mistake this note exists to prevent.",
+    "channel_flags at status_payload offset 27 and bits 8-12 of the channel record's u16 flags are the same byte; ks there narrows what online_mask only says as one bit, and the three latches are the three different reasons a channel LED turns red.",
     "inserted_mask is channel hardware presence, not filament. online_mask is filament. The web UI mislabelled this for a long time.",
     "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
     "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."

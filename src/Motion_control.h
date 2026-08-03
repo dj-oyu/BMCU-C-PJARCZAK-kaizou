@@ -27,6 +27,12 @@ struct MotionControlChannelTelemetry
 };
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);
+
+// Packed fault-latch and switch state for one channel; see BmcuChannelFlags in
+// bmcu_link.h for the bit assignment. Kept out of MotionControlChannelTelemetry
+// because this is raw state going straight to the wire, not something any
+// firmware consumer reads back.
+uint8_t Motion_control_get_channel_flags(uint8_t channel);
 bool Motion_control_is_reset_safe(void);
 float Motion_control_get_filament_meters(uint8_t channel);
 void MC_PULL_detect_channels_inserted();

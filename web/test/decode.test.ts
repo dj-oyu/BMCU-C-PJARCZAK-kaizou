@@ -54,9 +54,9 @@ describe('parseMessages', () => {
 })
 
 describe('parseStatus', () => {
-  it('decodes the fixture STATUS payload of bytes 0..26', () => {
+  it('decodes the fixture STATUS payload of bytes 0..30', () => {
     // ci/generate_bmcu_binary_fixtures.py fills the STATUS payload with
-    // range(27), so every field decodes to its own offset. That makes each
+    // range(31), so every field decodes to its own offset. That makes each
     // assertion below a direct check of the offset in layout.ts.
     const [message] = parseMessages(load(fixtures, 'bmcu_status.bin'))
     const status = parseStatus(message!.payload)
@@ -66,6 +66,13 @@ describe('parseStatus', () => {
     expect(status!.filamentLoaded).toEqual([false, true, true, true]) // 14 = 0b1110
     expect(status!.motion).toEqual([15, 16, 17, 18])
     expect(status!.pullPercent).toEqual([19, 20, 21, 22])
+    // 27..30 are the channel-flags bytes; 27 = 0b11011 exercises every bit.
+    expect(status!.channelFlags.map((entry) => entry.raw)).toEqual([27, 28, 29, 30])
+    expect(status!.channelFlags[0]).toEqual({
+      ks: 3, lowLatch: false, jamLatch: true, dmFailLatch: true, raw: 27,
+    })
+    expect(status!.channelFlags[1]!.ks).toBe(0)
+    expect(status!.channelFlags[1]!.lowLatch).toBe(true)
   })
 
   it('rejects a BMCU frame that is not a STATUS kind', () => {
@@ -135,6 +142,21 @@ describe('mock telemetry', () => {
     const loaded = telemetry.statuses.get(0)
     expect(loaded?.filamentLoaded).toEqual([true, false, true, false])
     expect(loaded?.selectedSlot).toBe(0)
+  })
+
+  it('tells the three latches apart and keeps the switch reading', () => {
+    // filamentLoaded says only "not zero" for both of these channels. The
+    // latch bits and ks are what a host needs to say why one is red and
+    // whether the other has finished inserting.
+    const loaded = telemetry.statuses.get(0)
+    expect(loaded?.channelFlags[0]).toEqual({
+      ks: 1, lowLatch: true, jamLatch: true, dmFailLatch: false, raw: 0x0d,
+    })
+    expect(loaded?.channelFlags[2]).toEqual({
+      ks: 2, lowLatch: false, jamLatch: false, dmFailLatch: false, raw: 0x02,
+    })
+    expect(loaded?.filamentLoaded[0]).toBe(true)
+    expect(loaded?.filamentLoaded[2]).toBe(true)
   })
 
   it('lists both links when both report telemetry', () => {

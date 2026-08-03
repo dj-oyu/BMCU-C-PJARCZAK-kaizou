@@ -53,13 +53,15 @@ class FakeMonitor:
         self.uart_overflow_count = overflows
 
 
-def status_payload(current_slot, inserted_mask, online_mask, motion, pull):
-    payload = bytearray(27)
+def status_payload(current_slot, inserted_mask, online_mask, motion, pull,
+                   channel_flags=(0, 0, 0, 0)):
+    payload = bytearray(link.STATUS_PAYLOAD_SIZE)
     payload[12] = current_slot
     payload[13] = inserted_mask
     payload[14] = online_mask
     payload[15:19] = bytes(motion)
     payload[19:23] = bytes(pull)
+    payload[27:31] = bytes(channel_flags)
     return bytes(payload)
 
 
@@ -75,13 +77,17 @@ def main():
     # a channel row that is plugged in but empty, which is the case the old UI
     # mislabelled as "Filament: Present".
     current = b""
-    for index, (slot, inserted, online, motion, pull) in enumerate((
-        (0, 0b1111, 0b0101, (2, 0, 1, 0), (61, 50, 58, 50)),
-        (255, 0b1111, 0b0000, (0, 0, 0, 0), (50, 50, 50, 50)),
+    # The two channels link 0 reports online carry the states that used to be
+    # invisible: slot 1 is jammed, which was one red LED with no stated cause,
+    # and slot 3 is resting on the outer switch alone, which "online" reported
+    # identically to a channel settled on both.
+    for index, (slot, inserted, online, motion, pull, flags) in enumerate((
+        (0, 0b1111, 0b0101, (2, 0, 1, 0), (61, 50, 58, 50), (0x0d, 0x00, 0x02, 0x00)),
+        (255, 0b1111, 0b0000, (0, 0, 0, 0), (50, 50, 50, 50), (0x00, 0x00, 0x00, 0x00)),
     )):
         wire = link.encode_frame(
             link.STATUS, index + 1,
-            status_payload(slot, inserted, online, motion, pull))
+            status_payload(slot, inserted, online, motion, pull, flags))
         current += encoded(binary.write_bmcu_frame, 0, index + 1, BOOT_ID,
                            index, 100000 + index, wire)
     (OUTPUT / "current.bin").write_bytes(current)
@@ -122,11 +128,13 @@ def main():
     # Snapshot: built through the real BinaryAPI so the mock cannot encode a
     # record shape the device would never produce.
     channel_records = []
-    for channel, (inserted, online, pull, angle, delta, pwm, fault) in enumerate((
-        (1, 1, 61, 2048, 12, 480, 0),
-        (1, 0, 50, 1310, 0, 0, 0),
-        (1, 1, 58, 3072, -6, -420, 0),
-        (1, 0, 50, 200, 0, 0, 3),
+    # ch_flags matches the STATUS bytes above for link 0: channel 0 jammed,
+    # channel 2 resting on the outer switch alone.
+    for channel, (inserted, online, pull, angle, delta, pwm, fault, ch_flags) in enumerate((
+        (1, 1, 61, 2048, 12, 480, 0, 0x0d),
+        (1, 0, 50, 1310, 0, 0, 0, 0x00),
+        (1, 1, 58, 3072, -6, -420, 0, 0x02),
+        (1, 0, 50, 200, 0, 0, 3, 0x00),
     )):
         body = bytearray(16)
         body[0] = channel
@@ -135,7 +143,9 @@ def main():
         body[3] = online
         body[4] = pull
         body[5] = 1
-        struct.pack_into("<H", body, 6, 0x000C if fault == 0 else 0x0004)
+        record_flags = 0x000C if fault == 0 else 0x0004
+        # Bits 8..12 carry the STATUS channel-flags byte, shifted up whole.
+        struct.pack_into("<H", body, 6, record_flags | (ch_flags << 8))
         struct.pack_into("<Hhh", body, 8, angle, delta, pwm)
         body[14] = fault
         body[15] = 0x80 | 3

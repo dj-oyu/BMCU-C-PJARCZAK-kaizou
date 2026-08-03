@@ -3191,6 +3191,25 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     return true;
 }
 
+uint8_t Motion_control_get_channel_flags(uint8_t channel)
+{
+    if (channel >= kChCount) return 0u;
+
+    BmcuChannelFlags flags;
+    flags.raw = 0u;
+    flags.bits.ks = static_cast<uint8_t>(MC_ONLINE_key_stu[channel] & 0x03u);
+    flags.bits.low = g_on_use_low_latch[channel] ? 1u : 0u;
+    flags.bits.jam = g_on_use_jam_latch[channel] ? 1u : 0u;
+#if BMCU_DM_TWO_MICROSWITCH
+    flags.bits.dm_fail = dm_fail_latch[channel] ? 1u : 0u;
+#else
+    // Single-microswitch builds have no DM autoload stage to fail, and
+    // MC_ONLINE_key_stu only ever holds 0 or 1 there.
+    flags.bits.dm_fail = 0u;
+#endif
+    return flags.raw;
+}
+
 // Whether every channel is parked with nothing in flight, so a reset cannot
 // interrupt an operation. kMotionParked carries the per-state reasoning.
 //

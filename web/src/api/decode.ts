@@ -8,6 +8,7 @@
 import { BmcuKind, Diag, Limit, MessageType, ValueType } from './generated'
 import {
   BmcuFramePrefix,
+  ChannelFlags,
   Envelope,
   LinkWire,
   LogPayload,
@@ -133,6 +134,32 @@ export interface LoaderStatus {
   readonly filamentLoaded: readonly boolean[]
   readonly motion: readonly number[]
   readonly pullPercent: readonly number[]
+  readonly channelFlags: readonly ChannelFaultFlags[]
+}
+
+/**
+ * The three latches and the switch reading, which used to be visible only as
+ * one red LED on the loader. They have three different recoveries, so they are
+ * reported apart rather than folded into a single fault.
+ */
+export interface ChannelFaultFlags {
+  /** Raw switch reading. ``filamentLoaded`` is only ``ks !== 0``. */
+  readonly ks: number
+  readonly lowLatch: boolean
+  readonly jamLatch: boolean
+  readonly dmFailLatch: boolean
+  readonly raw: number
+}
+
+/** Shared by STATUS and the snapshot channel record, which carry the same byte. */
+export function decodeChannelFlags(raw: number): ChannelFaultFlags {
+  return {
+    ks: (raw >> ChannelFlags.KsShift) & ChannelFlags.KsMask,
+    lowLatch: (raw & ChannelFlags.LowLatchBit) !== 0,
+    jamLatch: (raw & ChannelFlags.JamLatchBit) !== 0,
+    dmFailLatch: (raw & ChannelFlags.DmFailLatchBit) !== 0,
+    raw,
+  }
 }
 
 const STATUS_MIN_BYTES =
@@ -156,6 +183,9 @@ export function parseStatus(payload: DataView): LoaderStatus | null {
     filamentLoaded: slots.map((index) => ((online >> index) & 1) !== 0),
     motion: slots.map((index) => byte(StatusPayload.MotionOffset + index)),
     pullPercent: slots.map((index) => byte(StatusPayload.PullPercentOffset + index)),
+    channelFlags: slots.map((index) =>
+      decodeChannelFlags(byte(StatusPayload.ChannelFlagsOffset + index)),
+    ),
   }
 }
 

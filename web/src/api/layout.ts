@@ -60,7 +60,29 @@ export const StatusPayload = {
   PressureOffset: 23,
   LedModeOffset: 25,
   ControlErrorOffset: 26,
-  Size: 27,
+  ChannelFlagsOffset: 27,
+  Size: 31,
+} as const
+
+/**
+ * Per-channel fault-latch and switch byte, at ``StatusPayload.ChannelFlagsOffset``
+ * and repeated in the channel record's flag bits 8..12.
+ *
+ * The firmware assembles this through a union in ``src/bmcu_link.h``, but that
+ * union is MCU-internal and its bitfield order belongs to the compiler. Only
+ * the raw byte is contract, so these are explicit shifts against
+ * ``docs/bmcu_wire_layout.json``.
+ */
+export const ChannelFlags = {
+  /** 0 none, 1 both switches, 2 external only, 3 internal only. */
+  KsShift: 0,
+  KsMask: 0b11,
+  /** Pull fell below 40% during pressure control on use; motor latched off. */
+  LowLatchBit: 1 << 2,
+  /** The jam variant of the low latch, which also raises HMS 0xF06F. */
+  JamLatchBit: 1 << 3,
+  /** DM autoload failed; clears only on a full withdrawal (ks === 0). */
+  DmFailLatchBit: 1 << 4,
 } as const
 
 /** PICO_LOG payload, ``write_log`` format ``>QQBBHH`` then three byte runs. */
@@ -150,6 +172,13 @@ export const ChannelRecord = {
   ControllerMotionOffset: 15,
   SensorOnlineBit: 1 << 2,
   SensorGoodBit: 1 << 3,
+  /**
+   * The high byte of the u16 at ``FlagsOffset`` is the STATUS channel-flags
+   * byte shifted up whole, in the same bit order. It is the only free space a
+   * channel record has left, and carrying it unrepacked means one decoder
+   * serves both carriers.
+   */
+  ChannelFlagsShift: 8,
 } as const
 
 /** Channels per BMCU loader; the STATUS masks and arrays are all this wide. */
