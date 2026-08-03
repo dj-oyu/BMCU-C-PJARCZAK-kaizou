@@ -9,8 +9,9 @@
 //   bit2    low      g_on_use_low_latch
 //   bit3    jam      g_on_use_jam_latch
 //   bit4    dm_fail  dm_fail_latch
-//   bit5    loaded   this channel holds the g_loaded_ch latch
-//   bit6-7  reserved, transmitted as zero
+//   bit5    loaded   this channel owns the shared PTFE merger
+//   bit6    tail     ... and its filament is past the online key
+//   bit7    reserved, transmitted as zero
 //
 // Deliberately sparse. Roughly 21 of the 32 combinations are reachable, which
 // still needs five bits, so a dense encoding would save nothing while adding
@@ -36,23 +37,36 @@ union BmcuChannelFlags
         uint8_t low : 1;
         uint8_t jam : 1;
         uint8_t dm_fail : 1;
-        // The channel holding the printer-side loaded latch, g_loaded_ch.
-        // Flash-backed, and re-latched only by a printer-commanded load, which
-        // the printer will not send while it believes the channel is already
-        // loaded -- so clearing it wrongly desynchronises the two permanently,
-        // after which an unload addressed to that channel is a traceless
-        // no-op. At most one channel sets this; none set means no channel is
-        // latched.
+        // The channel that owns the shared PTFE merger -- g_loaded_ch, the
+        // mutex on the one output tube that all four channels feed. Set in
+        // both LOADED and TAIL, because both are ownership: this bit answers
+        // "is this channel's filament in the tube", which is the question the
+        // motion accept gates ask. Flash-backed, and re-acquired only by a
+        // printer-commanded load, which the printer will not send while it
+        // believes the channel is already loaded -- so releasing it wrongly
+        // desynchronises the two, after which an unload addressed to that
+        // channel is a traceless no-op. At most one channel sets this; none
+        // set means the merger is free.
         //
-        // This is the latch exactly as the firmware holds it, with no separate
-        // encoding for the sensor-driven clear being debounced. While
-        // Motion_control_run is timing a key-zero towards
-        // LOADED_LATCH_DROP_MS, the latch is still held and this bit still
-        // reads 1; it drops to 0 on the pass that actually clears it. A
-        // decoder that wants to see the debounce running can infer it from
-        // this bit set while the same channel's ks reads 0.
+        // Its meaning is unchanged by TAIL arriving, so a decoder that only
+        // knows bit 5 stays correct. Its edges moved: it used to drop when the
+        // key read empty, and now it drops only on a printer command.
         uint8_t loaded : 1;
-        uint8_t reserved : 2;
+        // TAIL: this channel still owns the merger, but its filament has gone
+        // past the online key and the switch can no longer see any of it. Only
+        // ever set together with loaded.
+        //
+        // This costs one of the two reserved bits and is worth it. TAIL is
+        // entered on exactly the failure this instrumentation exists to
+        // diagnose -- a runout, where the tail clears the switch before the
+        // printer asks for the strand back -- and without the bit the state is
+        // invisible. The obvious inference, bit 5 set while the same channel's
+        // ks reads 0, no longer distinguishes anything: it is true both while
+        // LOADED_LATCH_DROP_MS is being timed and for the whole of TAIL
+        // afterwards, which are the two cases a reader most needs to tell
+        // apart. Misdiagnosing this area has already cost a day.
+        uint8_t tail : 1;
+        uint8_t reserved : 1;
     } bits;
 };
 static_assert(sizeof(BmcuChannelFlags) == 1u, "BmcuChannelFlags must stay one byte");

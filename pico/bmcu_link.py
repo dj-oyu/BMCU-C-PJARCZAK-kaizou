@@ -86,12 +86,21 @@ def decode_channel_flags(raw):
         "jam_latch": bool(raw & 0x08),
         # DM autoload stage 1 or 2 failed. Clears only on a full withdrawal.
         "dm_fail_latch": bool(raw & 0x10),
-        # This channel holds g_loaded_ch, the flash-backed loaded latch. It is
-        # cleared the instant a loaded channel's key reads 0 and re-latched only
-        # by a printer-commanded load, so one brief switch blip desynchronises
-        # it from the printer permanently -- after which an unload addressed to
-        # that channel does nothing and leaves no trace.
+        # This channel owns the shared PTFE merger: g_loaded_ch, the
+        # flash-backed mutex on the one output tube all four channels feed.
+        # Set in both LOADED and TAIL, because both are ownership. Only a
+        # printer command releases it; re-acquired only by a printer-commanded
+        # load, so releasing it wrongly desynchronises it from the printer --
+        # after which an unload addressed to that channel does nothing and
+        # leaves no trace.
         "loaded": bool(raw & 0x20),
+        # Still owns the merger, but the filament has passed the online key so
+        # the switch can no longer see it. This is the runout state: the tail
+        # clears the switch before the printer commands the retract, and the
+        # retract has to be accepted anyway. Always accompanied by loaded.
+        # Firmware before wire revision 8 sent this bit as zero, which reads as
+        # "never in TAIL" and is the correct thing for it to mean there.
+        "tail": bool(raw & 0x40),
         "raw": raw,
     }
 

@@ -3303,7 +3303,9 @@ uint8_t Motion_control_get_channel_flags(uint8_t channel)
     // MC_ONLINE_key_stu only ever holds 0 or 1 there.
     flags.bits.dm_fail = 0u;
 #endif
-    flags.bits.loaded = (ams_state_get_loaded() == channel) ? 1u : 0u;
+    const bool owns = (ams_state_get_loaded() == channel);
+    flags.bits.loaded = owns ? 1u : 0u;
+    flags.bits.tail = (owns && ams_state_is_tail()) ? 1u : 0u;
     return flags.raw;
 }
 
