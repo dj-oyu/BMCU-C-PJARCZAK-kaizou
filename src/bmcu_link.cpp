@@ -82,14 +82,14 @@ struct PrinterTransactionEventCache
 };
 
 // First-seen-wins table of long-frame types the parser resolved to nothing.
-// Three slots: enough to show that a printer is asking for several things this
-// firmware does not implement, small enough to fit one snapshot record beside
-// tick_hz. Overflow is counted rather than evicting, so a full table still says
-// how much it is not showing.
+// Two slots: enough to show that a printer is asking for more than one thing
+// this firmware does not implement, and all that fits beside tick_hz and the
+// foreign-frame counter. Overflow is counted rather than evicting, so a full
+// table still says how much it is not showing.
 struct UnsupportedLongCache
 {
-    uint16_t type[3];
-    uint16_t count[3];
+    uint16_t type[2];
+    uint16_t count[2];
     uint16_t overflow;
 };
 
@@ -155,6 +155,7 @@ PrinterTransactionEventCache g_printer_transaction_event = {};
 uint32_t g_printer_transaction_event_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
 UnsupportedLongCache g_unsupported_long = {};
+uint32_t g_printer_foreign_count = 0u;
 bmcu_ams_service::Watch g_ams_service = {};
 uint8_t g_status_cache_valid = 0u;
 LogRecord g_events[kEventSlots];
@@ -581,10 +582,14 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
         // Carrying it here makes a snapshot self-describing.
         FullStatusRecord& probe = append_full_record(FULL_RECORD_PROBE);
         put32(&probe.data[0], time_hw_tpus * 1000000u);
-        for (uint8_t i = 0u; i < 3u; ++i)
+        // Frames addressed to another AMS on the bus. Suppressed from the event
+        // stream, so this is the only place their volume is visible -- and it
+        // needs to be, because that volume is what saturated the bridge queue.
+        put32(&probe.data[4], g_printer_foreign_count);
+        for (uint8_t i = 0u; i < 2u; ++i)
         {
-            put16(&probe.data[4u + i * 2u], g_unsupported_long.type[i]);
-            put16(&probe.data[10u + i * 2u], g_unsupported_long.count[i]);
+            put16(&probe.data[8u + i * 2u], g_unsupported_long.type[i]);
+            put16(&probe.data[12u + i * 2u], g_unsupported_long.count[i]);
         }
     }
 
@@ -1295,9 +1300,21 @@ void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fau
 
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
-                                   uint16_t response_length)
+                                   uint16_t response_length, uint8_t addressed_ams)
 {
     const uint32_t tick = time_ticks32();
+    // A frame addressed to another AMS is not this unit's business. Every
+    // handler already returns silently on the mismatch; what was missing was
+    // saying so, and the omission was expensive. On a bus with two BMCUs each
+    // unit reported the other's polls as its own FAILED/NO_RESPONSE -- 26,000
+    // events in thirty minutes of ordinary printing, each queued as a durable
+    // record. Delivery is stop-and-wait, so the queue saturated and stayed
+    // saturated, and real events were dropped wholesale for as long as it did.
+    // Counted rather than discarded silently, because a probe that hides what
+    // it is not reporting is the thing this instrumentation exists to avoid.
+    const bool foreign = addressed_ams != 0xFFu &&
+                         addressed_ams != static_cast<uint8_t>(BAMBU_BUS_AMS_NUM);
+    if (foreign && g_printer_foreign_count != 0xFFFFFFFFu) ++g_printer_foreign_count;
     if (rx_class == static_cast<uint8_t>(bambubus_package_type::filament_motion_short) ||
         rx_class == static_cast<uint8_t>(bambubus_package_type::filament_motion_long))
     {
@@ -1318,7 +1335,11 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
     }
     if (response_length != 0u && g_printer_bus.tx_count != 0xFFFFu) ++g_printer_bus.tx_count;
 
-    if (rejected)
+    // Counters keep counting foreign frames -- they were genuinely seen and
+    // genuinely unanswered, and changing that would make every number here
+    // incomparable with the captures taken before this landed. Only the event
+    // is suppressed, because the event is what costs a durable queue slot.
+    if (rejected && !foreign)
     {
         // rx_class is part of the key: two package types can share a command
         // byte, and collapsing them would hide the one that matters behind the
@@ -1364,7 +1385,7 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 
 static __attribute__((noinline, cold)) void note_unsupported_long(uint16_t type)
 {
-    for (uint8_t i = 0u; i < 3u; ++i)
+    for (uint8_t i = 0u; i < 2u; ++i)
     {
         if (g_unsupported_long.count[i] == 0u)
         {

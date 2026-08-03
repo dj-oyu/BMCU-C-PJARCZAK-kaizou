@@ -1282,6 +1282,22 @@ bambubus_package_type bambubus_run()
             bool handler_dispatched = false;
             bool no_response_expected = false;
 
+            // Which AMS the frame is addressed to. Every handler checks this
+            // after dispatch and returns silently on a mismatch, so a poll
+            // meant for the other BMCU on the bus is indistinguishable from a
+            // genuine failure to answer -- both land as FAILED/NO_RESPONSE.
+            // On a two-unit bus that is most of the traffic: 26,000 such
+            // events in thirty minutes of ordinary printing, every one of them
+            // queued as a durable record for delivery. Capturing the address
+            // here lets the reporting path tell the two apart.
+            uint8_t addressed_ams = 0xFFu;
+            if (stu == bambubus_package_type::filament_motion_short)
+                addressed_ams = ((const bambubus_printer_motion_package_struct *)buf)->ams_num;
+            else if (stu == bambubus_package_type::filament_motion_long)
+                addressed_ams = ((const bambubus_printer_stu_motion_package_struct *)buf)->ams_num;
+            else if (len > 15 && (buf[1] == 0x05u || buf[1] == 0x04u))
+                addressed_ams = buf[15];
+
             switch (stu)
             {
             case bambubus_package_type::filament_motion_short:
@@ -1371,7 +1387,8 @@ bambubus_package_type bambubus_run()
                 bus_port_to_host.report_tx_fault(bus_tx_fault::no_response_expected);
             bmcu_link_printer_transaction(
                 static_cast<uint8_t>(stu), command, static_cast<uint8_t>(outcome),
-                static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length);
+                static_cast<uint8_t>(reason), static_cast<uint16_t>(len), response_length,
+                addressed_ams);
 
             if (len >= 15 && (buf[1] == 0x04u || buf[1] == 0x05u))
             {

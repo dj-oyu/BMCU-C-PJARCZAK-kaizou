@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 5,
+  "revision": 6,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -65,7 +65,8 @@
           {"name": "low", "shift": 2, "mask": 1, "note": "g_on_use_low_latch: pull fell below 40% during pressure_ctrl_on_use, motor stopped"},
           {"name": "jam", "shift": 3, "mask": 1, "note": "g_on_use_jam_latch: the jam variant of low, also raises HMS 0xF06F. Set only together with low."},
           {"name": "dm_fail", "shift": 4, "mask": 1, "note": "dm_fail_latch: DM autoload stage 1 or 2 failed. Clears only on ks==0, a full withdrawal."},
-          {"name": "reserved", "shift": 5, "mask": 7, "note": "sent as zero, ignore on receive"}
+          {"name": "loaded", "shift": 5, "mask": 1, "note": "this channel holds g_loaded_ch, the flash-backed loaded latch. Cleared the instant a loaded channel's key reads 0 and re-latched only by a printer-commanded load, so one brief switch blip desynchronises it from the printer permanently; an unload addressed to that channel then does nothing and leaves no trace. At most one channel sets it."},
+          {"name": "reserved", "shift": 6, "mask": 3, "note": "sent as zero, ignore on receive"}
         ], "note": "per-channel fault latches and raw switch state. Decode with explicit shifts; the firmware union in src/bmcu_link.h is MCU-internal and its bitfield order is compiler-defined."}
       ]
     },
@@ -85,7 +86,7 @@
     "printer_transaction_payload": {
       "description": "event_payload payload when record_type is 3 (printer_transaction). Emitted only for rejected or failed transactions, with a 5 s per-key repeat suppression window.",
       "endianness": "little",
-      "size": 7,
+      "size": 8,
       "fields": [
         {"name": "command", "offset": 0, "type": "u8", "note": "raw wire byte, buf[4] for short frames and buf[11] for long ones. Does NOT identify the frame -- use rx_class"},
         {"name": "owner", "offset": 1, "type": "u8", "enum": "command_owner"},
@@ -93,6 +94,7 @@
         {"name": "reason", "offset": 3, "type": "u8", "enum": "reason"},
         {"name": "request_length", "offset": 4, "type": "u8", "note": "saturating at 255"},
         {"name": "response_length", "offset": 5, "type": "u8", "note": "0 with outcome failed and reason no_response means the frame was ours, a reply was expected, and none was produced"},
+        {"name": "addressed_ams", "offset": 7, "type": "u8", "note": "the AMS number the frame targets, 255 when the frame carries no AMS address. Frames for another AMS on the bus no longer emit this record at all; their volume is in the probe record's foreign_count"},
         {"name": "rx_class", "offset": 6, "type": "u8", "note": "the bambubus_package_type the parser resolved: 1 filament_motion_short, 2 filament_motion_long, 3 online_detect, 4 REQx6, 5 NFC_detect, 6 set_filament_info, 7 MC_online, 8 read_filament_info, 9 set_filament_info_type2, 10 version, 11 serial_number, 12 heartbeat, 13 ETC. 0 means the frame resolved to nothing, which includes long frames addressed to another AMS"}
       ]
     },
@@ -116,8 +118,9 @@
       "size": 16,
       "fields": [
         {"name": "tick_hz", "offset": 0, "type": "u32", "note": "hardware tick rate; hw_tick32 wraps every 2^32/tick_hz seconds, about 239 s at 18 MHz"},
-        {"name": "unsupported_type", "offset": 4, "type": "u16", "count": 3, "note": "long-frame types the parser resolved to nothing, first-seen-wins; 0 means the slot is unused"},
-        {"name": "unsupported_count", "offset": 10, "type": "u16", "count": 3, "note": "occurrences of the type at the same index, saturating at 65535"}
+        {"name": "foreign_count", "offset": 4, "type": "u32", "note": "frames addressed to another AMS on the bus, suppressed from the event stream; this is the only place their volume appears"},
+        {"name": "unsupported_type", "offset": 8, "type": "u16", "count": 2, "note": "long-frame types the parser resolved to nothing, first-seen-wins; 0 means the slot is unused"},
+        {"name": "unsupported_count", "offset": 12, "type": "u16", "count": 2, "note": "occurrences of the type at the same index, saturating at 65535"}
       ]
     },
     "log_payload": {

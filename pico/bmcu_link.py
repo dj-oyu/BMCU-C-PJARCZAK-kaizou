@@ -14,9 +14,6 @@ SYNC = b"\xa5\x5a"
 MAX_DECODER_BUFFER = 128
 VERSION_ALPHA3 = 0x83
 MAX_PAYLOAD = 57
-# The alpha wire is lock-step: BMCU and monitor ship together and the transport
-# contract states backward compatibility is not required, so this is an exact
-# length rather than a minimum with a tolerated legacy 27.
 STATUS_PAYLOAD_SIZE = 31
 # 27 is the pre-channel-flags encoding. Both are accepted so the bridge and the
 # BMCU can be updated independently: requiring 31 exactly means two BMCUs and a
@@ -89,6 +86,12 @@ def decode_channel_flags(raw):
         "jam_latch": bool(raw & 0x08),
         # DM autoload stage 1 or 2 failed. Clears only on a full withdrawal.
         "dm_fail_latch": bool(raw & 0x10),
+        # This channel holds g_loaded_ch, the flash-backed loaded latch. It is
+        # cleared the instant a loaded channel's key reads 0 and re-latched only
+        # by a printer-commanded load, so one brief switch blip desynchronises
+        # it from the printer permanently -- after which an unload addressed to
+        # that channel does nothing and leaves no trace.
+        "loaded": bool(raw & 0x20),
         "raw": raw,
     }
 
@@ -728,6 +731,8 @@ class BMCUMonitor:
                           "request_length": payload[4],
                           "response_length": payload[5],
                           "rx_class": payload[6]})
+            if event["payload_length"] >= 8:
+                event["addressed_ams"] = payload[7]
         else:
             event["event_name"] = "record_%d" % event["record_type"]
         return event

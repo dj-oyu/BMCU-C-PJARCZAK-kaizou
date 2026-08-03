@@ -167,7 +167,7 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(
             link.decode_channel_flags(0x00),
             {"ks": 0, "low_latch": False, "jam_latch": False,
-             "dm_fail_latch": False, "raw": 0x00})
+             "dm_fail_latch": False, "loaded": False, "raw": 0x00})
         # ks == 2 is the state online cannot distinguish: resting on the outer
         # switch alone, which autoloads differently from settled on both.
         self.assertEqual(link.decode_channel_flags(0x02)["ks"], 2)

@@ -9,7 +9,8 @@
 //   bit2    low      g_on_use_low_latch
 //   bit3    jam      g_on_use_jam_latch
 //   bit4    dm_fail  dm_fail_latch
-//   bit5-7  reserved, transmitted as zero
+//   bit5    loaded   this channel holds the g_loaded_ch latch
+//   bit6-7  reserved, transmitted as zero
 //
 // Deliberately sparse. Roughly 21 of the 32 combinations are reachable, which
 // still needs five bits, so a dense encoding would save nothing while adding
@@ -35,7 +36,15 @@ union BmcuChannelFlags
         uint8_t low : 1;
         uint8_t jam : 1;
         uint8_t dm_fail : 1;
-        uint8_t reserved : 3;
+        // The channel holding the printer-side loaded latch, g_loaded_ch.
+        // Flash-backed, and until now visible nowhere: it is cleared the
+        // instant a loaded channel's key reads 0 (Motion_control.cpp:3072) and
+        // re-latched only by a printer-commanded load, so one brief switch
+        // blip desynchronises it from the printer permanently -- after which
+        // an unload addressed to that channel is a traceless no-op. At most
+        // one channel sets this; none set means no channel is latched.
+        uint8_t loaded : 1;
+        uint8_t reserved : 2;
     } bits;
 };
 static_assert(sizeof(BmcuChannelFlags) == 1u, "BmcuChannelFlags must stay one byte");
@@ -62,7 +71,7 @@ void bmcu_link_set_calibration_busy(bool busy);
 void bmcu_link_status_changed(uint32_t reasons);
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
-                                   uint16_t response_length);
+                                   uint16_t response_length, uint8_t addressed_ams);
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
                                         uint16_t payload_length, uint16_t response_length,
                                         uint8_t payload_hash);
