@@ -153,6 +153,11 @@ DIAG_UART0_DRAIN_BYTES = 80
 DIAG_UART0_OVERFLOW_COUNT = 81
 DIAG_UART1_DRAIN_BYTES = 82
 DIAG_UART1_OVERFLOW_COUNT = 83
+# Records the outbox failed to stage into the journal. Incremented at four
+# sites in bmcu_binary_outbox and, until this tag existed, reported at none:
+# durable records could be dropped on the floor while every counter a reader
+# could see stayed at zero.
+DIAG_JOURNAL_STAGE_FAILURE_COUNT = 84
 
 MAX_DEVICE_ID_BYTES = 63
 MAX_FIRMWARE_BYTES = 63

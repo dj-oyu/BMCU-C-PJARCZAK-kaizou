@@ -197,6 +197,7 @@ export const Diag = {
   Uart0OverflowCount: 81,
   Uart1DrainBytes: 82,
   Uart1OverflowCount: 83,
+  JournalStageFailureCount: 84,
 } as const
 export type Diag = (typeof Diag)[keyof typeof Diag]
 

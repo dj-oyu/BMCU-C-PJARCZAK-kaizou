@@ -175,6 +175,7 @@
    "81": "uart0_overflow_count",
    "82": "uart1_drain_bytes",
    "83": "uart1_overflow_count",
+   "84": "journal_stage_failure_count",
    "9": "loop_busy_us"
   },
   "drop_reasons": {
@@ -385,7 +386,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 4,
+ "revision": 5,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -622,13 +623,19 @@
      "type": "u8"
     },
     {
+     "name": "snapshot_age_ms",
+     "note": "age of every other record in this snapshot. 65535 means at least that old, never taken, or no clock yet -- in all three cases do not read the snapshot as current. Force a refresh with GET /api/snapshot.bin?refresh=1, which lands on the following request.",
+     "offset": 2,
+     "type": "u16"
+    },
+    {
      "name": "bmcu_boot_session",
      "offset": 4,
      "type": "u32"
     },
     {
      "name": "tick_hz",
-     "note": "0 when the BMCU has not sent HELLO",
+     "note": "0 when the BMCU has not sent HELLO; the PROBE record (full_status_record_type 13) carries it unconditionally",
      "offset": 8,
      "type": "u32"
     },

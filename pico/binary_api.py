@@ -84,11 +84,17 @@ def _link_record(monitor):
 
         0  B  link state code      4  I  bmcu boot session
         1  B  channels present     8  I  tick_hz, 0 when the BMCU has not said
-        2  H  reserved            12  I  sequence gap count
+        2  H  snapshot age ms     12  I  sequence gap count
+
+    The age exists because every other record in a snapshot looks exactly the
+    same whether it arrived a moment ago or forty minutes ago. Reading a stale
+    snapshot as current is the specific mistake this field prevents; 65535
+    means at least that old, or never taken.
     """
     body = bytearray(LINK_RECORD_BYTES)
     body[0] = LINK_STATE_CODES.get(monitor.link_state, 0)
     body[1] = sum(1 for channel in monitor.channels if channel is not None)
+    struct.pack_into(">H", body, 2, monitor.snapshot_age_ms())
     struct.pack_into(
         ">III", body, 4,
         monitor.bmcu_boot_session & 0xFFFFFFFF,
@@ -166,6 +172,17 @@ class BinaryAPI:
         if base in ("/api/current.bin", "/api/history/status.bin"):
             return list(self.outbox.iter_current())
         if base == "/api/snapshot.bin":
+            # refresh=1 asks every link for a new FULL_STATUS before answering.
+            # The response still carries whatever is held right now -- a
+            # snapshot takes several frames to assemble, so the fresh one lands
+            # in the following request. Read the link record's snapshot age to
+            # tell which one you got.
+            if query_number(path, "refresh", 0, 1):
+                for monitor in self.monitors:
+                    try:
+                        monitor.request_snapshot_refresh()
+                    except Exception:
+                        pass
             return self.snapshot_records()
         if base == "/api/capture.bin":
             return self.capture_records()

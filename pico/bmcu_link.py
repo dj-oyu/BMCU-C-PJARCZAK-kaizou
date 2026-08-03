@@ -402,6 +402,43 @@ class BMCUMonitor:
         self.get_full_status()
         return True
 
+    def request_snapshot_refresh(self, now_ms=None):
+        """Force a refresh, cancelling a pending retry backoff.
+
+        refresh_snapshot_if_idle declines whenever a request is outstanding or
+        a retry is scheduled, which is right for a background refresh and wrong
+        for an operator who has just reproduced a fault. A retry backoff grows
+        to seconds, and during it the served snapshot silently keeps answering
+        with whatever it last held -- for as long as the fault persists, which
+        is exactly when it is being read.
+
+        Returns True when a request went out. A request already in flight is
+        left alone and reported as False: it will answer the caller anyway.
+        """
+        if self._snapshot_parts is not None or self._snapshot_deadline_ms is not None:
+            return False
+        self._snapshot_retry_ms = None
+        self._snapshot_retries = 0
+        self.get_full_status()
+        return True
+
+    def snapshot_age_ms(self, now_ms=None):
+        """Age of the held snapshot, saturating at 65535.
+
+        65535 also stands for "never taken" and for "no clock yet". Both mean
+        the same thing to a reader: do not trust this as current.
+        """
+        if self.snapshot is None or self.snapshot_at_ms is None:
+            return 0xFFFF
+        if now_ms is None:
+            now_ms = self._clock_ms
+        if now_ms is None:
+            return 0xFFFF
+        age = self._ticks_diff(now_ms, self.snapshot_at_ms)
+        if age < 0 or age >= 0xFFFF:
+            return 0xFFFF
+        return age
+
     def request_soft_reset(self, operation_id, reason=0, ttl_ms=5000):
         if not 1 <= operation_id <= 0xffffffff:
             raise ValueError("operation_id must be a non-zero u32")

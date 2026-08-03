@@ -144,6 +144,8 @@ class DeviceMetrics:
              journal.bytes_written if journal else 0),
             (C.DIAG_JOURNAL_FAILURE_COUNT,
              journal.failure_count if journal else 0),
+            (C.DIAG_JOURNAL_STAGE_FAILURE_COUNT,
+             outbox.journal_failure_count if outbox else 0),
         ):
             offset = self._u64(offset, tag, value)
         if temperature_milli_c is not None:

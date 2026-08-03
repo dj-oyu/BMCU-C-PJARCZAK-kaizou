@@ -44,8 +44,17 @@ class FakeMonitor:
         self.tick_hz = None
         self.sequence_gap_count = 0
         self.capture = None
+        self.snapshot_age = 0xFFFF
+        self.refresh_requests = 0
         for name, value in overrides.items():
             setattr(self, name, value)
+
+    def snapshot_age_ms(self, now_ms=None):
+        return self.snapshot_age
+
+    def request_snapshot_refresh(self, now_ms=None):
+        self.refresh_requests += 1
+        return True
 
 
 class FakeRing:
@@ -139,6 +148,25 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(body[0], api.LINK_STATE_CODES["stale"])
         self.assertEqual(body[1], 0)
         self.assertEqual(struct.unpack_from(">III", body, 4), (0, 0, 7))
+
+    def test_link_record_carries_the_snapshot_age(self):
+        # Every other record in a snapshot looks identical whether it arrived a
+        # moment ago or forty minutes ago. Reading a stale one as current is
+        # what this field exists to stop.
+        monitor = FakeMonitor(snapshot_age=1234)
+        route, _outbox, _log = build([monitor])
+        body = parse_snapshot(route("/api/snapshot.bin"))[0]["data"]
+        self.assertEqual(struct.unpack_from(">H", body, 2)[0], 1234)
+
+    def test_refresh_query_asks_every_link_for_a_new_snapshot(self):
+        monitors = [FakeMonitor(0), FakeMonitor(1)]
+        route, _outbox, _log = build(monitors)
+
+        route("/api/snapshot.bin")
+        self.assertEqual([m.refresh_requests for m in monitors], [0, 0])
+
+        route("/api/snapshot.bin?refresh=1")
+        self.assertEqual([m.refresh_requests for m in monitors], [1, 1])
 
     def test_link_record_reports_resyncing_distinctly_from_stale(self):
         # The old UI collapsed every state to Receiving/Waiting, which hid the

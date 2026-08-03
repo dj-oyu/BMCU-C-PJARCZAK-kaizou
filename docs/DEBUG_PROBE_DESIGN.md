@@ -31,7 +31,7 @@ built to do.
 | 3 | `hw_tick32` runs at 18 MHz and wraps every ~238 s | Even with `tick_hz`, correlation beyond four minutes is ambiguous |
 | 4 | The event endpoint held 32 `TRANSPORT_DROP` records, `RAM_QUEUE_FULL`, and nothing else | Every BMCU event had been evicted by volume |
 | 5 | `STATUS_REPLACEMENT_COUNT` was 439,220 | Transient states are coalesced away by design; a state that exists for 200 ms may never be transmitted |
-| 6 | `journal.flush` raised `OSError: 84` (`LFS_ERR_CORRUPT`) while `JOURNAL_FAILURE_COUNT` read 0 | Persistence had failed and the counter that exists to report it did not move |
+| 6 | `journal.flush` raised `OSError: 84` (`LFS_ERR_CORRUPT`) while `JOURNAL_FAILURE_COUNT` and `EXCEPTION_COUNT` both read 0 | The counters are per-boot and had been reset; the retained ERROR outlived them. A reader sees zeros and concludes healthy while the log says otherwise. Separately, the outbox's own staging-failure counter was incremented at four sites and reported at none |
 | 7 | `HEAP_MIN_FREE` was 32 bytes | The bridge was one allocation from failure while reporting itself healthy |
 | 8 | `LOOP_MAX_DELAY_US` was 627,000 | Cooperative service stalled for over half a second |
 | 9 | `/api/snapshot.bin` is refreshed only when the bridge is idle | The snapshot cannot be sampled during the moment of interest, which is never idle |
@@ -96,11 +96,25 @@ FIFO with a drop policy. The classes are the roles in §2.
 
 ### R5. Silent failure is prohibited
 
-`JOURNAL_FAILURE_COUNT` read 0 while the journal was raising `OSError` on every
-flush. Any path that discards data must increment a counter, and those counters
-must themselves be in the never-dropped class. A probe that under-reports its
-own health is worse than no probe, because it converts "no data" into "no
-problem".
+Every path that discards data must increment a counter, and those counters must
+themselves be in the never-dropped class. A probe that under-reports its own
+health is worse than no probe, because it converts "no data" into "no problem".
+
+Two distinct ways that was violated, and they need different remedies.
+
+A counter that is never surfaced is the simple case: the outbox increments
+`journal_failure_count` at four sites and nothing read it, so durable records
+could fail to stage while every visible counter stayed at zero. Surfacing it is
+the whole fix.
+
+A counter that resets is the harder case. `JOURNAL_FAILURE_COUNT` and
+`EXCEPTION_COUNT` both read 0 while a retained ERROR in the log described an
+`OSError` on the journal. Nothing was wrong with the counters; they are
+per-boot, the bridge had restarted, and the log record outlived them. So a
+count of zero does not mean "never happened", and a reader has no way to tell
+the two apart from the counter alone. Health reporting therefore has to carry
+something that survives the reset — at minimum the last error and when it
+happened, so a restart cannot erase the fact that something failed.
 
 ### R6. Triggered capture
 

@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 4,
+  "revision": 5,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -170,8 +170,9 @@
       "fields": [
         {"name": "link_state", "offset": 0, "type": "u8", "enum": "link_states"},
         {"name": "channels_present", "offset": 1, "type": "u8"},
+        {"name": "snapshot_age_ms", "offset": 2, "type": "u16", "note": "age of every other record in this snapshot. 65535 means at least that old, never taken, or no clock yet -- in all three cases do not read the snapshot as current. Force a refresh with GET /api/snapshot.bin?refresh=1, which lands on the following request."},
         {"name": "bmcu_boot_session", "offset": 4, "type": "u32"},
-        {"name": "tick_hz", "offset": 8, "type": "u32", "note": "0 when the BMCU has not sent HELLO"},
+        {"name": "tick_hz", "offset": 8, "type": "u32", "note": "0 when the BMCU has not sent HELLO; the PROBE record (full_status_record_type 13) carries it unconditionally"},
         {"name": "sequence_gap_count", "offset": 12, "type": "u32"}
       ]
     },
