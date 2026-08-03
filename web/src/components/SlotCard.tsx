@@ -17,7 +17,7 @@ export function SlotCard({ status, index }: { status: LoaderStatus; index: numbe
   const selected = status.selectedSlot === index
   const present = status.channelPresent[index] ?? false
   const loaded = status.filamentLoaded[index] ?? false
-  const flags = status.channelFlags[index]
+  const flags = status.channelFlags?.[index]
   // Three latches with three different recoveries, previously indistinguishable
   // because all three showed as one red LED. A soft reset clears the first two;
   // an autoload failure needs the filament withdrawn all the way.

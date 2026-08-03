@@ -18,6 +18,12 @@ MAX_PAYLOAD = 57
 # contract states backward compatibility is not required, so this is an exact
 # length rather than a minimum with a tolerated legacy 27.
 STATUS_PAYLOAD_SIZE = 31
+# 27 is the pre-channel-flags encoding. Both are accepted so the bridge and the
+# BMCU can be updated independently: requiring 31 exactly means two BMCUs and a
+# Pico have to be flashed in lockstep, and flashing a BMCU carries a real risk
+# of a board that looks bricked. Any other length is still invalid.
+STATUS_PAYLOAD_SIZE_LEGACY = 27
+STATUS_PAYLOAD_SIZES = (STATUS_PAYLOAD_SIZE_LEGACY, STATUS_PAYLOAD_SIZE)
 
 HELLO = 0x01
 STATUS = 0x02
@@ -637,7 +643,7 @@ class BMCUMonitor:
                 self._invalidate_baseline(now_ms, "sequence_gap")
                 message["sequence_gap"] = {"expected": expected, "received": frame["sequence"]}
 
-        if kind == STATUS and len(payload) == STATUS_PAYLOAD_SIZE:
+        if kind == STATUS and len(payload) in STATUS_PAYLOAD_SIZES:
             self.status = self._decode_status(payload)
             message.update({"type": "status", "data": self.status})
             self._extend_hw_tick(self.status["hw_tick32"], message)
@@ -665,13 +671,21 @@ class BMCUMonitor:
         self._emit(message)
     @staticmethod
     def _decode_status(data):
-        return {"hw_tick32": _u32(data, 0), "tx_drop": _u16(data, 4), "rx_drop": _u16(data, 6),
-                "crc_error": _u16(data, 8), "frame_error": _u16(data, 10), "current_slot": data[12],
-                "inserted_mask": data[13], "online_mask": data[14], "motion": list(data[15:19]),
-                "pull_pct": list(data[19:23]), "pressure": _u16(data, 23),
-                "led_mode": data[25], "control_error": data[26],
-                "channel_flags": [decode_channel_flags(data[27 + index])
-                                  for index in range(4)]}
+        status = {"hw_tick32": _u32(data, 0), "tx_drop": _u16(data, 4), "rx_drop": _u16(data, 6),
+                  "crc_error": _u16(data, 8), "frame_error": _u16(data, 10), "current_slot": data[12],
+                  "inserted_mask": data[13], "online_mask": data[14], "motion": list(data[15:19]),
+                  "pull_pct": list(data[19:23]), "pressure": _u16(data, 23),
+                  "led_mode": data[25], "control_error": data[26]}
+        # Branch on length rather than reading a short payload as a prefix.
+        # Absent is not the same as clear: silently reporting every latch as 0
+        # against an older BMCU would invent a healthy machine, which is the
+        # class of mistake the channel-flags byte exists to prevent.
+        if len(data) >= STATUS_PAYLOAD_SIZE:
+            status["channel_flags"] = [decode_channel_flags(data[27 + index])
+                                       for index in range(4)]
+        else:
+            status["channel_flags"] = None
+        return status
 
     @staticmethod
     def _decode_event(data):

@@ -62,6 +62,13 @@ export const StatusPayload = {
   ControlErrorOffset: 26,
   ChannelFlagsOffset: 27,
   Size: 31,
+  /**
+   * The encoding before the channel-flags byte. Accepted so the bridge and the
+   * BMCU can be updated independently -- requiring 31 exactly means flashing
+   * two BMCUs and a Pico in lockstep, and a BMCU flash can leave a board that
+   * looks bricked.
+   */
+  LegacySize: 27,
 } as const
 
 /**

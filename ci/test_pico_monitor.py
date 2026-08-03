@@ -195,12 +195,25 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual([entry["dm_fail_latch"] for entry in decoded["channel_flags"]],
                          [False, False, True, False])
 
-    def test_a_status_of_the_previous_length_is_not_decoded(self):
-        # Alpha peers ship in lock-step and the transport contract does not ask
-        # for backward compatibility, so a short STATUS is reported rather than
-        # decoded as a truncated one.
+    def test_a_status_of_the_previous_length_still_decodes(self):
+        # The lock-step reading of the transport contract turned out to cost
+        # more than it was worth in practice: requiring 31 exactly means two
+        # BMCUs and a Pico have to be flashed together, and a BMCU flash can
+        # leave a board that looks bricked. So 27 is accepted.
         self.monitor._handle_frame(frame(link.STATUS, 15, bytes(27)), 200)
-        self.assertIsNone(self.monitor.status)
+        self.assertIsNotNone(self.monitor.status)
+        self.assertEqual(self.messages[-1]["type"], "status")
+
+    def test_a_status_without_the_flags_byte_reports_absent_not_clear(self):
+        # Absent and all-clear are different claims. Reporting every latch as
+        # false against an older BMCU would invent a healthy machine, which is
+        # the mistake the channel-flags byte exists to prevent.
+        decoded = link.BMCUMonitor._decode_status(bytes(27))
+        self.assertIsNone(decoded["channel_flags"])
+        self.assertEqual(decoded["motion"], [0, 0, 0, 0])
+
+    def test_a_status_of_an_unknown_length_is_still_rejected(self):
+        self.monitor._handle_frame(frame(link.STATUS, 16, bytes(29)), 210)
         self.assertEqual(self.messages[-1]["type"], "unknown_or_invalid")
 
     def test_channel_record_repeats_the_flags_byte_in_its_high_bits(self):

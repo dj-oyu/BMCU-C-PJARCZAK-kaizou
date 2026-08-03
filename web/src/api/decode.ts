@@ -134,7 +134,13 @@ export interface LoaderStatus {
   readonly filamentLoaded: readonly boolean[]
   readonly motion: readonly number[]
   readonly pullPercent: readonly number[]
-  readonly channelFlags: readonly ChannelFaultFlags[]
+  /**
+   * Null when the BMCU predates the channel-flags byte, i.e. a 27-byte
+   * STATUS. Absent is deliberately not the same as all-clear: reporting
+   * every latch as false against an older BMCU would invent a healthy
+   * machine, which is the mistake this byte exists to prevent.
+   */
+  readonly channelFlags: readonly ChannelFaultFlags[] | null
 }
 
 /**
@@ -162,8 +168,9 @@ export function decodeChannelFlags(raw: number): ChannelFaultFlags {
   }
 }
 
-const STATUS_MIN_BYTES =
-  BmcuFramePrefix.Size + LinkWire.HeaderSize + StatusPayload.Size
+const STATUS_PREFIX = BmcuFramePrefix.Size + LinkWire.HeaderSize
+const STATUS_MIN_BYTES = STATUS_PREFIX + StatusPayload.LegacySize
+const STATUS_FLAGS_BYTES = STATUS_PREFIX + StatusPayload.Size
 
 /** Returns null when the BMCU_FRAME does not carry a full STATUS frame. */
 export function parseStatus(payload: DataView): LoaderStatus | null {
@@ -183,9 +190,12 @@ export function parseStatus(payload: DataView): LoaderStatus | null {
     filamentLoaded: slots.map((index) => ((online >> index) & 1) !== 0),
     motion: slots.map((index) => byte(StatusPayload.MotionOffset + index)),
     pullPercent: slots.map((index) => byte(StatusPayload.PullPercentOffset + index)),
-    channelFlags: slots.map((index) =>
-      decodeChannelFlags(byte(StatusPayload.ChannelFlagsOffset + index)),
-    ),
+    channelFlags:
+      payload.byteLength >= STATUS_FLAGS_BYTES
+        ? slots.map((index) =>
+            decodeChannelFlags(byte(StatusPayload.ChannelFlagsOffset + index)),
+          )
+        : null,
   }
 }
 

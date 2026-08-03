@@ -67,12 +67,30 @@ describe('parseStatus', () => {
     expect(status!.motion).toEqual([15, 16, 17, 18])
     expect(status!.pullPercent).toEqual([19, 20, 21, 22])
     // 27..30 are the channel-flags bytes; 27 = 0b11011 exercises every bit.
-    expect(status!.channelFlags.map((entry) => entry.raw)).toEqual([27, 28, 29, 30])
-    expect(status!.channelFlags[0]).toEqual({
+    expect(status!.channelFlags!.map((entry) => entry.raw)).toEqual([27, 28, 29, 30])
+    expect(status!.channelFlags![0]).toEqual({
       ks: 3, lowLatch: false, jamLatch: true, dmFailLatch: true, raw: 27,
     })
-    expect(status!.channelFlags[1]!.ks).toBe(0)
-    expect(status!.channelFlags[1]!.lowLatch).toBe(true)
+    expect(status!.channelFlags![1]!.ks).toBe(0)
+    expect(status!.channelFlags![1]!.lowLatch).toBe(true)
+  })
+
+  it('decodes a pre-channel-flags STATUS and reports the flags as absent', () => {
+    // A BMCU that predates the channel-flags byte sends 27. Truncating the
+    // fixture to that length must still yield a usable status: requiring 31
+    // exactly would mean two BMCUs and a Pico have to be flashed together,
+    // and a BMCU flash can leave a board that looks bricked.
+    const [message] = parseMessages(load(fixtures, 'bmcu_status.bin'))
+    const full = message!.payload
+    const legacy = new DataView(
+      full.buffer.slice(full.byteOffset, full.byteOffset + full.byteLength - 4),
+    )
+    const status = parseStatus(legacy)
+    expect(status).not.toBeNull()
+    expect(status!.motion).toEqual([15, 16, 17, 18])
+    // Absent, not all-clear: reporting every latch as false here would invent
+    // a healthy machine.
+    expect(status!.channelFlags).toBeNull()
   })
 
   it('rejects a BMCU frame that is not a STATUS kind', () => {
@@ -149,10 +167,10 @@ describe('mock telemetry', () => {
     // latch bits and ks are what a host needs to say why one is red and
     // whether the other has finished inserting.
     const loaded = telemetry.statuses.get(0)
-    expect(loaded?.channelFlags[0]).toEqual({
+    expect(loaded?.channelFlags![0]).toEqual({
       ks: 1, lowLatch: true, jamLatch: true, dmFailLatch: false, raw: 0x0d,
     })
-    expect(loaded?.channelFlags[2]).toEqual({
+    expect(loaded?.channelFlags![2]).toEqual({
       ks: 2, lowLatch: false, jamLatch: false, dmFailLatch: false, raw: 0x02,
     })
     expect(loaded?.filamentLoaded[0]).toBe(true)
