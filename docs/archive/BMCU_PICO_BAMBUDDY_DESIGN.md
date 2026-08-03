@@ -1,3 +1,10 @@
+> **Archived.** This is the earliest BMCU/Pico/Bambuddy design document
+> (Phase 1). Its pin table predates multi-link, and its message-kind table
+> omits `0x17`, `0x73`, and `0x18`, all of which have since shipped.
+> Superseded by `docs/BMCU_BINARY_TRANSPORT_V1.md`, `docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md`,
+> and `docs/BMCU_UART_PHYSICAL_SPEC.md`. Kept only for its original rationale
+> (why UART3, why no dynamic allocation or JSON on the BMCU).
+
 # BMCU UART3 / Pico 2 W / Bambuddy 連携設計（Phase 1）
 
 ## 1. 目的と原則
