@@ -20,12 +20,23 @@
 // before_pull_back and stop_on_use are gated on still owning the mutex. That is
 // why automatic switchover to a paired spool has never worked.
 //
-//   UNLOADED    nothing occupies the merger
-//   LOADED(ch)  ch occupies the merger, and its filament still reaches the
-//               online key, so the sensor can still see it
-//   TAIL(ch)    ch still occupies the merger, but its tail has passed the
-//               online key -- the strand lies between the switch and the
-//               extruder and the sensor can no longer see any of it
+//   UNLOADED    no channel owns the merger
+//   LOADED(ch)  ch owns the merger, and its filament still reaches the online
+//               key, so the sensor can still see it
+//   TAIL(ch)    ch still owns the merger, but its tail has passed the online
+//               key -- the strand lies between the switch and the extruder and
+//               the sensor can no longer see any of it
+//
+// This is ownership, not occupancy, and the two are not yet the same thing.
+// The commanded retract paths release at command time, not at completion:
+// before_pull_back at bambu_bus_ams.cpp:395 and the read_num 0xFF unload at
+// :425 both release the moment the command is accepted, while the strand is
+// still being pulled. So on every retract, runout or not, the merger is
+// occupied-but-unowned from that release until redetect finishes, and a retract
+// that jams leaves it that way indefinitely. That is the pre-existing behaviour
+// and this change does not alter it; closing that gap means moving those
+// releases to completion, which is a separate change in the opposite direction
+// to this one. Do not read UNLOADED as "the tube is empty".
 //
 // LOADED and TAIL are both ownership. Every predicate phrased as "does channel
 // ch hold the merger" must be true in both, which is why owner is stored as a
@@ -118,20 +129,56 @@ inline bool acquire(State& s, uint8_t ch)
     return true;
 }
 
+enum ReleaseResult : uint8_t
+{
+    release_none = 0u,        // nothing was held; no change
+    release_done = 1u,        // the merger was released
+    release_refused_tail = 2u // a wildcard tried to release a TAIL
+};
+
 // A printer-commanded release. `ch >= kChannels` means "whatever is held",
 // which is how the send_out and idle-reset paths address it.
 //
-// Releases from TAIL exactly as it does from LOADED. This is the only way out
-// of TAIL, and it is reached from all five existing call sites without any of
-// them changing: before_pull_back, the two read_num 0xFF unload paths, the
-// 0xFF idle reset, and another channel's send_out.
-inline bool release(State& s, uint8_t ch)
+// A wildcard releases LOADED but not TAIL. TAIL needs an owner named.
+//
+// This is the difference between fixing the reported symptom and not. The idle
+// reset at bambu_bus_ams.cpp:458 passes 0xFF, and idle frames keep arriving
+// while a printer sits paused. On a runout the sequence is: the tail clears the
+// switch, TAIL is entered, the printer pauses and waits for a human, and idle
+// frames flow the whole time. A wildcard that released TAIL would drop the
+// merger during that pause, and the retract prelude in the morning would be
+// refused for want of allow_stop -- which is the original complaint, arriving
+// by a new route. It is also exactly why TAIL has no timeout: an unbounded
+// pause is expected, so nothing may quietly expire during one.
+//
+// The commanded exits are unaffected because they all name a channel:
+// before_pull_back at :395, the read_num 0xFF unload at :425, and the
+// statu_flags 0x01 path at :431 all pass ams_ptr->now_filament_num.
+//
+// One caller does wildcard-release and could meet a held TAIL: the send_out
+// path at :276, when the printer feeds a different spool without retracting the
+// old one first. Refusing it is correct rather than a regression. TAIL means a
+// strand is still lying in the shared tube, so accepting would be agreeing to
+// push a second strand into an occupied merger. In the sequence that actually
+// works -- the one in the healthy log -- before_pull_back precedes send_out and
+// releases the merger by name, so this refusal is not on the path a normal
+// switchover takes. It is counted rather than silent; see the funnel in
+// main.cpp.
+inline uint8_t release(State& s, uint8_t ch)
 {
-    if (is_free(s)) return false;
-    if (ch < kChannels && s.owner != ch) return false;
+    if (is_free(s)) return release_none;
+
+    if (ch >= kChannels)
+    {
+        if (s.tail) return release_refused_tail;
+        reset(s);
+        return release_done;
+    }
+
+    if (s.owner != ch) return release_none;
 
     reset(s);
-    return true;
+    return release_done;
 }
 
 // The online key of the owning channel has read empty continuously for the

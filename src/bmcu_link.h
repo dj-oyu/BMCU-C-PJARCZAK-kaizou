@@ -106,6 +106,13 @@ void bmcu_link_ams_registration_query(void);
 void bmcu_link_ams_registration_confirm(void);
 void bmcu_link_ams_registration_reset(void);
 void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault);
+
+// A wildcard release was refused because the merger is held in TAIL. Called
+// from the merger funnel in main.cpp, which edge-latches it to one emission per
+// TAIL episode -- idle frames arrive continuously while a printer is paused,
+// and one event per frame is the queue-saturating storm that cost this project
+// a fortnight already.
+void bmcu_link_merger_tail_refused(uint32_t count);
 uint32_t bmcu_link_tx_drop_count(void);
 bool bmcu_link_reset_pending(void);
 

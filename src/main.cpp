@@ -146,9 +146,37 @@ void ams_state_set_loaded(uint8_t filament_ch)
     if (ams_merger::acquire(g_merger, filament_ch)) g_state_dirty = 1u;
 }
 
+// Refused wildcard releases, saturating, and whether this TAIL episode has
+// already said so. TAIL has no timeout, so a merger that is wedged is never
+// expired by anything -- the refusal count is the fuse's replacement, and it
+// has to be visible without being a storm. Idle frames arrive continuously
+// while a printer is paused, which is precisely when TAIL is held, so the event
+// is edge-latched to the first refusal of each episode and the count keeps
+// running underneath it.
+static uint16_t g_tail_refused_count = 0u;
+static uint8_t  g_tail_refused_reported = 0u;
+
 void ams_state_set_unloaded(uint8_t filament_ch)
 {
-    if (ams_merger::release(g_merger, filament_ch)) g_state_dirty = 1u;
+    switch (ams_merger::release(g_merger, filament_ch))
+    {
+    case ams_merger::release_done:
+        g_state_dirty = 1u;
+        g_tail_refused_reported = 0u;
+        break;
+
+    case ams_merger::release_refused_tail:
+        if (g_tail_refused_count != 0xFFFFu) ++g_tail_refused_count;
+        if (!g_tail_refused_reported)
+        {
+            g_tail_refused_reported = 1u;
+            bmcu_link_merger_tail_refused(g_tail_refused_count);
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 // LOADED(ch) -> TAIL(ch): the owning channel's key has read empty for the whole
@@ -157,7 +185,11 @@ void ams_state_set_unloaded(uint8_t filament_ch)
 // releasing here buys.
 void ams_state_set_tail(void)
 {
-    if (ams_merger::to_tail(g_merger)) g_state_dirty = 1u;
+    if (!ams_merger::to_tail(g_merger)) return;
+
+    g_state_dirty = 1u;
+    // A fresh TAIL episode gets its own first refusal reported.
+    g_tail_refused_reported = 0u;
 }
 
 uint8_t ams_state_get_loaded(void)
