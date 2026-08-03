@@ -123,6 +123,19 @@ USBシリアルが認識されない個体(下記トラブルシューティン�
 
 ## 6. ソフトリセット
 
+> **2026-08-03時点では実行できません。** コマンドはBMCU側
+> (`KIND_REQUEST_SOFT_RESET`)にもPico側(`binary_control` の
+> `CONTROL_SOFT_RESET`)にも実装済みですが、**それを呼び出す経路がありません**。
+> かつて存在したローカルHTTPルート `POST /api/devices/<link-id>/soft-reset` は
+> バイナリ transport 移行(`9e1f235`)で削除され、Bambuddy側にも
+> soft resetコマンドとUIがまだありません。
+>
+> BMCUを再起動したい場合は電源の再投入を使ってください。RS-485ケーブルの
+> 抜き差しではRAMが保持されるため、リセットにはなりません。
+>
+> 以下は呼び出し側が実装されたときの仕様です。安全条件そのものは
+> BMCU/Pico双方で実装済みで、変わりません。
+
 各リンクのセクションにある「Request <リンクID> soft reset」ボタンから実行します。
 `RESET BMCU` と入力して確認すると、そのリンクのBMCUだけに要求が送られます。
 
@@ -138,29 +151,43 @@ USBシリアルが認識されない個体(下記トラブルシューティン�
 
 ## 7. Bambuddy連携
 
-`http://<hostname>.local/settings` でWebSocket URL
-(例: `ws://bambuddy.local:8000/api/v1/bmcu-link/ws`)とトークンを設定し、
-「Enable transport」をオンにします。信頼できるLAN内の `ws://` のみ対応です。
+接続は `BMB1` 永続バイナリTCPです。WebSocketではありません。`ws://` URLを
+設定する箇所はもうないので、古い手順を見かけたら無視してください。
 
-2基とも1本のWebSocketに多重化され、`link_id` で区別されて送信されます。
+設定するのはホストとポートで、`pico/config.py` の `BMCU_BINARY_HOST` と
+`BMCU_BINARY_PORT`(既定 8799)が起動時のブートストラップ値になります。
+稼働後は `http://<hostname>.local/` の設定画面から差し替えられます
+(内部的には `/api/transport` と `/api/device-key`)。
 
-> **既知の制限(2026-07時点)**: Bambuddyサーバ側の表示・オンライン判定は
-> まだブリッジ単位のため、2基運用時はサーバ側UIで表示が混ざることがあります。
-> 送信データ自体はリンク別に正しく記録されます。個別の確実な監視には
-> Picoのローカルページを使ってください。
+2基とも1本のTCPセッションに多重化され、`link_index` で区別されて送信されます。
+
+> 2026-07時点で記録していたBambuddy側の「表示がブリッジ単位で混ざる」制限は
+> **解消済み**です。サーバ側も状態を `(device_id, link_index)` で保持し、
+> オンライン判定もリンクごとに独立して行うようになりました。
 
 ## 8. HTTP API(診断用・読み取り専用)
 
+すべてBMB1メッセージの連結を返すバイナリ形式です。JSONではありません
+(`/api/schema.json` だけは例外)。各レスポンスの構造は
+`docs/bmcu_wire_layout.json` が正で、`/api/schema.json` はそこから生成されます。
+**一度 `/api/schema.json` を取得すれば、他のエンドポイントはデバイスのソースを
+読まずにデコードできます。**
+
 | エンドポイント | 内容 |
 | --- | --- |
-| `GET /api/devices` | 全リンクのフル状態+イベント、Wi-Fi/転送/Pico状態の集約 |
-| `GET /api/devices/<link-id>/status` | 単一リンクの状態 |
-| `GET /api/devices/<link-id>/events` | 単一リンクの直近イベント |
-| `GET /api/pico/logs` | Pico内部ログ(リングバッファ)、ヒープ、例外数 |
-| `POST /api/devices/<link-id>/soft-reset` | ソフトリセット(CSRF+確認必須) |
+| `GET /api/current.bin` | 全リンクの最新STATUS |
+| `GET /api/history/status.bin` | `current.bin` の別名(同じハンドラ・同じ内容) |
+| `GET /api/snapshot.bin` | リンクごとの詳細スナップショット |
+| `GET /api/events.bin` | 永続イベントキュー(カーソル分割) |
+| `GET /api/logs.bin` | Pico内部ログ(カーソル分割) |
+| `GET /api/diagnostics.bin` | ブリッジ側カウンタ |
+| `GET /api/capture.bin` | 破棄されたUARTランの記録 |
+| `GET /api/schema.json` | 上記すべての自己記述スキーマ |
 
-旧 `GET /api/status` は廃止されました。HTTPは認証なしのため、LAN外に
-公開しないでください。
+ソフトリセットのHTTPルートは存在しません。コマンド自体はBMCU・Pico双方に
+実装済みですが、2026-08-03時点で呼び出す側が未実装です(§6も参照)。
+
+HTTPは認証なしのため、LAN外に公開しないでください。
 
 ## 9. トラブルシューティング
 
