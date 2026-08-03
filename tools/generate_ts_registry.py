@@ -131,10 +131,13 @@ def main():
     rendered = render(binary_registry, link_registry) + "\n"
 
     if arguments.check:
-        # newline="" keeps read and write symmetric: .gitattributes normalises
-        # this file to LF, so a Windows checkout that translated on write would
-        # report drift against an identical file.
-        current = arguments.output.read_text(encoding="utf-8", newline="") \
+        # Reading as bytes keeps read and write symmetric: .gitattributes
+        # normalises this file to LF, so a Windows checkout that translated on
+        # read would report drift against an identical file. Path.read_text()
+        # only accepts newline= from 3.13, while write_text() has accepted it
+        # since 3.10; decoding the bytes ourselves is the spelling that holds
+        # for the whole supported range.
+        current = arguments.output.read_bytes().decode("utf-8") \
             if arguments.output.exists() else ""
         if current != rendered:
             raise SystemExit(
