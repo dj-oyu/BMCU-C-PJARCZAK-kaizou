@@ -2295,9 +2295,8 @@ static constexpr int32_t BEFORE_PB_MAX_COUNTS  = distance_m_to_counts(2.0f);
 // register. If the filament is withdrawn past the switches while this runs the
 // key never reports, so the state needs a bound of its own -- without one the
 // channel drives indefinitely at the fixed output filament_motion_redetect
-// commands, keeps reporting online to the printer, and holds the pull-back
-// sequencer's wait flag, which suppresses motor_motion_switch for every
-// channel.
+// commands, keeps reporting online to the printer, and keeps itself out of
+// motor_motion_switch's dispatch.
 //
 // The bound counts time spent driving, not time in the state: it is armed in
 // the drive branch and disarmed whenever driving stops. Generous relative to
@@ -2336,9 +2335,14 @@ static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, ui
     MC_STU_RGB_set_latch(channel, 0xFFu, 0x00u, 0x00u, time_now, 1u);
 }
 
-static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
+// Returns the set of channels this sequencer is driving, one bit per channel.
+// Those channels own their motor for the cycle and must not also be dispatched
+// by motor_motion_switch; the rest still must be. The caller previously
+// collapsed this to a single bool and skipped the dispatch entirely, which let
+// one channel's pull-back freeze the other three.
+static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
 {
-    bool wait = false;
+    uint8_t held = 0u;
     auto &A = ams[motion_control_ams_num];
 
     for (uint8_t i = 0; i < kChCount; i++)
@@ -2423,7 +2427,7 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 }
             }
 
-            wait = true;
+            held |= static_cast<uint8_t>(1u << i);
             break;
         }
 
@@ -2450,7 +2454,7 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 // The key never reported. Treat it as filament that is gone
                 // rather than pushing forever: latch_pull_fault stops the
                 // motor, returns the channel to idle and clears the AMS-side
-                // motion, which lets online fall away and releases the wait.
+                // motion, which lets online fall away and releases the hold.
                 redetect_t0_ms[i] = 0u;
                 latch_pull_fault(i, MOTION_FAULT_REDETECT_TIMEOUT, time_now);
                 break;
@@ -2466,7 +2470,7 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_redetect, 100, time_now);
             }
 
-            wait = true;
+            held |= static_cast<uint8_t>(1u << i);
             break;
         }
 
@@ -2475,10 +2479,24 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
         }
     }
 
-    return wait;
+    return held;
 }
 
-static void motor_motion_switch(uint32_t time_now)
+// held_mask names the channels the pull-back sequencer is driving this cycle.
+// The loop below is per-channel -- every write it makes is indexed by i, and
+// the only cross-channel values, num and motion, are read once before it and
+// never written -- so leaving a channel out is well defined: that channel
+// simply keeps the motion the sequencer just gave it, and the others are
+// dispatched exactly as they would be with nothing held.
+//
+// A held channel must be left out whether or not it is the selected slot. When
+// it is not selected, the i != num branch would set it back to filament_idle
+// and stop it, aborting a pull-back the printer has already moved on from --
+// which finishing after the selection changes is the normal case. When it is
+// selected, the pull_back arm would re-stamp the target counts and the
+// before_pb accumulators every cycle, so the sequencer's progress would never
+// reach a target that keeps being reset.
+static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
 {
     auto &A = ams[motion_control_ams_num];
 
@@ -2487,6 +2505,8 @@ static void motor_motion_switch(uint32_t time_now)
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
+        if (held_mask & static_cast<uint8_t>(1u << i)) continue;
+
         auto &motor = MOTOR_CONTROL[i];
         if (motor.motion_fault != MOTION_FAULT_NONE)
         {
@@ -2822,8 +2842,8 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
 
     if (!error)
     {
-        if (!motor_motion_filamnet_pull_back_to_online_key(time_now))
-            motor_motion_switch(time_now);
+        const uint8_t held = motor_motion_filamnet_pull_back_to_online_key(time_now);
+        motor_motion_switch(time_now, held);
     }
     else
     {
