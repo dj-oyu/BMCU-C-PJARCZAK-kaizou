@@ -357,6 +357,29 @@ automatically; nothing in application code needs to request it per-symbol.
   document flags for the loaded-latch writes, at a program-flash-page
   granularity larger than the 256-byte NVM pages — not something this
   firmware does today.
+- **The longest identified interrupt-off section is not a flash write; it is
+  the LED shift-out.** `WS2812_class::updata()` (`src/ws2812.cpp:110-138`)
+  wraps the entire bit-bang inside one `irq_save_wch()`/`irq_restore_wch()`
+  pair: up to `MAX_NUM` 4 LEDs of 24 bits, each bit cycle-timed against
+  `STK_CNTL` at `WS2812_TBIT_TICKS` 22 ticks. **Derived, not measured:** 22
+  ticks at the 18 MHz of §4 is 1.222 us per bit, so 96 bits is roughly 117 us
+  of solid interrupt-off time whenever an RGB value changes. At the printer
+  bus's 1.25 Mbps that is about 18 byte-times, against a 2560-byte DMA ring
+  (`kPrinterRxDmaSize`), so in isolation the margin is large.
+  What is worth knowing is that it does not occur in isolation: a merger
+  ownership change writes the flash record *and* dirties an LED, so the
+  stall of unknown duration from §6 and this one are triggered by the same
+  event. Neither has been measured, and the firmware carries no loop timing
+  instrumentation with which to measure either.
+- **Two bus parsers take a critical section each, every main-loop pass**, to
+  snapshot the same three receive fields (`ahub_bus.cpp:357-374`,
+  `bambu_bus_ams.cpp:1247-1252`). In the shipped `BMCU_PRINTER_RX_DMA=1`
+  configuration this is redundant: those fields are written by
+  `bus_uart1_rx_poll()` one line earlier in the same pass, on the same
+  thread, and no interrupt handler touches them. It is load-bearing only for
+  the non-DMA fallback build, where `_bus_port_deal::irq()` writes them from
+  `USART1_IRQHandler`. Cheap either way -- three word loads -- and correct in
+  both configurations; recorded so nobody mistakes it for the expensive one.
 - **No atomic compare-and-swap is needed for the loaded-latch/merger state**,
   because `bambubus_run()` — the only writer — runs in the main loop, not an
   interrupt handler (§7, verified at the call site). The concurrency
