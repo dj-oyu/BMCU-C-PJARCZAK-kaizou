@@ -100,7 +100,7 @@ Expected to complete with one small response and remain safe during printing.
 | Command | Status | Result |
 | --- | --- | --- |
 | `PING` | implemented | PONG token and `hw_tick32` |
-| `GET_STATUS` | implemented | 27-byte aggregate STATUS |
+| `GET_STATUS` | implemented | aggregate STATUS; see `docs/bmcu_wire_layout.json` `structures.status_payload` for the current byte layout |
 | `GET_DEVICE_INFO` | planned | firmware, protocol, capabilities, hardware identity |
 | `GET_ACTIVE_OPERATION` | planned | current owner, phase, resources, operation ID |
 
@@ -134,8 +134,9 @@ UI commands may run alongside printer ownership because they use independent res
 
 ### 4.4 CONTROL
 
-CONTROL is a future service interface. It is disabled by default and must use operation ID, TTL, preconditions,
-resource ownership, result events, and a local BMCU timeout.
+CONTROL is mostly a future service interface: it is disabled by default and must use operation ID, TTL,
+preconditions, resource ownership, result events, and a local BMCU timeout. `REQUEST_SOFT_RESET` is the one
+CONTROL command implemented so far, gated by its own idle-only safety contract rather than a general lease.
 
 | Command family | Purpose | Minimum guard |
 | --- | --- | --- |
@@ -146,6 +147,7 @@ resource ownership, result events, and a local BMCU timeout.
 | `SELECT_SLOT` | select a test channel | no active motion or printer operation |
 | `ACK_SAFETY_LATCH` | record operator acknowledgement | must not automatically clear latch or resume |
 | `RESET_CONTROL_ERROR` | request recovery evaluation | BMCU rechecks conditions before clearing |
+| `REQUEST_SOFT_RESET` (`0x18`) | idle-only S2 recovery reboot, implemented | BMCU rechecks motor/calibration/printer-bus quiescence after `ACK_OK`; Pico additionally requires an online link, a complete Full Status, all controller phases stopped, all AMS motions idle, and all PWM values zero. See `BMCU_MANAGEMENT_INTERFACE.md` §7.2 for the full safety contract. |
 
 The Pico/Bambuddy authorization decision does not replace BMCU validation. BMCU is the final authority for
 motor limits, current state, resource conflict, and safe abort behavior.
