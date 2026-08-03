@@ -9,6 +9,42 @@ monitor in `BMCU-C-PJARCZAK-kaizou/pico`. An identical copy must exist in both
 repositories. A wire-format change is not complete until both copies and both
 implementations are updated in the same development cycle.
 
+## Normative references
+
+This document specifies the BMB1 transport only: how bytes are framed, how a
+session is established, acknowledged, and replayed. It says nothing about the
+grammar of the BMCU wire frames that §6 carries "without semantic
+re-encoding". A reader who implements only this document can move frames
+correctly and still cannot decode one field inside them.
+
+The following are required companions. They must be mirrored alongside this
+document under the same rule stated above: a change is not complete until both
+copies and both implementations are updated in the same development cycle.
+
+| Document | Defines |
+| --- | --- |
+| `docs/BMCU_LINK_PROTOCOL_ALPHA3.md` | the BMCU link frame — header, every `kind`, every payload, and the FULL_STATUS_RECORD header with its `record_data` union |
+| `docs/bmcu_link_enum_registry.json` | the same enums machine-readably — `kind`, EVENT `record_type`, `severity`, `source`, `state_field`, `full_status_record_type`, `full_status_section` |
+
+There are two registries and they do not overlap:
+
+- `docs/bmcu_binary_registry.json` is the **transport** registry. It defines
+  `message_types`, `flags`, `value_types`, `diagnostic_tags` and the rest of
+  the BMB1 vocabulary, and deliberately carries nothing about the link frames
+  the transport encloses.
+- `docs/bmcu_link_enum_registry.json` is the **link** registry, and covers
+  only those enclosed frames.
+
+Only the transport registry was ever mirrored, and nothing said the second one
+existed. A consumer holding the first and not the second decodes the envelope
+correctly and stores every frame body as opaque bytes, which is what happened.
+That is why this section exists.
+
+`docs/bmcu_wire_layout.json` is a third file with a different status. It is not
+a contract to mirror: it is the generator input for the schema the device
+serves at `/api/schema.json` (§12). Consumers should fetch the served schema
+and keep no copy of the layout file.
+
 ## 1. Decision
 
 The production BMCU Monitor transport is replaced by a dedicated persistent
@@ -212,7 +248,8 @@ bytes complete validated BMCU wire frame
 
 `received_at_us` is the Pico monotonic timestamp at which the complete frame
 was accepted. The BMCU frame's own version, kind, sequence, length, payload,
-and CRC are not duplicated in the transport header.
+and CRC are not duplicated in the transport header. Their meaning is defined
+nowhere in this document; see Normative references above.
 
 Bambuddy must:
 
@@ -595,7 +632,10 @@ The local endpoints are:
 - `GET /api/events.bin?after=<sequence>&limit=<n>`;
 - `GET /api/history/status.bin`;
 - `GET /api/diagnostics.bin`;
-- `GET /api/logs.bin?after=<sequence>&limit=<n>`.
+- `GET /api/logs.bin?after=<sequence>&limit=<n>`;
+- `GET /api/snapshot.bin`;
+- `GET /api/capture.bin`;
+- `GET /api/schema.json`.
 
 Responses use `Content-Type: application/vnd.bmcu-monitor.v1` and consist of
 one or more complete BMB1 messages. Because every message carries a fixed
@@ -604,9 +644,49 @@ or a separate response envelope.
 
 `/api/current.bin` returns the latest retained `BMCU_FRAME` STATUS and
 `LINK_STATE` for each link. `/api/events.bin` reads bounded records directly
-from the byte ring or journal. `/api/history/status.bin` returns bounded,
-sampled STATUS records. No endpoint may reconstruct the former Python
-dictionary envelope.
+from the byte ring or journal. `/api/history/status.bin` is a live alias of
+`/api/current.bin`: it is served by the same handler and returns the same
+retained set, so two fetches differ only by the time at which they were taken.
+It is retained for callers that already use the path; new callers should read
+`/api/current.bin`. No endpoint may reconstruct the former Python dictionary
+envelope.
+
+`/api/snapshot.bin` and `/api/capture.bin` are local diagnostic surfaces and
+are the two exceptions to the BMB1-framed rule above: they use the record
+formats `BSNP` and `BCAP` documented in `bmcu_wire_layout.json`, and neither is
+delivered to Bambuddy. `/api/snapshot.bin` returns the per-link FULL_STATUS
+record set plus the synthetic link record (type 240) and retained EVENT records
+(type 241), which is the channel, printer-bus, and AMS-registration state a
+link reported for its current session. `/api/capture.bin` returns a bounded
+ring of the UART bytes the decoder rejected, tagged with the local reject
+reason, so a CRC or length failure can be inspected as bytes rather than only
+counted. Both are byte-oriented for the same reason as the rest of this
+section: the Pico builds no object tree to answer them.
+
+`/api/schema.json` is the entry point for anything decoding the endpoints
+above, and the only one that is not binary. It is served uncompressed while
+every other asset is gzipped, because a consumer meeting it first has no reason
+yet to know that. It carries the enums and the structure layouts needed to
+decode every binary endpoint without reading the device source, and it lists
+the endpoints themselves.
+
+It is generated output, and the direction of that generation matters:
+`docs/bmcu_wire_layout.json` in the BMCU repository supplies the offsets, the
+two registries named under Normative references supply the enum names, and
+`tools/generate_api_schema.py` combines them into the artifact staged on the
+device. The served schema is therefore derived from the layout file, not a
+competing copy of it. A consumer should fetch the schema and hold no copy of
+the layout file; only the BMCU repository maintains that file, as the
+generator's input.
+
+Its `revision` field is the refetch signal. It is bumped whenever a structure
+layout or an enum changes: a field added, removed, renamed, moved or retyped,
+or an enum value assigned or given a new meaning. It is not bumped for prose —
+`note`, `answers` and `cadence` text — nor for an endpoint listed without any
+structure change, so a consumer must tolerate an endpoint path it does not
+recognise rather than treat the revision as covering the endpoint list. A
+cached schema stays valid for as long as the revision read back is unchanged;
+any other value means refetch and re-derive every offset.
 
 `PICO_DIAGNOSTIC` is a compact TLV payload for values that do not originate in
 a BMCU frame:
