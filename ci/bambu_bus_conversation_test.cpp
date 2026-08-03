@@ -162,6 +162,80 @@ int test_idle_frames_do_not_take_tail(void)
     return 0;
 }
 
+// The other idle door: bambu_bus_ams.cpp:431-435, the 0xFF / statu 0x01 frame.
+//
+//     const uint8_t ch = ams_ptr->now_filament_num;
+//     if (ch < 4 && ams_ptr->filament_use_flag != 0x04)
+//         ams_state_set_unloaded(ch);
+//
+// This one is a far more dangerous shape than the wildcard above, and it is
+// worth saying why before saying what it does. It passes a *real channel*, so
+// it goes through the owner-checked arm of ams_merger::release, which reaches
+// reset() and clears TAIL along with everything else. bd2e2e1's owner check --
+// the whole of that fix -- does not stand in front of this call at all. The
+// only thing that does is `filament_use_flag != 0x04`.
+//
+// And the reasoning that makes the wildcard unreachable does not transfer:
+// there is no motion guard here. A sensor-entered TAIL never passes through the
+// commanded retract at :394, so the question is entirely what use_flag happens
+// to be holding when the frame lands.
+//
+// It is 0x04, and it is 0x04 for a structural reason rather than a lucky one:
+// the merger is acquired at exactly two sites, :308 in before_on_use and :378
+// in on_use, and both set use_flag = 0x04 in the same branch a few lines above.
+// Every path that then moves use_flag off 0x04 -- the 0xFF/0x03 retract at
+// :428, send_out's preempt at :279, the accept-path channel switch at :259 --
+// releases the merger in the same call. So "the merger is owned" implies
+// "use_flag == 0x04" implies this branch is inert, and the implication is
+// checked frame-by-frame over forty thousand frames in
+// merger_ownership_invariant_walk below rather than argued here.
+//
+// Which makes this a second door that is closed, not a live hole. But it is
+// closed by a coincidence of two unrelated state variables, with no comment at
+// either end saying so, and it would open the moment any branch set use_flag to
+// something other than 0x04 while leaving the merger held. That is a one-line
+// change away and nothing in src/ would notice. Hence this vector.
+int test_statu01_idle_frame_does_not_take_tail(void)
+{
+    host_bus::reset();
+    load_channel(1u);
+
+    // A sensor-entered TAIL: the runout case. Nothing here went through the
+    // commanded retract at :394, which is what makes this branch's guard the
+    // only thing in the way.
+    ams_state_set_tail();
+    CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 121);
+    CHECK(host_bus::merger_owner() == 1u, 122);
+
+    // The precondition that decides everything, pinned. If a future change
+    // leaves use_flag at anything but 0x04 here, this fails first and names the
+    // reason, rather than the failure surfacing as a refused retract three
+    // assertions later.
+    CHECK(ams[0].filament_use_flag == 0x04u, 123);
+    CHECK(ams[0].now_filament_num == 1u, 124);
+
+    // The frame. Repeated, because a paused printer sends it over and over.
+    for (int i = 0; i < 200; ++i)
+    {
+        host_bus::poll_motion_short(kSelf, 0x01u, kNoChannel, 0x00u);
+        host_clock_advance_ms(20u);
+    }
+
+    // The guard held: not one call reached the funnel.
+    CHECK(host_bus::named_release_calls == 0, 125);
+    CHECK(host_bus::merger_events_of(host_bus::kMergerReleased) == 0, 126);
+    CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 127);
+    CHECK(host_bus::merger_owner() == 1u, 128);
+
+    // And the morning's retract prelude is still accepted, which is the
+    // requirement all of this exists to protect.
+    host_bus::poll_motion_short(kSelf, kStatuBeforePullBack, 1u, kFlagBeforePullBack);
+    CHECK(motion_of(1u) == _filament_motion::before_pull_back, 129);
+    CHECK(host_bus::merger_stage() == ams_merger::stage_unloaded, 130);
+
+    return 0;
+}
+
 // 15bb6ce: "tell a channel claiming the merger apart from the session ending".
 //
 // The printer abandons the runout channel and feeds another spool without
@@ -530,6 +604,15 @@ int test_merger_ownership_invariant_walk(void)
         return rng % n;
     };
 
+    // How often the 0xFF/0x01 branch at :431 was entered with the merger held.
+    // Without this the use_flag invariant below could pass by that frame never
+    // arriving at an interesting moment.
+    int statu01_while_owned = 0;
+    // ... and how often it would have got past the guard *and* named the
+    // channel that actually holds the merger, which is the only combination in
+    // which :435 can change anything at all.
+    int statu01_would_release = 0;
+
     for (int step = 0; step < 40000; ++step)
     {
         // One frame in eleven is the debounced key-zero edge that Motion_control
@@ -539,8 +622,20 @@ int test_merger_ownership_invariant_walk(void)
             host_bus::poll_motion_long(kSelf, statuses[next(5u)], flags[next(4u)],
                                        channels[next(5u)]);
         else
-            host_bus::poll_motion_short(kSelf, statuses[next(5u)],
-                                        channels[next(5u)], flags[next(4u)]);
+        {
+            const uint8_t statu = statuses[next(5u)];
+            const uint8_t channel = channels[next(5u)];
+            if (statu == 0x01u && channel == 0xFFu)
+            {
+                const uint8_t owner_now = host_bus::merger_owner();
+                const uint8_t named = ams[0].now_filament_num;
+                if (owner_now < 4u) ++statu01_while_owned;
+                if (named < 4u && ams[0].filament_use_flag != 0x04u &&
+                    owner_now == named)
+                    ++statu01_would_release;
+            }
+            host_bus::poll_motion_short(kSelf, statu, channel, flags[next(4u)]);
+        }
 
         host_clock_advance_ms(1u + next(40u));
 
@@ -563,6 +658,22 @@ int test_merger_ownership_invariant_walk(void)
                    step, owner, (unsigned)m);
             return 902;
         }
+
+        // The second implication, and the one that closes the 0xFF/0x01 door at
+        // :435: a held merger implies use_flag == 0x04, which is exactly the
+        // value that branch refuses to act on. Nothing in src/ states this
+        // coupling; it falls out of both acquire sites setting use_flag in the
+        // same branch, and of every path that moves it off 0x04 releasing in the
+        // same call. If that ever stops being true this fails, and the release
+        // at :435 becomes reachable against a sensor-entered TAIL -- the
+        // overnight scenario, through a door bd2e2e1's owner check does not
+        // cover, because this call names a real channel.
+        if (ams[0].filament_use_flag != 0x04u)
+        {
+            printf("  step %d: merger owned by %u with use_flag 0x%02X\n",
+                   step, owner, ams[0].filament_use_flag);
+            return 910;
+        }
     }
 
     // The consequence: across the whole walk the wildcard release at :461 was
@@ -583,6 +694,35 @@ int test_merger_ownership_invariant_walk(void)
     CHECK(host_bus::wildcard_release_calls > 1000, 908);
     CHECK(host_bus::named_release_calls > 100, 909);
 
+    // Likewise for the 0xFF/0x01 door: the branch was entered with the merger
+    // held, many times, and the use_flag guard turned every one of them away.
+    if (statu01_while_owned < 100)
+    {
+        printf("  only %d statu-0x01 frames arrived while the merger was held\n",
+               statu01_while_owned);
+        return 911;
+    }
+
+    // The sharper result, and the one worth carrying into the design document.
+    // Rows 9 and 10 of section 5 both name `0xFF/0x01` as an input: row 9 says
+    // it releases a LOADED merger (the stated recovery path for a printer that
+    // power-cycled or aborted), row 10 says it must leave a TAIL alone. The
+    // shipped branch can do neither. Its guard passes only when use_flag is not
+    // 0x04, and use_flag is 0x04 for exactly as long as the merger is held --
+    // so on every frame where releasing would mean anything, the guard is shut,
+    // and on every frame where the guard is open, the merger is already free
+    // and ams_state_set_unloaded finds nothing to do.
+    //
+    // Row 10 is therefore satisfied by accident rather than by the state
+    // machine, and row 9 is not implemented at all. Neither is a bug today.
+    // Both are worth knowing before someone edits either end.
+    if (statu01_would_release != 0)
+    {
+        printf("  :435 could have released the merger %d time(s)\n",
+               statu01_would_release);
+        return 912;
+    }
+
     // Sanity: the walk actually exercised the states it claims to cover, rather
     // than passing by never leaving UNLOADED.
     CHECK(host_bus::merger_events_of(host_bus::kMergerAcquired) > 100, 904);
@@ -601,6 +741,7 @@ struct Vector
 
 const Vector kVectors[] = {
     {"idle_frames_do_not_take_tail", test_idle_frames_do_not_take_tail},
+    {"statu01_idle_frame_does_not_take_tail", test_statu01_idle_frame_does_not_take_tail},
     {"send_out_preempts_tail", test_send_out_preempts_tail},
     {"peer_addressed_short_frame", test_peer_addressed_short_frame},
     {"peer_addressed_long_frame", test_peer_addressed_long_frame},

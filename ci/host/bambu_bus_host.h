@@ -14,6 +14,25 @@
 // what sits at the far side of a seam -- the link telemetry sinks, the motion
 // controller, and the clock.
 //
+// A limit on what this harness can ever prove, worth knowing before writing a
+// test against it: THE REPLY BYTES CANNOT CARRY A ROUTING ASSERTION. set_motion
+// returns true whether it accepted a frame or dropped it on allow_any /
+// allow_stop -- the refusals at :290, :315, :354 and :383 all `return true` --
+// so get_package_motion builds and sends the same reply either way. A frame
+// that was refused and a frame that was obeyed are byte-identical on the wire
+// apart from state that had already changed for other reasons. Every assertion
+// about whether the accept table took a frame therefore has to be made against
+// ams[] or against the merger, never against `reply`. What the reply bytes are
+// good for is the shape of the answer -- length, address, CRC, the echoed
+// channel -- which is what test_motion_reply_bytes uses them for.
+//
+// A second limit, discovered the hard way: bambubus_init() cannot be called.
+// bambubus_build_static_serial at bambu_bus_ams.cpp:1034 reads the chip UID
+// through the literal address 0x1FFFF7E8, so the file touches hardware without
+// naming it and a host call segfaults. reset() below says so at the point where
+// the call would otherwise go. The cost is that the serial-number handler is
+// uncoverable until that read moves behind a seam.
+//
 // The one reimplementation is the ams_state_* funnel, and it is a
 // reimplementation rather than a fake: main.cpp cannot be compiled on a host
 // (its Flash_saves and Motion_control dependencies are the register-heavy
