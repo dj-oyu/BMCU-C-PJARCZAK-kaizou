@@ -8,6 +8,7 @@
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
 #include "ams_loaded_latch_policy.h"
+#include "signal_hold_policy.h"
 
 static inline uint8_t bmcu_pressure_class(uint16_t pressure)
 {
@@ -302,6 +303,12 @@ static uint32_t dm_auto_t0_ms[4] = {0u,0u,0u,0u};
 static int32_t  dm_auto_remain_counts[4] = {0,0,0,0};
 static int32_t  dm_auto_last_counts[4]   = {0,0,0,0};
 
+// How long the key must read anything other than "both switches" before a
+// confirmed DM load is given up. This was an unnamed 100 at its one use site;
+// it is the same number as DM_AUTO_S1_DEBOUNCE_MS but a different question --
+// that one times a state the autoload machine is sitting in, this one times a
+// level on the key -- so they are named apart rather than shared.
+static constexpr uint32_t DM_LOADED_DROP_MS = 100u;
 static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
 #endif
 
@@ -2839,25 +2846,20 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             continue;
         }
 
-        if (dm_loaded[ch] && (ks != 1u))
+        // held_for clears the stamp both on the firing pass and on any pass
+        // where the condition is false, which is what the else branch used to
+        // do by hand.
+        if (signal_hold::held_for(dm_loaded_drop_t0_ms[ch],
+                                  dm_loaded[ch] && (ks != 1u),
+                                  time_now, DM_LOADED_DROP_MS))
         {
-            const uint32_t t0 = dm_loaded_drop_t0_ms[ch];
-            if (t0 == 0u) dm_loaded_drop_t0_ms[ch] = time_now;
-            else if ((time_now - t0) >= 100u)
-            {
-                dm_loaded[ch]            = 0u;
-                dm_loaded_drop_t0_ms[ch] = 0u;
+            dm_loaded[ch]            = 0u;
 
-                dm_auto_state[ch]    = DM_AUTO_IDLE;
-                dm_auto_try[ch]      = 0u;
-                dm_auto_t0_ms[ch]    = 0u;
-                dm_auto_remain_counts[ch] = 0;
-                dm_auto_last_counts[ch]   = 0;
-            }
-        }
-        else
-        {
-            dm_loaded_drop_t0_ms[ch] = 0u;
+            dm_auto_state[ch]    = DM_AUTO_IDLE;
+            dm_auto_try[ch]      = 0u;
+            dm_auto_t0_ms[ch]    = 0u;
+            dm_auto_remain_counts[ch] = 0;
+            dm_auto_last_counts[ch]   = 0;
         }
     }
 #endif
@@ -2983,25 +2985,28 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                     auto_unload_empty_t0_ms[i]  = 0u;
                     auto_unload_blocked[i]      = 1u;
                 }
-                else if (ks == 1u)
-                {
-                    auto_unload_empty_t0_ms[i] = 0u;
-
-                    if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0u;
-                        auto_unload_empty_t0_ms[i]  = 0u;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
                 else
                 {
-                    if (auto_unload_empty_t0_ms[i] == 0u)
+                    // ks == 1 is the channel still reading filament, which both
+                    // resets the empty window and is where the operation's own
+                    // AUTO_UNLOAD_MAX_MS timeout is checked. held_for does the
+                    // reset, so the branch below only has to keep the split.
+                    const bool empty = (ks != 1u);
+                    const bool empty_held =
+                        signal_hold::held_for(auto_unload_empty_t0_ms[i], empty,
+                                              time_now, AUTO_UNLOAD_EMPTY_MS);
+
+                    if (!empty)
                     {
-                        auto_unload_empty_t0_ms[i] = time_now;
+                        if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
+                        {
+                            auto_unload_active[i]       = 0u;
+                            auto_unload_active_t0_ms[i] = 0u;
+                            auto_unload_empty_t0_ms[i]  = 0u;
+                            auto_unload_blocked[i]      = 1u;
+                        }
                     }
-                    else if ((time_now - auto_unload_empty_t0_ms[i]) >= AUTO_UNLOAD_EMPTY_MS)
+                    else if (empty_held)
                     {
                         auto_unload_active[i]       = 0u;
                         auto_unload_active_t0_ms[i] = 0u;
