@@ -231,6 +231,22 @@ static void fil_cache_load_one(uint8_t filament_idx)
 }
 
 static constexpr uint32_t STA_TAG = 0xA5u;
+// The same record, for a merger held in TAIL. Identical layout and the same
+// slot ring; only the tag differs, and the scan below accepts both.
+//
+// TAIL is out of band rather than riding a spare bit of the channel byte
+// because there is no spare bit -- w0 spends all 32 (tag, seq, channel) and w1
+// is w0 ^ MAGIC_STA, so the reader's integrity check pins it exactly -- and
+// more importantly because a downgrade has to stay safe. Firmware predating
+// TAIL skips any tag that is not STA_TAG and falls back to the newest STA
+// record, which for a channel in TAIL is the LOADED(ch) record written when it
+// was loaded: the value that firmware would have held itself, so it behaves
+// exactly as it always did. Encoding TAIL into the channel byte instead would
+// hand it 0x80|ch, and main.cpp assigns the byte to g_loaded_ch before its
+// `< 4` guard, so allow_any and allow_stop would then be false for all four
+// channels and every motion command but send_out would be refused until a
+// fresh load cleared it. A resumed job continues with on_use, not send_out.
+static constexpr uint32_t STA_TAIL_TAG = 0xA6u;
 static constexpr uint32_t STA_PAGE_FIRST = 6u;
 static constexpr uint32_t STA_PAGE_COUNT = 10u;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
@@ -241,6 +257,7 @@ static uint16_t g_sta_seq = 0u;
 static uint16_t g_sta_slot = 0u;
 static uint8_t g_sta_have_saved = 0u;
 static uint8_t g_sta_saved_loaded = 0xFFu;
+static uint8_t g_sta_saved_tail = 0u;
 
 static void flash_runtime_cache_clear(void)
 {
@@ -252,6 +269,7 @@ static void flash_runtime_cache_clear(void)
     g_sta_slot = 0u;
     g_sta_have_saved = 0u;
     g_sta_saved_loaded = 0xFFu;
+    g_sta_saved_tail = 0u;
 }
 
 bool Flash_NVM_full_clear(void)
@@ -344,11 +362,12 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx)
     return true;
 }
 
-bool Flash_AMS_state_read(uint8_t* loaded_ch)
+bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail)
 {
     if (!loaded_ch) return false;
 
     uint8_t best_ch = 0xFFu;
+    uint8_t best_tail = 0u;
     uint16_t best_seq = 0u;
     uint32_t best_slot = 0u;
     uint8_t have = 0u;
@@ -360,17 +379,37 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch)
         const uint32_t w1 = *(const volatile uint32_t*)(a + 4u);
 
         if (flash_word_is_blank(w0) && flash_word_is_blank(w1)) continue;
-        if ((w0 >> 24) != STA_TAG) continue;
+        const uint32_t tag = w0 >> 24;
+        if (tag != STA_TAG && tag != STA_TAIL_TAG) continue;
         if ((w0 ^ w1) != MAGIC_STA) continue;
 
         const uint16_t seq = (uint16_t)((w0 >> 8) & 0xFFFFu);
         const uint8_t ch = (uint8_t)(w0 & 0xFFu);
+        const uint8_t is_tail = (tag == STA_TAIL_TAG) ? 1u : 0u;
 
-        if (!have || (int16_t)(seq - best_seq) > 0)
+        // Strictly newer wins. Two records can legitimately share a seq only
+        // after a downgrade wrote its own record while a TAIL one was already
+        // the newest -- older firmware derives its next seq from the newest
+        // STA record and cannot see the TAIL one, so it reuses that number.
+        // The tie goes to the plain record, which is both the newer write in
+        // that history and the conservative reading: LOADED costs a refused
+        // retract only if the strand really was past the switch, whereas a
+        // wrongly restored TAIL holds the merger against a channel that has
+        // already been released.
+        bool better;
+        if (!have) better = true;
+        else
+        {
+            const int16_t age = (int16_t)(seq - best_seq);
+            better = (age > 0) || ((age == 0) && best_tail && !is_tail);
+        }
+
+        if (better)
         {
             have = 1u;
             best_seq = seq;
             best_ch = ch;
+            best_tail = is_tail;
             best_slot = slot;
         }
     }
@@ -381,6 +420,7 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch)
         g_sta_slot = (uint16_t)((best_slot + 1u) % STA_TOTAL_SLOTS);
         g_sta_have_saved = 1u;
         g_sta_saved_loaded = best_ch;
+        g_sta_saved_tail = best_tail;
     }
     else
     {
@@ -388,19 +428,25 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch)
         g_sta_slot = 0u;
         g_sta_have_saved = 0u;
         g_sta_saved_loaded = 0xFFu;
+        g_sta_saved_tail = 0u;
     }
 
     *loaded_ch = best_ch;
+    if (tail) *tail = (best_tail != 0u);
     return true;
 }
 
-bool Flash_AMS_state_write(uint8_t loaded_ch)
+bool Flash_AMS_state_write(uint8_t loaded_ch, bool tail)
 {
-    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch)
+    const uint8_t tail_u8 = tail ? 1u : 0u;
+
+    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch &&
+        g_sta_saved_tail == tail_u8)
         return true;
 
     const uint16_t seq = g_sta_seq;
-    const uint32_t w0 = ((uint32_t)STA_TAG << 24) | ((uint32_t)seq << 8) | (uint32_t)loaded_ch;
+    const uint32_t tag = tail ? STA_TAIL_TAG : STA_TAG;
+    const uint32_t w0 = (tag << 24) | ((uint32_t)seq << 8) | (uint32_t)loaded_ch;
     const uint32_t w1 = w0 ^ MAGIC_STA;
     const uint32_t slot = (uint32_t)g_sta_slot;
     const uint32_t addr = sta_slot_addr(slot);
@@ -417,6 +463,7 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
     g_sta_slot = (uint16_t)((slot + 1u) % STA_TOTAL_SLOTS);
     g_sta_have_saved = 1u;
     g_sta_saved_loaded = loaded_ch;
+    g_sta_saved_tail = tail_u8;
 
     return true;
 }

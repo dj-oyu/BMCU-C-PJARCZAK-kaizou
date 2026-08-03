@@ -167,7 +167,18 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual(
             link.decode_channel_flags(0x00),
             {"ks": 0, "low_latch": False, "jam_latch": False,
-             "dm_fail_latch": False, "loaded": False, "raw": 0x00})
+             "dm_fail_latch": False, "loaded": False, "tail": False,
+             "raw": 0x00})
+        # loaded and tail are the merger mutex, and tail is the half of it that
+        # only shows up on a runout: the filament is past the switch (ks 0) but
+        # the channel still owns the tube, so the printer's retract must still
+        # be accepted. Reading tail as "not loaded" is the defect it exists to
+        # make visible, so the two bits are asserted apart here.
+        held = link.decode_channel_flags(0x20)
+        self.assertEqual((held["loaded"], held["tail"]), (True, False))
+        tail = link.decode_channel_flags(0x60)
+        self.assertEqual((tail["ks"], tail["loaded"], tail["tail"]),
+                         (0, True, True))
         # ks == 2 is the state online cannot distinguish: resting on the outer
         # switch alone, which autoloads differently from settled on both.
         self.assertEqual(link.decode_channel_flags(0x02)["ks"], 2)

@@ -8,6 +8,7 @@
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
 #include "ams_loaded_latch_policy.h"
+#include "signal_hold_policy.h"
 
 static inline uint8_t bmcu_pressure_class(uint16_t pressure)
 {
@@ -302,12 +303,19 @@ static uint32_t dm_auto_t0_ms[4] = {0u,0u,0u,0u};
 static int32_t  dm_auto_remain_counts[4] = {0,0,0,0};
 static int32_t  dm_auto_last_counts[4]   = {0,0,0,0};
 
+// How long the key must read anything other than "both switches" before a
+// confirmed DM load is given up. This was an unnamed 100 at its one use site;
+// it is the same number as DM_AUTO_S1_DEBOUNCE_MS but a different question --
+// that one times a state the autoload machine is sitting in, this one times a
+// level on the key -- so they are named apart rather than shared.
+static constexpr uint32_t DM_LOADED_DROP_MS = 100u;
 static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
 #endif
 
-// How long the loaded channel's online key must read empty, continuously,
-// before Motion_control_run drops the loaded latch. See
-// src/ams_loaded_latch_policy.h for why the latch needs protecting at all.
+// How long the owning channel's online key must read empty, continuously,
+// before Motion_control_run moves the merger from LOADED to TAIL. See
+// src/ams_merger_policy.h for the states and src/ams_loaded_latch_policy.h for
+// the debounce itself.
 //
 // On the sampling rate this debounce is measured against: MC_PULL_ONLINE_read
 // runs once per Motion_control_run, which is once per main-loop pass, but the
@@ -327,16 +335,33 @@ static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
 // one that would drift from it. It is named separately because the two uses are
 // independent -- auto-unload may retune without dragging the latch with it.
 //
-// Erring long is the cheap direction here, which is why a debounce this coarse
-// is safe. Nothing in the motor path reads the latch: it is consumed only by
-// the accept gate in bambu_bus_ams set_motion, by the reply-side loaded flag,
-// and by bit 5 of the channel flags. A printer unload arriving mid-window is
-// helped rather than hurt, because before_pull_back and stop_on_use are gated
-// on the latch still naming this channel and their branches then clear it
-// themselves, immediately and outside this debounce. A load of a different
-// channel opens with send_out, which is accepted unconditionally and also
-// clears the latch. Erring short is what costs: it is the failure this whole
-// change exists to close.
+// Both directions of a wrong window are now cheap, which they were not before
+// TAIL existed. Erring long delays the wire bit and nothing else, because a
+// printer command arriving mid-window is helped rather than hurt: allow_stop is
+// true throughout LOADED, and those branches release the merger themselves,
+// immediately and outside this debounce. Erring short no longer releases
+// anything -- it enters TAIL, where allow_stop is still true and the retract is
+// still accepted. What used to be the expensive direction is now a mislabelled
+// wire bit for as long as the merger stays held.
+//
+// On why there is no timeout from TAIL back to UNLOADED. Any finite one is this
+// same defect with a longer fuse: the pre-change firmware released outright at
+// this window, which is a 1500 ms timeout, and the bug is precisely that the
+// printer's retract had not arrived yet. Sizing a timeout means bounding how
+// long the printer may take, and on the runout that motivates all of this the
+// printer pauses and can wait for a human, so there is no bound to pick. A
+// number large enough to be safe is not a backstop, and a number small enough
+// to be a backstop is the bug.
+//
+// The stale-lock worry a permanent TAIL raises is real but is not the failure
+// it replaces. The old stale latch was unrecoverable in practice: the printer
+// believed the channel loaded, so it would never send the load that re-latches
+// it. TAIL is released by every printer command that touches the merger, and in
+// particular by send_out, which opens every load and is accepted
+// unconditionally -- so a TAIL held wrongly costs a mislabelled bit 5 and 6, and
+// the refusal of a bare before_on_use or on_use for a *different* channel that
+// arrives without its send_out. The next load clears it. That escape exists;
+// the old one did not.
 static constexpr uint32_t LOADED_LATCH_DROP_MS = 1500u;
 static ams_loaded_latch::State g_loaded_latch_drop = { ams_loaded_latch::kNoChannel, 0u };
 
@@ -2821,25 +2846,20 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             continue;
         }
 
-        if (dm_loaded[ch] && (ks != 1u))
+        // held_for clears the stamp both on the firing pass and on any pass
+        // where the condition is false, which is what the else branch used to
+        // do by hand.
+        if (signal_hold::held_for(dm_loaded_drop_t0_ms[ch],
+                                  dm_loaded[ch] && (ks != 1u),
+                                  time_now, DM_LOADED_DROP_MS))
         {
-            const uint32_t t0 = dm_loaded_drop_t0_ms[ch];
-            if (t0 == 0u) dm_loaded_drop_t0_ms[ch] = time_now;
-            else if ((time_now - t0) >= 100u)
-            {
-                dm_loaded[ch]            = 0u;
-                dm_loaded_drop_t0_ms[ch] = 0u;
+            dm_loaded[ch]            = 0u;
 
-                dm_auto_state[ch]    = DM_AUTO_IDLE;
-                dm_auto_try[ch]      = 0u;
-                dm_auto_t0_ms[ch]    = 0u;
-                dm_auto_remain_counts[ch] = 0;
-                dm_auto_last_counts[ch]   = 0;
-            }
-        }
-        else
-        {
-            dm_loaded_drop_t0_ms[ch] = 0u;
+            dm_auto_state[ch]    = DM_AUTO_IDLE;
+            dm_auto_try[ch]      = 0u;
+            dm_auto_t0_ms[ch]    = 0u;
+            dm_auto_remain_counts[ch] = 0;
+            dm_auto_last_counts[ch]   = 0;
         }
     }
 #endif
@@ -2965,25 +2985,28 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                     auto_unload_empty_t0_ms[i]  = 0u;
                     auto_unload_blocked[i]      = 1u;
                 }
-                else if (ks == 1u)
-                {
-                    auto_unload_empty_t0_ms[i] = 0u;
-
-                    if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0u;
-                        auto_unload_empty_t0_ms[i]  = 0u;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
                 else
                 {
-                    if (auto_unload_empty_t0_ms[i] == 0u)
+                    // ks == 1 is the channel still reading filament, which both
+                    // resets the empty window and is where the operation's own
+                    // AUTO_UNLOAD_MAX_MS timeout is checked. held_for does the
+                    // reset, so the branch below only has to keep the split.
+                    const bool empty = (ks != 1u);
+                    const bool empty_held =
+                        signal_hold::held_for(auto_unload_empty_t0_ms[i], empty,
+                                              time_now, AUTO_UNLOAD_EMPTY_MS);
+
+                    if (!empty)
                     {
-                        auto_unload_empty_t0_ms[i] = time_now;
+                        if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
+                        {
+                            auto_unload_active[i]       = 0u;
+                            auto_unload_active_t0_ms[i] = 0u;
+                            auto_unload_empty_t0_ms[i]  = 0u;
+                            auto_unload_blocked[i]      = 1u;
+                        }
                     }
-                    else if ((time_now - auto_unload_empty_t0_ms[i]) >= AUTO_UNLOAD_EMPTY_MS)
+                    else if (empty_held)
                     {
                         auto_unload_active[i]       = 0u;
                         auto_unload_active_t0_ms[i] = 0u;
@@ -3105,12 +3128,31 @@ void Motion_control_run(int error)
 
     MC_PULL_ONLINE_read(now_ticks);
 
-    const uint8_t loaded_ch = ams_state_get_loaded();
-    if (ams_loaded_latch::poll(g_loaded_latch_drop, loaded_ch,
-                               (loaded_ch < kChCount) &&
-                                   (MC_ONLINE_key_stu[loaded_ch] == 0u),
+    // Sustained key-zero on the owning channel demotes LOADED to TAIL. It does
+    // not release the merger: see LOADED_LATCH_DROP_MS above for why a release
+    // here is the runout defect, and why TAIL has no way back to UNLOADED that
+    // is not a printer command.
+    //
+    // Nothing to time once the state is already TAIL -- the key reading empty
+    // is that state's defining condition, not evidence of a change -- so the
+    // window is parked by naming no channel, which also discards any window
+    // that was in flight.
+    const uint8_t owner_ch = ams_state_get_loaded();
+    const uint8_t timing_ch =
+        ams_state_is_tail() ? ams_loaded_latch::kNoChannel : owner_ch;
+    if (ams_loaded_latch::poll(g_loaded_latch_drop, timing_ch,
+                               (owner_ch < kChCount) &&
+                                   (MC_ONLINE_key_stu[owner_ch] == 0u),
                                now_ms, LOADED_LATCH_DROP_MS))
-        ams_state_set_unloaded(loaded_ch);
+    {
+        ams_state_set_tail();
+        // Bit 6 of this channel's flags has just changed. Status delivery is
+        // dirty-driven, and the next printer command is not guaranteed to be
+        // soon -- on a runout the printer may pause and wait for a human. The
+        // whole case for spending a wire bit on TAIL is that the monitor can
+        // show it while it is happening.
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+    }
 
     auto &A = ams[motion_control_ams_num];
 
@@ -3266,7 +3308,9 @@ uint8_t Motion_control_get_channel_flags(uint8_t channel)
     // MC_ONLINE_key_stu only ever holds 0 or 1 there.
     flags.bits.dm_fail = 0u;
 #endif
-    flags.bits.loaded = (ams_state_get_loaded() == channel) ? 1u : 0u;
+    const bool owns = (ams_state_get_loaded() == channel);
+    flags.bits.loaded = owns ? 1u : 0u;
+    flags.bits.tail = (owns && ams_state_is_tail()) ? 1u : 0u;
     return flags.raw;
 }
 

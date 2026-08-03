@@ -17,6 +17,31 @@ void MC_PULL_ONLINE_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b, bool fi
 }
 
 void ams_datas_set_need_to_save_filament(uint8_t filament_idx);
+
+// The merger mutex. See src/ams_merger_policy.h for the state machine; these
+// are the three edges the rest of the firmware drives it through.
+//
+// ams_state_get_loaded names the owning channel in LOADED and in TAIL alike,
+// because both are ownership. Callers asking "may this channel still be moved"
+// -- the allow_any and allow_stop gates in bambu_bus_ams.cpp -- want exactly
+// that and need no further test. Only a caller that specifically wants to know
+// whether the strand can still be seen at the online key should ask
+// ams_state_is_tail as well.
 void ams_state_set_loaded(uint8_t filament_ch);
+
+// A printer-commanded release. `filament_ch >= 4` ends the session, which frees
+// LOADED but leaves TAIL held -- idle frames arrive continuously while a
+// printer is paused mid-runout, and one of them must not take the merger.
 void ams_state_set_unloaded(uint8_t filament_ch);
+
+// `claiming_ch` is beginning a load and is taking the merger, TAIL included.
+// Distinct from set_unloaded(0xFF) because send_out and the idle reset both
+// spell "no particular channel" yet mean opposite things: one is another
+// channel claiming the tube, the other is the session ending. This is also the
+// only escape from a stale TAIL, which is what lets TAIL have no timeout.
+void ams_state_preempt(uint8_t claiming_ch);
+// LOADED -> TAIL. Takes no channel: the merger already knows its owner, and
+// that is the only channel this edge could ever apply to.
+void ams_state_set_tail(void);
 uint8_t ams_state_get_loaded(void);
+bool ams_state_is_tail(void);

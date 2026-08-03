@@ -96,9 +96,25 @@ enum RecordType : uint8_t
 };
 
 // Counter ids carried by RECORD_DIAGNOSTIC_COUNTER (LogDiagnosticCounterPayload).
+//
+// MERGER_TAIL_HELD: a session release was refused because the merger is held in
+// TAIL. The value is the running count since boot. TAIL has no timeout, so
+// nothing expires a merger that is wedged; this is the signal that replaces the
+// fuse a timeout would have been.
+//
+// MERGER_TAIL_PREEMPTED: a channel claimed the merger while another channel's
+// tail was still in it. The value is the claiming channel. This is the witness
+// that a strand was still in the shared tube when the next one was pushed in --
+// the collision happens regardless, because the printer is master, so the
+// record is the only thing the BMCU can contribute.
+//
+// Keep this block comment-free. tools/generate_bmcu_enum_registry.py splits the
+// body on commas and does not strip comments, so a comment between entries
+// makes the registry build fail.
 enum DiagCounter : uint8_t
 {
     DIAG_COUNTER_AMS_SERVICE_GAP_MS = 1u, DIAG_COUNTER_AMS_WOULD_REOFFER = 2u,
+    DIAG_COUNTER_MERGER_TAIL_HELD = 3u, DIAG_COUNTER_MERGER_TAIL_PREEMPTED = 4u,
 };
 
 enum ResetState : uint8_t

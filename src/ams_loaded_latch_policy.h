@@ -11,9 +11,12 @@
 // load. The sensor side is the weak end -- MC_ONLINE_key_stu is one microswitch
 // reading, and a single pass of 0 used to clear the latch outright.
 //
-// This gates only the sensor-driven clear. Every printer-commanded clear stays
-// immediate: those carry real information about the filament and go straight to
-// ams_state_set_unloaded without passing through here.
+// This gates only the sensor-driven transition, and since ams_merger_policy.h
+// introduced TAIL that transition no longer clears anything: firing here moves
+// LOADED(ch) to TAIL(ch), which keeps the merger held. Every printer-commanded
+// release stays immediate and goes straight to ams_state_set_unloaded without
+// passing through here, because those carry real information about where the
+// filament is and the sensor does not.
 //
 // Header-only, allocation-free, no loops.
 namespace ams_loaded_latch
@@ -33,11 +36,11 @@ inline void reset(State& s)
     s.since_ms = 0u;
 }
 
-// One control pass. `loaded_ch` is the latch as the firmware currently holds it
-// (kNoChannel or >= 4 meaning nothing latched) and `key_zero` is that channel's
-// online key reading empty right now. Returns true exactly once, on the pass
-// where the key has read empty continuously for `hold_ms`, meaning the caller
-// should clear the latch.
+// One control pass. `loaded_ch` is the channel whose key-zero should be timed
+// (kNoChannel or >= 4 meaning none, which is how the caller parks the window
+// once the merger is already in TAIL) and `key_zero` is that channel's online
+// key reading empty right now. Returns true exactly once, on the pass where the
+// key has read empty continuously for `hold_ms`.
 //
 // Any pass where the key is not empty, or where the latched channel changed
 // underneath us, restarts the window -- so the hold is continuous, not

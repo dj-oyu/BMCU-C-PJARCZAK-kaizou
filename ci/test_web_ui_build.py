@@ -27,9 +27,9 @@ GENERATED = ROOT / "web" / "src" / "api" / "generated.ts"
 # prose or the endpoint list. Changing either makes this test fail, and the
 # only correct fix is to bump revision in docs/bmcu_wire_layout.json and
 # record the new revision and digest here together.
-LAYOUT_REVISION = 7
+LAYOUT_REVISION = 8
 LAYOUT_DIGEST = \
-    "fa98b3e465d27ffc070fe79ba58504a4509e12b2870f2bfb0241867530b5c024"
+    "61c6b55f7c8b6bf119bbfa5828fe621e464052013395f9254f05838bee5a1f9e"
 
 # littlefs on the Pico 2 W also holds the journal (8 x 64 KB) and the modules.
 # A page beyond this is a signal that a dependency was pulled in by accident.
