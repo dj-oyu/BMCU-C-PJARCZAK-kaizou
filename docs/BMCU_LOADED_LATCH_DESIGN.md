@@ -5,14 +5,6 @@ revision). Verified against commit `9747e99`. Section 12 lists where this design
 expected the implementation to diverge, and this document is what the result is
 measured against.
 
-Amended after the post-`ee24650` decision round. The amendments are not
-cosmetic: two of the original recommendations are retracted here (the T_tail
-timeout, row 11; the do-not-persist-TAIL rule, section 6) because the arguments
-that overrode them were better, including one counter-case against the original
-text found by its own author. Retractions record their reasons in place; where
-a retraction opens a question rather than settling one, the question is marked,
-not deleted.
-
 Every code citation below was re-checked against the tree at `9747e99` on
 2026-08-04. Where an earlier conversational sketch was wrong, the correction is
 stated inline and collected in section 11.
@@ -70,7 +62,7 @@ LOADED(ch)    ch owns the merger and its filament is (believed) present.
 TAIL(ch)      ch owns the merger; its filament is no longer at the switch.
               Retract commands for ch are still accepted. Loads of other
               channels are refused until a send_out preempts (section 5,
-              row 7); there is no time bound (row 11, retracted).
+              row 7); there is no time bound.
 ```
 
 Presence advertisement is unchanged in all three states: it follows the sensor
@@ -154,7 +146,7 @@ transitions. Every row cites where the input is produced today.
 |---|------|-------|----|-------|-------|
 | 1 | UNLOADED | `before_on_use(ch)` / `on_use(ch)` accepted (`:305`, `:375`) | LOADED(ch) | `cmd_load` | Unchanged from today. |
 | 2 | LOADED(ch) | `on_use(ch)` (`:375`) | LOADED(ch) | — | Redundant re-latch; no event, no flash write. Today suppressed by `main.cpp:136`. |
-| 3 | LOADED(ch) | `before_pull_back(ch)` (`:377-395`) or `0xFF` pull command (`:406-426`) | **TAIL(ch)** | `cmd_retract` | **Changed — and deferred in round one; see the deferral note below this table.** Today both call `set_unloaded` at command time (`:395`, `:425`) — i.e. today treats "retract commanded" as "path clear", which is wrong in the other direction from the sensor bug: a failed retract leaves the path occupied and the latch already gone. |
+| 3 | LOADED(ch) | `before_pull_back(ch)` (`:377-395`) or `0xFF` pull command (`:406-426`) | **TAIL(ch)** | `cmd_retract` | **Changed — deferred; see the note below this table.** Today both call `set_unloaded` at command time (`:395`, `:425`) — i.e. today treats "retract commanded" as "path clear", which is wrong in the other direction from the sensor bug: a failed retract leaves the path occupied and the latch already gone. |
 | 4 | LOADED(ch) | key-zero held ≥ `LOADED_LATCH_DROP_MS` (`Motion_control.cpp:3108-3113`) | **TAIL(ch)** | `sensor_runout` | **The central change.** Today this is the clear at `:3113`. TAIL entry, not release. |
 | 5 | TAIL(ch) | retract sequence terminal: `redetect` exits — key reported (`Motion_control.cpp:2474-2486`) or redetect timeout (`:2487-2488`, bounded by `4e9adf6`) | UNLOADED | `retract_done` / `retract_gone` | The strand is parked at the switch (key case: presence stays advertised) or fully gone (timeout case). Either way the merger is clear. |
 | 6 | TAIL(ch) | debounced key-close **and** channel motion idle | LOADED(ch) | `sensor_return` | Filament pushed back in before any retract ran. The motion-idle condition prevents re-latching from key flap during an active retract. Hold window: the 100 ms class, not the 1500 ms class. |
@@ -162,8 +154,7 @@ transitions. Every row cites where the input is produced today.
 | 8 | LOADED(ch) | `send_out(ch)` — same channel (`:275-276`) | LOADED(ch) | — | **Changed.** Today `send_out` force-clears even for the owner. Re-feeding the owner's own channel does not change ownership. |
 | 9 | LOADED(ch) | `0xFF` idle reset (`:434-459`) or `0xFF/0x01` idle (`:428-432`) | UNLOADED | `printer_idle` | Kept, because these are today's recovery path for a printer that power-cycled or aborted, and `:441-446` already guards the full reset against firing mid-use. |
 | 10 | TAIL(ch) | `0xFF` idle reset / `0xFF/0x01` | **TAIL(ch)** | — | **Changed.** Session going idle does not clear the path. The tail is still in the merger; the escapes are rows 5-7, not time. |
-| 11 | TAIL(ch) | ~~T_tail elapsed~~ | — | — | **Retracted.** There is no timeout. See "No T_tail" below. |
-| 12 | any | boot restore (`main.cpp:234-254`) | LOADED(ch), TAIL(ch), or UNLOADED | `boot` | TAIL is restored from its own flash record — amended, section 6. |
+| 12 | any | boot restore (`main.cpp:234-254`) | LOADED(ch), TAIL(ch), or UNLOADED | `boot` | TAIL is restored from its own flash record; section 6. |
 
 Gate changes that consume the state: `allow_any` becomes
 `state == UNLOADED || owner == ch`; `allow_stop` becomes
@@ -171,11 +162,10 @@ Gate changes that consume the state: `allow_any` becomes
 is what lets a runout retract through; everything else in the table exists to
 keep that widening from becoming a new way to hold a stale lock.
 
-**No T_tail — row 11 retracted.** The original design bounded TAIL at 60 s,
-sized against the longest legitimate retract (travel budget plus 3 s
-no-progress, `Motion_control.cpp:2396-2406`, plus 10 s redetect, `:2342`).
-Retracted for three reasons, the third being a counter-case against this
-document found by its own author:
+**There is no time bound on TAIL.** A bound sized against the longest
+legitimate retract — travel budget plus 3 s no-progress
+(`Motion_control.cpp:2396-2406`) plus 10 s redetect (`:2342`), so roughly 60 s —
+is the obvious design and it is wrong, for three reasons:
 
 1. Any finite bound re-creates "a timer overrides ownership", which is the
    disease this design exists to remove. The pre-change firmware's release at
@@ -208,7 +198,7 @@ event carries the epoch: a collision report and the preempt that allowed it
 must be joinable after the fact.
 
 **Row 3 deferral (first implementation round).** `bambu_bus_ams.cpp` is
-untouched in round one: the commanded-retract paths still release at command
+untouched for now: the commanded-retract paths still release at command
 time (`:395`, `:425`). Stated plainly so this document does not overclaim: on
 every retract, commanded or runout alike, **the merger is occupied-but-unowned
 from the moment of `:395`/`:425` until redetect completes, and a jammed
@@ -227,8 +217,7 @@ Current format, kept unchanged: 8-byte wear-levelled slots, payload
 selected by wrapping sequence compare (`src/Flash_saves.cpp:347-422`). The
 payload byte is the raw channel: `0-3` or `0xFF`.
 
-**TAIL is persisted, in a separate flash record — an amendment.** The original
-text here said "do not persist in v1"; that is retracted, because the
+**TAIL is persisted, in a separate flash record.** It has to be, because the
 no-timeout decision (section 5) changed what persistence is worth:
 
 **No-timeout and persist-TAIL are a coupled pair.** With no T_tail, TAIL's
@@ -324,7 +313,7 @@ mechanically incomplete**, and the incompleteness matters for testing:
   debounce alone may already make runout switchover mostly work**, by accident
   of cadence, with a failure race remaining.
 
-Consequence for acceptance testing — amended. The original text required a
+Consequence for acceptance testing. An earlier plan required a
 debounce-only baseline run before the TAIL run. That requirement is dropped:
 flashing is the scarce, brick-risking step, and the baseline's information is
 recoverable from the TAIL run itself. **The acceptance run must capture the
@@ -341,7 +330,7 @@ undebounced the moment the key opens (the `online` computation takes
 retract sequencing depends on the *presence* bits rather than on the retract
 being accepted, that is printer-side logic this repository cannot see (OQ-1).
 
-## 9. Timer consolidation — adjacent; sequencing amended to ride the same branch
+## 9. Timer consolidation — adjacent, riding the same branch
 
 Verified inventory of the seven windows derived from the key signal:
 
@@ -388,7 +377,7 @@ The two operation timeouts stay as they are (`4e9adf6` is explicit that
 redetect times driving, not state residence). The gesture window stays with
 its gesture.
 
-Sequencing — amended. The original text put the consolidation after TAIL in a
+Sequencing. Putting the consolidation after TAIL in a
 separate change; it now rides the same branch as a final mechanical commit,
 because flashing two BMCUs is the scarce, risky step and a second burn buys
 attribution that commit granularity mostly buys anyway. The constraint that
@@ -416,11 +405,10 @@ header, compiled and driven on the host.
    the phase order: `stop_on_use → before_pull_back → 0xFF pull → send_out →
    before_on_use → on_use`), asserting the ownership trace
    LOADED→TAIL→UNLOADED→LOADED with no spurious releases.
-3. **Funnel-routing tests** — added by amendment; this family replaces the
-   retracted baseline run as the guard on the round-one structure, where
+3. **Funnel-routing tests.** This family is the guard on the funnel, and
    `bambu_bus_ams.cpp` is untouched and the old `ams_state_*` call sites are
    the bus layer's only interface to the state machine. The family exists
-   because round one contained exactly the leak it targets: **`release(s,
+   the first implementation contained exactly the leak it targets: **`release(s,
    0xFF)` skipped its owner check and reached `reset()`, so the idle-frame
    wildcard at `:458` dropped TAIL** — the overnight case, defeating the whole
    branch, invisibly. The conversation test that catches it: runout entry,
@@ -439,7 +427,7 @@ header, compiled and driven on the host.
    one flash-write pair per direction and exactly the events of rows 4 and 6,
    not a write per 1.5 s.
 6. **Stale-TAIL escape** — jammed retract (no terminal transition): TAIL is
-   held indefinitely (row 11 is retracted, there is no timeout), other-channel
+   held indefinitely (there is no timeout), other-channel
    loads are refused *until* a `send_out` arrives, and the `send_out` preempt
    (row 7) then releases with its event. Refused commands during the hold are
    counted (OQ-3).
@@ -449,7 +437,7 @@ header, compiled and driven on the host.
 Hardware acceptance, when a unit is free: **runout switchover with a paired
 spool** — the owner reports it has never once worked, which makes it the
 acceptance test. The debounce-only baseline run originally required here is
-retracted (section 8): instead, the acceptance run must capture the event
+dropped (section 8): instead, the acceptance run must capture the event
 stream and compute d, the delay from the last `on_use` re-latch to the retract
 prelude. `d > 1500 ms` credits TAIL; `d < 1500 ms` means the run cannot
 distinguish TAIL from debounce cadence and the report must say so rather than
@@ -473,7 +461,7 @@ pause timing and whether it stops polling before or after the retract prelude.
   refused-retract, and the debounce may already have largely won it
   (section 8). Attribution therefore needs the d-computation on the
   acceptance run (the baseline run originally required for this was itself
-  retracted — section 8).
+  dropped — section 8).
 - **The timer split** is four holds, two timeouts, and one gesture window —
   not four and three (section 9).
 - **"No consumer needs the owner index"** is false; the debounce feed does
@@ -487,7 +475,7 @@ pause timing and whether it stops polling before or after the retract prelude.
 ## 12. Where the in-flight implementation is expected to diverge
 
 Checked against `9747e99`, where no TAIL code exists yet. Round-one status,
-by amendment: items 1-3 all materialized — item 1 is now the recorded row-3
+in the first implementation: items 1-3 all materialized — item 1 is now the recorded row-3
 deferral (section 5); item 2 materialized as the `release(s, 0xFF)` owner-check
 leak (section 10, family 3); item 3 materialized as the in-band `0x80|ch`
 persistence and was caught in review (section 6). Items 4-7 remain open
@@ -519,7 +507,7 @@ DM build stands at 93.0 % of 61440 bytes (~4300 free). This design adds: the
 policy header (pure functions, inlined — the comparable
 `ams_loaded_latch_policy.h` costs well under 200 bytes of text), one event
 record constructor, one channel-flags bit, and the `STA_TAIL_TAG` read/write
-paths on the existing slot machinery. No timer exists (row 11 retracted), so
+paths on the existing slot machinery. No timer exists, so
 no timestamp for one. Estimated total well under 1 KB. RAM: 3 bytes of
 ownership state; the timer consolidation's measured RAM delta is zero
 (section 9) — any earlier implication that it would reclaim state was wrong.
@@ -529,16 +517,15 @@ ownership state; the timer consolidation's measured RAM delta is zero
 - **OQ-1**: Does the printer's runout/switchover sequencing key off the
   presence bits, the retract acknowledgement, both, or its own hub sensor?
   Unknowable from this repository; the section 10 measurement narrows it.
-- **OQ-2**: ~~Should TAIL survive reboot?~~ **Settled by amendment: yes** —
+- **OQ-2** (settled): TAIL survives reboot —
   persisted via the separate `STA_TAIL_TAG` record (section 6), and coupled to
   the no-timeout decision: reverting either requires reverting both.
-- **OQ-3**: ~~T_tail sizing~~ **Retracted with row 11** — there is no timeout
-  to size. The successor question it leaves open: the diagnostic role the
-  timeout would have played must be filled by counting and eventing commands
-  refused while TAIL is held, so that the one unfused wedge (an `on_use`
-  resume of a different channel with no preceding `send_out` — no known
-  printer sequence, but unproven absent) is loud if it exists. That counter is
-  a requirement, not yet implemented.
+- **OQ-3**: With no timeout there is no fuse, so the diagnostic role a timeout
+  would have played must be filled by counting and eventing commands refused
+  while TAIL is held. That makes the one unfused wedge loud if it exists: an
+  `on_use` resume of a different channel with no preceding `send_out`. No known
+  printer sequence does that, but its absence is unproven. The counter is a
+  requirement, not yet implemented.
 - **OQ-4**: Row 9 keeps two weakly-informed printer-idle clears because they
   are today's recovery path. If the ownership event stream shows them firing
   spuriously in practice, they should be narrowed — but with data, not by
