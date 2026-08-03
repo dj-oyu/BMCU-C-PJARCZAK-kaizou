@@ -174,7 +174,7 @@ static void ams_state_save_run()
 {
     if (!g_state_dirty) return;
 
-    if (Flash_AMS_state_write(ams_merger::encode(g_merger)))
+    if (Flash_AMS_state_write(g_merger.owner, ams_merger::is_tail(g_merger)))
         g_state_dirty = 0u;
 }
 
@@ -258,6 +258,14 @@ int main(void)
     // the exact failure this state exists to prevent, just re-armed by a
     // reboot.
     //
+    // Note that the channel byte is assigned to the merger before its range is
+    // checked, exactly as it always was. That is why TAIL must never be encoded
+    // into that byte: a value this guard rejects still reaches every gate that
+    // compares against it, and 0x80|ch matches no channel and is not 0xFF, so
+    // it would refuse allow_any and allow_stop for all four channels at once.
+    // ams_merger::restore is what makes the assignment safe now -- it rejects
+    // an out-of-range owner into UNLOADED instead of storing it.
+    //
     // The session is reconstructed identically because the retract needs it to
     // be. before_pull_back only becomes motion in bambu_bus_ams.cpp if the
     // channel's prior motion is on_use, before_on_use or stop_on_use, so a
@@ -268,9 +276,10 @@ int main(void)
     // the same reason: filament[ch].motion is not idle.
     {
         uint8_t stored = 0xFFu;
-        if (Flash_AMS_state_read(&stored))
+        bool stored_tail = false;
+        if (Flash_AMS_state_read(&stored, &stored_tail))
         {
-            ams_merger::decode(g_merger, stored);
+            ams_merger::restore(g_merger, stored, stored_tail);
             const uint8_t ch = g_merger.owner;
 
             if (ch < 4u)

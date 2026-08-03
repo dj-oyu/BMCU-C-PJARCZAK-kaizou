@@ -156,58 +156,40 @@ static int test_out_of_range_inputs(void)
     return 0;
 }
 
-// Flash round trip, and what an old record means to new firmware.
-static int test_flash_encoding(void)
+// Boot restore. The two halves come from flash separately -- the channel from
+// the STA record, which keeps the meaning it has always had, and the tail from
+// a record tag older firmware skips.
+static int test_boot_restore(void)
 {
     State s;
 
     for (uint8_t ch = 0u; ch < 4u; ++ch)
     {
-        ams_merger::reset(s);
-        ams_merger::acquire(s, ch);
-        CHECK(ams_merger::encode(s) == ch, 81);
+        ams_merger::restore(s, ch, false);
+        CHECK(is(s, ams_merger::stage_loaded, ch), 81);
 
-        ams_merger::to_tail(s, ch);
-        CHECK(ams_merger::encode(s) == (uint8_t)(0x80u | ch), 82);
-
-        State back;
-        ams_merger::decode(back, (uint8_t)(0x80u | ch));
-        CHECK(is(back, ams_merger::stage_tail, ch), 83);
-
-        // A record written before TAIL existed. LOADED is what it meant, and
-        // reading it as anything else would either lose the merger or refuse
-        // its release.
-        ams_merger::decode(back, ch);
-        CHECK(is(back, ams_merger::stage_loaded, ch), 84);
+        ams_merger::restore(s, ch, true);
+        CHECK(is(s, ams_merger::stage_tail, ch), 82);
+        // and the point of restoring it at all: the retract is still accepted.
+        CHECK(ams_merger::owns(s, ch), 83);
     }
 
-    ams_merger::reset(s);
-    CHECK(ams_merger::encode(s) == 0xFFu, 85);
-
-    // Every byte decodes to a legal state; nothing out of range becomes an
-    // owner. 0xFF is the free record, and 0x80..0xFB with a bad index likewise.
-    for (uint32_t raw = 0u; raw <= 0xFFu; ++raw)
+    // The free record, and every other byte the channel field could hold. None
+    // of them may leave the merger owned, and in particular a tail flag with a
+    // rejected channel must not survive as an owner nobody can release --
+    // main.cpp assigns this byte before it range-checks it.
+    for (uint32_t raw = 4u; raw <= 0xFFu; ++raw)
     {
-        State back;
-        ams_merger::decode(back, (uint8_t)raw);
+        ams_merger::restore(s, (uint8_t)raw, false);
+        CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 84);
 
-        const uint8_t index = (uint8_t)(raw & 0x7Fu);
-        if (index < 4u)
-        {
-            CHECK(back.owner == index, 86);
-            CHECK(ams_merger::is_tail(back) == ((raw & 0x80u) != 0u), 87);
-        }
-        else
-        {
-            CHECK(is(back, ams_merger::stage_unloaded, kNoChannel), 88);
-        }
+        ams_merger::restore(s, (uint8_t)raw, true);
+        CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 85);
+        CHECK(!ams_merger::is_tail(s), 86);
 
-        // tail is never set without an owner, in any decode.
-        CHECK(!(ams_merger::is_tail(back) && ams_merger::is_free(back)), 89);
-        // and a decoded state always re-encodes to something that decodes back.
-        State again;
-        ams_merger::decode(again, ams_merger::encode(back));
-        CHECK(again.owner == back.owner && again.tail == back.tail, 90);
+        // No byte outside 0..3 may match a channel gate.
+        for (uint8_t ch = 0u; ch < 4u; ++ch)
+            CHECK(!ams_merger::owns(s, ch), 87);
     }
 
     return 0;
@@ -266,7 +248,7 @@ int main(void)
     if ((rc = test_transition_table()) != 0) return rc;
     if ((rc = test_ownership_survives_the_tail()) != 0) return rc;
     if ((rc = test_out_of_range_inputs()) != 0) return rc;
-    if ((rc = test_flash_encoding()) != 0) return rc;
+    if ((rc = test_boot_restore()) != 0) return rc;
     if ((rc = test_runout_sequence()) != 0) return rc;
     if ((rc = test_send_out_frees_a_held_tail()) != 0) return rc;
     return 0;

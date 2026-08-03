@@ -43,10 +43,6 @@ namespace ams_merger
 static const uint8_t kNoChannel = 0xFFu;
 static const uint8_t kChannels = 4u;
 
-// Stored form, one byte, which is also the flash form -- see encode/decode.
-static const uint8_t kStoredFree = 0xFFu;
-static const uint8_t kStoredTailFlag = 0x80u;
-
 enum Stage : uint8_t
 {
     stage_unloaded = 0u,
@@ -152,35 +148,27 @@ inline bool to_tail(State& s, uint8_t ch)
     return true;
 }
 
-// Flash form. The record already carries a whole byte holding 0..3 or 0xFF, so
-// TAIL rides in the top bit of the same byte and no format version changes:
+// Rebuild the state from flash at boot.
 //
-//   0x00..0x03  LOADED(ch), which is what every record written before this
-//               change means, and the conservative reading of one
-//   0x80..0x83  TAIL(ch)
-//   anything else, including 0xFF, the merger is free
+// The two halves arrive separately and that is deliberate: the channel keeps
+// exactly the meaning it has always had in the STA record, 0..3 or 0xFF, and
+// TAIL is carried by a record tag that older firmware skips entirely. See
+// STA_TAIL_TAG in Flash_saves.cpp for why the split is worth a second record
+// rather than a spare bit.
 //
-// Both directions of a firmware swap stay sane. New firmware reads an old
-// record as LOADED, which is what it meant. Old firmware reads a new TAIL
-// record as 0x80|ch, fails its own `ch < 4` guard, and treats it as free --
-// that is the pre-change behaviour, not a new failure.
-inline uint8_t encode(const State& s)
+// The invariant is re-established here rather than trusted: tail without a
+// valid owner is discarded, so a channel byte that fails its range check can
+// never leave the merger held by nobody.
+inline void restore(State& s, uint8_t owner, bool tail)
 {
-    if (is_free(s)) return kStoredFree;
-    return (uint8_t)(s.owner | (s.tail ? kStoredTailFlag : 0u));
-}
-
-inline void decode(State& s, uint8_t stored)
-{
-    const uint8_t ch = (uint8_t)(stored & (uint8_t)~kStoredTailFlag);
-    if (ch >= kChannels)
+    if (owner >= kChannels)
     {
         reset(s);
         return;
     }
 
-    s.owner = ch;
-    s.tail = (stored & kStoredTailFlag) ? 1u : 0u;
+    s.owner = owner;
+    s.tail = tail ? 1u : 0u;
 }
 
 }
