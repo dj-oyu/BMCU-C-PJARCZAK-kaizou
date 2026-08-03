@@ -113,6 +113,11 @@ void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fau
 // and one event per frame is the queue-saturating storm that cost this project
 // a fortnight already.
 void bmcu_link_merger_tail_refused(uint32_t count);
+
+// `claiming_ch` took the merger while another channel's tail was still in it.
+// Not edge-latched: one emission per preempt, and a preempt ends the TAIL
+// episode that produced it, so there is nothing here to storm.
+void bmcu_link_merger_tail_preempted(uint8_t claiming_ch);
 uint32_t bmcu_link_tx_drop_count(void);
 bool bmcu_link_reset_pending(void);
 

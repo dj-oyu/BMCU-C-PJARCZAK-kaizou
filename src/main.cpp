@@ -183,6 +183,18 @@ void ams_state_set_unloaded(uint8_t filament_ch)
 // debounce window, so the tail is past the switch. The merger is still occupied
 // and the printer's retract must still be accepted, which is exactly what not
 // releasing here buys.
+void ams_state_preempt(uint8_t claiming_ch)
+{
+    const uint8_t result = ams_merger::preempt(g_merger);
+    if (result == ams_merger::release_none) return;
+
+    g_state_dirty = 1u;
+    g_tail_refused_reported = 0u;
+
+    if (result == ams_merger::release_preempted_tail)
+        bmcu_link_merger_tail_preempted(claiming_ch);
+}
+
 void ams_state_set_tail(void)
 {
     if (!ams_merger::to_tail(g_merger)) return;

@@ -28,7 +28,18 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx);
 // whether the strand can still be seen at the online key should ask
 // ams_state_is_tail as well.
 void ams_state_set_loaded(uint8_t filament_ch);
+
+// A printer-commanded release. `filament_ch >= 4` ends the session, which frees
+// LOADED but leaves TAIL held -- idle frames arrive continuously while a
+// printer is paused mid-runout, and one of them must not take the merger.
 void ams_state_set_unloaded(uint8_t filament_ch);
+
+// `claiming_ch` is beginning a load and is taking the merger, TAIL included.
+// Distinct from set_unloaded(0xFF) because send_out and the idle reset both
+// spell "no particular channel" yet mean opposite things: one is another
+// channel claiming the tube, the other is the session ending. This is also the
+// only escape from a stale TAIL, which is what lets TAIL have no timeout.
+void ams_state_preempt(uint8_t claiming_ch);
 // LOADED -> TAIL. Takes no channel: the merger already knows its owner, and
 // that is the only channel this edge could ever apply to.
 void ams_state_set_tail(void);

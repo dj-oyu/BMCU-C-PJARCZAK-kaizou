@@ -1303,6 +1303,12 @@ void bmcu_link_merger_tail_refused(uint32_t count)
     emit_ams_diag_counter(DIAG_COUNTER_MERGER_TAIL_HELD, count, time_ticks32());
 }
 
+void bmcu_link_merger_tail_preempted(uint8_t claiming_ch)
+{
+    emit_ams_diag_counter(DIAG_COUNTER_MERGER_TAIL_PREEMPTED, claiming_ch,
+                          time_ticks32());
+}
+
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
                                    uint16_t response_length, uint8_t addressed_ams)

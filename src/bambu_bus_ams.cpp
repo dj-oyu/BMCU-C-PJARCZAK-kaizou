@@ -272,8 +272,11 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
 
             const _filament_motion prev = ams_ptr->filament[ch].motion;
 
+            // Not set_unloaded(0xFF): this is ch claiming the merger, not the
+            // session ending, and the two need different answers when the
+            // current owner is in TAIL. See ams_state_preempt in app_api.h.
             if (prev != _filament_motion::send_out && ams_state_get_loaded() != 0xFFu)
-                ams_state_set_unloaded(0xFFu);
+                ams_state_preempt(ch);
 
             ams_ptr->filament[ch].motion = _filament_motion::send_out;
             ams_ptr->filament_use_flag = 0x02;

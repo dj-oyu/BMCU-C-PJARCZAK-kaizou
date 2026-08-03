@@ -47,6 +47,27 @@
 // consumer will be missed, and being missed at exactly one consumer is the
 // defect this file exists to close.
 //
+// Two transitions in docs/BMCU_LOADED_LATCH_DESIGN.md have no code here, and
+// both are absent on purpose rather than missed.
+//
+// Row 5, TAIL -> UNLOADED when the retract sequence terminates, is unreachable
+// while row 3 is deferred. The commanded retract releases at command time --
+// :395 and :425 -- so the merger is already UNLOADED long before the physical
+// completion row 5 watches for. Implementing it would mean writing a transition
+// out of a state the code has by then left. It becomes meaningful only if row 3
+// moves those releases to completion, and it should be implemented together
+// with row 3 or not at all.
+//
+// Row 6, TAIL -> LOADED on a debounced key-close with motion idle, is covered
+// by acquire(). Filament arriving back at the key on the owning channel is
+// followed by the printer's next before_on_use or on_use, and that promotes.
+// The only difference is how long the wire bits lag the physical change, and
+// nothing gates on the difference: allow_any and allow_stop already answer the
+// same in TAIL and LOADED for the owner. Row 6 would also be actively wrong
+// after a runout, where new filament at the key says nothing about the old tail
+// still lying in the bowden -- the state it would leave is less accurate than
+// the one it replaces.
+//
 // Header-only, allocation-free, no loops.
 namespace ams_merger
 {
@@ -131,21 +152,22 @@ inline bool acquire(State& s, uint8_t ch)
 
 enum ReleaseResult : uint8_t
 {
-    release_none = 0u,        // nothing was held; no change
-    release_done = 1u,        // the merger was released
-    release_refused_tail = 2u // a wildcard tried to release a TAIL
+    release_none = 0u,          // nothing was held; no change
+    release_done = 1u,          // the merger was released
+    release_refused_tail = 2u,  // a session release met a TAIL and left it held
+    release_preempted_tail = 3u // a claiming channel took the merger off a TAIL
 };
 
-// A printer-commanded release. `ch >= kChannels` means "whatever is held",
-// which is how the send_out and idle-reset paths address it.
+// A printer-commanded release naming a channel, or -- with `ch >= kChannels` --
+// ending the session outright.
 //
-// A wildcard releases LOADED but not TAIL. TAIL needs an owner named.
+// A session release frees LOADED but not TAIL. TAIL has to be named.
 //
 // This is the difference between fixing the reported symptom and not. The idle
 // reset at bambu_bus_ams.cpp:458 passes 0xFF, and idle frames keep arriving
 // while a printer sits paused. On a runout the sequence is: the tail clears the
 // switch, TAIL is entered, the printer pauses and waits for a human, and idle
-// frames flow the whole time. A wildcard that released TAIL would drop the
+// frames flow the whole time. A session release that freed TAIL would drop the
 // merger during that pause, and the retract prelude in the morning would be
 // refused for want of allow_stop -- which is the original complaint, arriving
 // by a new route. It is also exactly why TAIL has no timeout: an unbounded
@@ -155,15 +177,8 @@ enum ReleaseResult : uint8_t
 // before_pull_back at :395, the read_num 0xFF unload at :425, and the
 // statu_flags 0x01 path at :431 all pass ams_ptr->now_filament_num.
 //
-// One caller does wildcard-release and could meet a held TAIL: the send_out
-// path at :276, when the printer feeds a different spool without retracting the
-// old one first. Refusing it is correct rather than a regression. TAIL means a
-// strand is still lying in the shared tube, so accepting would be agreeing to
-// push a second strand into an occupied merger. In the sequence that actually
-// works -- the one in the healthy log -- before_pull_back precedes send_out and
-// releases the merger by name, so this refusal is not on the path a normal
-// switchover takes. It is counted rather than silent; see the funnel in
-// main.cpp.
+// The other caller that passes 0xFF is send_out at :275, and it means something
+// else entirely -- see preempt() below. It does not come through here.
 inline uint8_t release(State& s, uint8_t ch)
 {
     if (is_free(s)) return release_none;
@@ -179,6 +194,41 @@ inline uint8_t release(State& s, uint8_t ch)
 
     reset(s);
     return release_done;
+}
+
+// Another channel is claiming the merger: bambu_bus_ams.cpp:275, on send_out.
+//
+// This frees TAIL, where a session release does not, and the distinction is the
+// whole reason the two are separate functions. Both spell "no particular
+// channel" on the wire, so before they were split they collided and one of them
+// had to be wrong.
+//
+// Why a preempt must succeed even though TAIL means the tube is still occupied:
+// the printer is master. send_out is accepted unconditionally and the printer
+// will drive filament into the merger whether or not the BMCU agrees. Refusing
+// does not prevent the collision, it only leaves the BMCU's idea of who owns
+// the merger wrong while the collision happens -- and wrong in the direction
+// that then refuses the new channel's own retract, because allow_stop would
+// still name the old owner. Yielding is the lesser damage and the honest
+// record.
+//
+// It is also the escape hatch the no-timeout decision rests on. TAIL is never
+// expired by a clock, so the argument that a stale TAIL is recoverable depends
+// entirely on this edge: whatever else happens, the next load of any channel
+// takes the merger back. Without it TAIL would have neither a fuse nor an
+// escape, which is the stale-lock failure the timeout was rejected for
+// avoiding.
+//
+// Preempting a TAIL is reported rather than silent. It is the witness that a
+// strand was still in the tube when the next one was pushed in, and that is
+// worth seeing in a log after a failed print.
+inline uint8_t preempt(State& s)
+{
+    if (is_free(s)) return release_none;
+
+    const bool was_tail = (s.tail != 0u);
+    reset(s);
+    return was_tail ? release_preempted_tail : release_done;
 }
 
 // The online key of the owning channel has read empty continuously for the

@@ -127,7 +127,8 @@
     "diag_counter": {
       "1": "ams_service_gap_ms",
       "2": "ams_would_reoffer",
-      "3": "merger_tail_held"
+      "3": "merger_tail_held",
+      "4": "merger_tail_preempted"
     },
     "reset_state": {
       "1": "scheduled",

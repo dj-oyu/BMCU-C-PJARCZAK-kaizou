@@ -104,11 +104,26 @@ static int test_transition_table(void)
     CHECK(ams_merger::release(s, kNoChannel) == ams_merger::release_refused_tail, 49);
     CHECK(is(s, ams_merger::stage_tail, 2u), 50);
 
-    // A wildcard still frees a plain LOADED, which is what it is for.
+    // A session release still frees a plain LOADED, which is what it is for.
     ams_merger::reset(s);
     ams_merger::acquire(s, 2u);
     CHECK(ams_merger::release(s, kNoChannel) == ams_merger::release_done, 55);
     CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 56);
+
+    // A preempt frees a TAIL where a session release does not. This is the
+    // only escape from a stale TAIL, and the reason TAIL may have no timeout.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    ams_merger::to_tail(s);
+    CHECK(ams_merger::preempt(s) == ams_merger::release_preempted_tail, 57);
+    CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 58);
+
+    // Preempting a plain LOADED is an ordinary release, not a collision.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    CHECK(ams_merger::preempt(s) == ams_merger::release_done, 59);
+    // Preempting a free merger is a no-op.
+    CHECK(ams_merger::preempt(s) == ams_merger::release_none, 60);
 
     // a release addressed elsewhere does not free a TAIL either
     ams_merger::reset(s);
@@ -223,29 +238,6 @@ static int test_runout_sequence(void)
     return 0;
 }
 
-// The printer feeding another spool without retracting the old one first.
-// send_out's release is a wildcard -- ams_state_set_unloaded(0xFF) at :276 --
-// so it is refused while TAIL is held, and refused is the correct answer: TAIL
-// means a strand is still lying in the shared tube, and accepting would agree
-// to push a second one in after it. The sequence that actually works sends
-// before_pull_back first, which releases by name.
-static int test_send_out_does_not_free_a_held_tail(void)
-{
-    State s;
-    ams_merger::reset(s);
-    ams_merger::acquire(s, 3u);
-    ams_merger::to_tail(s);
-
-    CHECK(ams_merger::release(s, kNoChannel) == ams_merger::release_refused_tail, 111);
-    CHECK(ams_merger::owns(s, 3u), 112);
-
-    // Naming the owner is what frees it, and then the other channel loads.
-    CHECK(ams_merger::release(s, 3u) == ams_merger::release_done, 113);
-    CHECK(ams_merger::acquire(s, 1u), 114);
-
-    return 0;
-}
-
 // ---------------------------------------------------------------------------
 // Conversation level.
 //
@@ -295,6 +287,81 @@ static Gates gates_for(const State& s, uint8_t ch)
     g.allow_any = (loaded == 0xFFu) || (loaded == ch);
     g.allow_stop = (loaded == ch);
     return g;
+}
+
+// The printer feeding another spool without retracting the old one first.
+//
+// send_out routes to preempt, not to a session release, and it must succeed
+// even though TAIL means the tube is still occupied. The printer is master: it
+// drives the filament in regardless, so refusing would not prevent the
+// collision, only leave the BMCU naming the wrong owner while it happens -- and
+// then refusing the new channel's own retract, because allow_stop would still
+// point at the old one.
+static int test_send_out_preempts_a_held_tail(void)
+{
+    State s;
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 3u);
+    ams_merger::to_tail(s);
+
+    // Reported, because a strand was still in the tube when the next one came.
+    CHECK(ams_merger::preempt(s) == ams_merger::release_preempted_tail, 111);
+    CHECK(ams_merger::is_free(s), 112);
+
+    // The claiming channel then loads and owns the merger.
+    CHECK(ams_merger::acquire(s, 1u), 113);
+    CHECK(ams_merger::owns(s, 1u), 114);
+    CHECK(gates_for(s, 1u).allow_stop, 115);
+
+    return 0;
+}
+
+// Runout, then the printer gives up on the channel and loads another instead.
+//
+// This is the arm that separates a preempt from a session release. Both spell
+// "no particular channel" at the funnel, so before they were split one of them
+// was wrong -- and the wrong one was this: send_out was refused, the merger
+// stayed with the abandoned channel, and every gate afterwards named the wrong
+// owner. It also matters more than an ordinary divergence, because this edge is
+// the only escape from a stale TAIL and therefore the reason TAIL is allowed to
+// have no timeout at all.
+static int test_runout_then_printer_moves_to_another_channel(void)
+{
+    State s;
+    ams_loaded_latch::State d;
+    uint32_t t = 1000u;
+    ams_merger::reset(s);
+    ams_loaded_latch::reset(d);
+
+    // Printing from channel 0, which then runs out.
+    CHECK(ams_merger::acquire(s, 0u), 241);
+    CHECK(key_empty_through_the_window(s, d, t), 242);
+    CHECK(is(s, ams_merger::stage_tail, 0u), 243);
+
+    // A pause, with idle frames that must not take the merger.
+    for (uint32_t frame = 0u; frame < 100u; ++frame)
+        CHECK(ams_merger::release(s, kNoChannel) == ams_merger::release_refused_tail, 244);
+    CHECK(is(s, ams_merger::stage_tail, 0u), 245);
+
+    // The printer does not retract channel 0. It feeds channel 1 instead.
+    // send_out is accepted unconditionally on the bus, so the merger must yield
+    // -- the filament is coming in whether the BMCU agrees or not.
+    CHECK(ams_merger::preempt(s) == ams_merger::release_preempted_tail, 246);
+    CHECK(ams_merger::is_free(s), 247);
+
+    // Channel 1's own load then works end to end, gates included. Had the
+    // preempt been refused, allow_any here would still name channel 0 and the
+    // load would be rejected.
+    CHECK(gates_for(s, 1u).allow_any, 248);
+    CHECK(ams_merger::acquire(s, 1u), 249);
+    CHECK(is(s, ams_merger::stage_loaded, 1u), 250);
+
+    // And channel 1 can be retracted afterwards, which is what a merger left
+    // naming channel 0 would have made impossible.
+    CHECK(gates_for(s, 1u).allow_stop, 251);
+    CHECK(ams_merger::release(s, 1u) == ams_merger::release_done, 252);
+
+    return 0;
 }
 
 // Runout, an overnight pause, and the retract in the morning.
@@ -412,7 +479,8 @@ int main(void)
     if ((rc = test_out_of_range_inputs()) != 0) return rc;
     if ((rc = test_boot_restore()) != 0) return rc;
     if ((rc = test_runout_sequence()) != 0) return rc;
-    if ((rc = test_send_out_does_not_free_a_held_tail()) != 0) return rc;
+    if ((rc = test_send_out_preempts_a_held_tail()) != 0) return rc;
+    if ((rc = test_runout_then_printer_moves_to_another_channel()) != 0) return rc;
     if ((rc = test_runout_pause_and_morning_retract()) != 0) return rc;
     if ((rc = test_the_symptom_is_a_lost_merger()) != 0) return rc;
     if ((rc = test_stop_on_use_in_tail_does_not_release()) != 0) return rc;
