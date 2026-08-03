@@ -36,7 +36,18 @@ v1で保証する範囲は次の通り。
 3. management UARTの混雑・破損・切断がprinter busやmotor制御をblockingしない。
 4. Bambuddyはsnapshotとeventから状態を再構成し、telemetry品質と機械異常を区別できる。
 5. wire layout、enum、version negotiationをv1 ABIとして固定する。
-6. v1時点のremote write操作はLED overrideに限定し、機械操作は次期仕様へ送る。
+6. v1時点のremote write操作はLED overrideと`REQUEST_SOFT_RESET`に限定する。
+
+   当初この項は「LED overrideに限定し、機械操作は次期仕様へ送る」だった。soft resetは
+   その線を越えるが、線を引いた目的——機械を動かす操作を勢いで足さないこと——は
+   満たした上で越えている。idle限定、全channelのPWMゼロ要求、printer bus idle、
+   flash write中でないこと、TTL、operation_idの重複拒否を通過した場合のみ受理する
+   S2 recovery operationとして設計され、仕様は issue #3 に、拒否理由の一覧は
+   `BMCU_MANAGEMENT_INTERFACE.md` §7.2 にある。
+
+   線そのものは残す。次にremote writeを足すときは、この項を書き換えるのではなく、
+   同じ水準の安全条件と拒否理由を設計してからここに追記すること。「前例がある」は
+   理由にならない。
 7. 1台のPico 2 Wへ最大2台のBMCUを独立UARTで接続し、状態、履歴、command routing、
    failureをlink単位で分離できる。
 
@@ -255,8 +266,16 @@ Exit criteria:
   `bmcu_boot_session`を増やす。Bambuddy dedup keyは5要素すべてを使う。
 - monotonic時刻をUART frame decode時にcaptureする。wall clockは任意の参考値だけとし、
   Bambuddyの到着時刻を正とする。
-- PicoからBambuddyへの認証済みoutbound WebSocketを実装する。WebSocket不可時だけ
-  batched NDJSON POSTを使い、inbound Pico APIをproduction transportに使わない。
+- ~~PicoからBambuddyへの認証済みoutbound WebSocketを実装する。WebSocket不可時だけ
+  batched NDJSON POSTを使い、inbound Pico APIをproduction transportに使わない。~~
+
+  **廃止。** production transportは`BMB1`永続binary TCPに置き換わった。JSON
+  WebSocketもHTTPS NDJSON fallbackも実装から削除済みで（`pico/bambuddy_ws.py`、
+  `bambuddy_https.py`、`bambuddy_session.py`はいずれも存在しない）、現行の実装は
+  `pico/bambuddy_binary_tcp.py`。framing、session確立、ACK、replayの正は
+  [`BMCU_BINARY_TRANSPORT_V1.md`](BMCU_BINARY_TRANSPORT_V1.md)で、この計画書は
+  それを再掲しない。「inbound Pico APIをproduction transportに使わない」方針だけは
+  変わっていない。
 - 固定長・固定上限の30秒FIFOを追加する。切断中はoldest-firstで再送し、Bambuddy ACKを
   受けるまで破棄しない。overflow時は`transport_drop`と累積`dropped_count`を送る。
 - steady stateのSTATUSを意味的変化時および最大1 Hz heartbeatに抑え、通常2 msg/s/link、
