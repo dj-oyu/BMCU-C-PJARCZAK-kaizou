@@ -109,6 +109,32 @@ All firmware variants are generated there together with **.txt guides** that exp
 
 Start by selecting the correct printer mode folder first (standard(A1) or high_force_load(P1S)), then choose AUTOLOAD / RGB / slots as usual.
 
+The .txt guides are also in this repository if you would rather read them before downloading:
+[mode](./which_to_choose_mode.txt), [autoload](./which_to_choose_autoload.txt),
+[filament RGB](./which_to_choose_filament_rgb.txt), [slots](./which_to_choose_slots.txt).
+[`docs/FIRMWARE_BUILD_MATRIX.md`](./docs/FIRMWARE_BUILD_MATRIX.md) documents how the variants are
+built, if you want to build your own.
+
+---
+
+## What this fork adds
+
+This is a fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK).
+Everything above is upstream's, and the firmware works standalone exactly as upstream's does — none
+of the following is required to use the BMCU.
+
+What is added here is monitoring. A Raspberry Pi Pico 2 W sits on the BMCU's management UART, reads
+loader state, and serves it locally; from there it can optionally forward to a self-hosted server.
+
+| | |
+| --- | --- |
+| [`docs/PICO_USER_GUIDE.md`](./docs/PICO_USER_GUIDE.md) | Setting up the Pico bridge — wiring, flashing, configuration, the local web page. **Japanese only** at present. |
+| [`pico/README.md`](./pico/README.md) | The bridge's architecture and deployment, for developers. |
+| [`web/README.md`](./web/README.md) | Building the monitor UI from its TypeScript sources. |
+| [`docs/BMCU_LINK_PROTOCOL_ALPHA3.md`](./docs/BMCU_LINK_PROTOCOL_ALPHA3.md) | The BMCU↔Pico wire protocol, if you want to write your own client. |
+
+If you only want working firmware, ignore all of it and use the Releases above.
+
 ## Flashing
 
 To flash any version of the BMCU (USB or TTL) on:
@@ -138,6 +164,14 @@ The flasher also supports **Android**, so you can even flash the BMCU directly f
 IMPORTANT:
 - Do **NOT** flash the BMCU while it is connected to the printer.
 - Do **NOT** connect or disconnect the BMCU while the printer is powered on (risk of damaging the BMCU and/or the printer mainboard).
+
+Two failure modes worth knowing before you start, both seen in practice on this fork:
+
+- **Flashing over a TTL adapter at 1 Mbaud can fail part-way through** and leave a board that
+  looks bricked — it powers up, but nothing responds. It usually is not bricked; drop the baud
+  rate and flash again. Prefer USB when you have the choice.
+- **A full chip erase wipes stored calibration.** After one you must re-run calibration before
+  the loader will behave correctly. Erase fully only when you actually intend to.
 
 ---
 
