@@ -1,3 +1,12 @@
+> **Archived.** This was the Pico-side implementation plan for the BMB1 binary
+> transport migration. As of 2026-08-03 every phase's artifact is in the tree
+> (`pico/bmcu_binary_constants.py`, `bmcu_binary.py`, `byte_ring.py`,
+> `bambuddy_binary_tcp.py`, `bmcu_journal.py`, `runtime_log.py`,
+> `device_metrics.py`, `web_ui.py`, `binary_api.py`) and the transports it
+> planned to remove (`bambuddy_ws.py`, `bambuddy_https.py`,
+> `bambuddy_session.py`) are gone. Superseded by the shipped code itself and
+> `docs/BMCU_BINARY_TRANSPORT_V1.md`. Kept for historical rationale only.
+
 # Pico implementation plan: BMCU Binary Transport v1
 
 Status: implementation-ready  

@@ -1,3 +1,10 @@
+> **Archived.** This is a frozen snapshot of software-validation results from
+> 2026-07-19. Its figures (RAM 67.8%, flash 85.1%, 23 tests) are already stale
+> and it is not maintained. Superseded by whatever current validation evidence
+> is tracked in `docs/BMCU_LINK_V1_IMPLEMENTATION_PLAN.md`; hardware run
+> results are now posted as GitHub issue comments rather than a template file.
+> Kept for historical reference only.
+
 # BMCU Link software validation — 2026-07-19
 
 ## Implemented stages
@@ -42,6 +49,6 @@ all Phase 0–7 promotion gates have evidence.
 
 ## Hardware execution record
 
-Use [BMCU_LINK_TEST_REPORT_TEMPLATE.md](BMCU_LINK_TEST_REPORT_TEMPLATE.md) for each
-single- and dual-link run. Attach wiring, firmware hash, build parameters, latency,
-drop counters, and endurance observations.
+Hardware single- and dual-link run results (wiring, firmware hash, build
+parameters, latency, drop counters, endurance observations) are posted as
+GitHub issue comments rather than a filled-in template file.
