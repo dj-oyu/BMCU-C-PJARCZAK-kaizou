@@ -446,6 +446,8 @@ Always journal:
 - decoder CRC/frame errors;
 - transport drops;
 - slot, motion, inserted-mask, and online-mask transitions;
+- per-channel fault-latch and switch-state (`ks`) transitions, which the
+  STATUS channel-flags byte carries as a level rather than as an event;
 - CONTROL and CONTROL_RESULT.
 - Pico warning and error log records.
 

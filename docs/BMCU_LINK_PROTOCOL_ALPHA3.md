@@ -125,7 +125,7 @@ baseline with `GET_FULL_STATUS`.
 HELLO is emitted once after BMCU Link initialization. Reconnection is driven by Pico `PING` and status
 requests rather than periodic HELLO traffic.
 
-### 5.2 STATUS — 27 bytes
+### 5.2 STATUS — 31 bytes
 
 | Offset | Type | Field |
 | ---: | --- | --- |
@@ -142,6 +142,25 @@ requests rather than periodic HELLO traffic.
 | 23 | u16 | pressure |
 | 25 | u8 | LED override mode |
 | 26 | u8 | control-error flag |
+| 27 | u8[4] | per-channel fault/switch flags |
+
+Each channel-flags byte is raw state, packed but not interpreted:
+
+| Bits | Field | Meaning |
+| ---: | --- | --- |
+| 0-1 | `ks` | switch reading: `0` none, `1` both, `2` external only, `3` internal only. Builds without the DM dual microswitch only ever report `0` or `1`. |
+| 2 | `low` | pull fell below 40% during pressure control on use; the motor is latched off |
+| 3 | `jam` | the jam variant of `low`, which also raises HMS `0xF06F` |
+| 4 | `dm_fail` | DM autoload stage 1 or 2 failed; clears only on a full withdrawal (`ks == 0`) |
+| 5-7 | reserved | zero |
+
+`ks` is what `online mask` collapses into one bit: an online channel is `ks` in `{1, 2, 3}`, and those three
+differ in whether autoload will run. The three latches are three different reasons a channel LED shows red,
+with three different recoveries, so a host must read them separately rather than infer a single fault.
+
+Roughly 21 of the 32 combinations are reachable. The unreachable ones are deliberate slack; decoders must
+not assume any relationship between the bits. In particular `jam` implies `low` today, but that is a
+property of the current firmware and not part of this contract.
 
 `GET_STATUS` has an empty payload and returns one STATUS with the request sequence. Unsolicited STATUS is
 event-driven and reports semantic state changes.
@@ -279,6 +298,11 @@ Controller motion values are `0=send`, `1=redetect`, `2=pull`, `3=stop`, `4=befo
 `5=stop-on-use`, `6=pressure-control-on-use`, `7=pressure-control-idle`, and `8=before-pull-back`.
 This is a sampled controller phase, not proof of physical movement. Consumers must evaluate it together
 with motor PWM, position delta, sensor validity, and motion fault.
+
+Channel flag bits 8-12 are the STATUS per-channel flags byte for this channel shifted left by 8, in the
+same bit order: bits 8-9 `ks`, bit 10 `low`, bit 11 `jam`, bit 12 `dm_fail`. Bits 13-15 are reserved and
+zero. The high byte is the only space a channel record has left, and carrying the byte whole means one
+decode table serves both STATUS and the snapshot.
 
 Channel flag bit 4 is set when `motion fault enum` is nonzero. Defined fault values are:
 
