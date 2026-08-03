@@ -7,6 +7,7 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
+#include "ams_loaded_latch_policy.h"
 
 static inline uint8_t bmcu_pressure_class(uint16_t pressure)
 {
@@ -303,6 +304,41 @@ static int32_t  dm_auto_last_counts[4]   = {0,0,0,0};
 
 static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
 #endif
+
+// How long the loaded channel's online key must read empty, continuously,
+// before Motion_control_run drops the loaded latch. See
+// src/ams_loaded_latch_policy.h for why the latch needs protecting at all.
+//
+// On the sampling rate this debounce is measured against: MC_PULL_ONLINE_read
+// runs once per Motion_control_run, which is once per main-loop pass, but the
+// key signal underneath it is much slower than the loop. ADCCLK is PCLK2/8 =
+// 18 MHz, a conversion is 71.5 + 12.5 = 84 cycles, and the scan is 8 channels,
+// so one scan takes 37.3 us; the DMA half-buffer holds 32 scans and therefore
+// completes every ~1.2 ms, and ADC_DMA_get_value hands back a boxcar over the
+// last four of those (~4.8 ms). Passes falling inside one of those windows read
+// a byte-identical key. So the smallest transient that can reach this code is
+// already several milliseconds wide, and the window below is resolved to about
+// 1.2 ms regardless of how fast the loop happens to run.
+//
+// 1500 ms is AUTO_UNLOAD_EMPTY_MS, which this firmware already uses to answer
+// the same physical question off the same switch: how long must the online key
+// read empty before the filament is really out of the channel. Reusing that
+// number keeps one definition of "really gone" rather than introducing a second
+// one that would drift from it. It is named separately because the two uses are
+// independent -- auto-unload may retune without dragging the latch with it.
+//
+// Erring long is the cheap direction here, which is why a debounce this coarse
+// is safe. Nothing in the motor path reads the latch: it is consumed only by
+// the accept gate in bambu_bus_ams set_motion, by the reply-side loaded flag,
+// and by bit 5 of the channel flags. A printer unload arriving mid-window is
+// helped rather than hurt, because before_pull_back and stop_on_use are gated
+// on the latch still naming this channel and their branches then clear it
+// themselves, immediately and outside this debounce. A load of a different
+// channel opens with send_out, which is accepted unconditionally and also
+// clears the latch. Erring short is what costs: it is the failure this whole
+// change exists to close.
+static constexpr uint32_t LOADED_LATCH_DROP_MS = 1500u;
+static ams_loaded_latch::State g_loaded_latch_drop = { ams_loaded_latch::kNoChannel, 0u };
 
 static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
 static constexpr float    AUTO_UNLOAD_NEUTRAL_LO_PCT = 45.0f;
@@ -3070,7 +3106,10 @@ void Motion_control_run(int error)
     MC_PULL_ONLINE_read(now_ticks);
 
     const uint8_t loaded_ch = ams_state_get_loaded();
-    if ((loaded_ch < kChCount) && (MC_ONLINE_key_stu[loaded_ch] == 0u))
+    if (ams_loaded_latch::poll(g_loaded_latch_drop, loaded_ch,
+                               (loaded_ch < kChCount) &&
+                                   (MC_ONLINE_key_stu[loaded_ch] == 0u),
+                               now_ms, LOADED_LATCH_DROP_MS))
         ams_state_set_unloaded(loaded_ch);
 
     auto &A = ams[motion_control_ams_num];

@@ -130,6 +130,16 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
     g_fil_dirty |= (uint8_t)(1u << filament_idx);
 }
 
+// The second guard reads like a refusal that could silently lose a load, but it
+// cannot reach that case. Both callers -- bambu_bus_ams.cpp on before_on_use and
+// on on_use -- sit behind `if (!allow_any) return true;`, and allow_any is
+// (loaded == 0xFF || loaded == ch) sampled earlier in the same call with nothing
+// in between that writes the latch. So on arrival here the latch is either
+// unset or already naming this very channel, and the guard only ever suppresses
+// a redundant re-latch of a channel that is already latched. It stays as
+// defence for a caller that does not yet exist; if one is ever added, a latch
+// held by a different channel is a genuine conflict and would deserve a
+// MOTION_FAULT_* report rather than this silence.
 void ams_state_set_loaded(uint8_t filament_ch)
 {
     if (filament_ch >= 4u) return;
