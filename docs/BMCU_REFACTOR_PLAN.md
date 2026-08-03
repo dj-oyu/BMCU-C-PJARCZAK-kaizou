@@ -130,8 +130,24 @@ windows — comfortably above noise, far below human-scale removal.
 
 `ahub_bus.cpp` is a second inherited bus personality sharing `ams[]` and
 writing `bus_now_ams_num` (`:183`), carrying exactly one instrumentation call
-(`:341`). Whether AHUB mode is in use is unanswered (OQ-A); the plan does not
-wait on the answer:
+(`:341`). Whether any *user* runs AHUB is still unanswered (OQ-A), but how it is
+selected is now settled from the code, and it is not what S4a assumed: **AHUB is
+not a compile-time personality.** `main.cpp:355` calls `ahubus_run()`
+unconditionally on every main-loop pass, in every shipped configuration, and
+`bus_host_device_type` flips to `host_device_type_ahub` at runtime when an AHUB
+heartbeat arrives (`:373-374`).
+
+Two consequences. S4a is more expensive than "empty one arm of a switch" — the
+flag has to be introduced, because there is no arm to empty today. And S4a buys
+CPU as well as flash: both `ahubus_run()` and `bambubus_run()` open with a
+`time_ticks32()` read and an **interrupt-disabled critical section** to snapshot
+the same three receive fields (`ahub_bus.cpp:357-374`,
+`bambu_bus_ams.cpp:1247-1252`), so every pass pays two of them and one is for a
+personality that is probably idle. On a device answering a 1.25 Mbps bus, with
+the flash-write stall already an unknown quantity (R4), interrupt-disabled time
+is worth reclaiming where it is known.
+
+The plan does not wait on the answer:
 
 - **S4a — if dead:** compile it out behind a build flag (the build matrix
   already varies features; `FIRMWARE_BUILD_MATRIX.md`). This is the only
