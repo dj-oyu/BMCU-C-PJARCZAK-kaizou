@@ -471,6 +471,72 @@ static int test_stop_on_use_in_tail_does_not_release(void)
     return 0;
 }
 
+// release_session: the session-idle edge, alongside release and preempt.
+//
+// The distinction that matters is the named form. release(s, ch) honours a
+// named release and takes TAIL with it -- that is the commanded retract, and it
+// must. release_session(s, ch) refuses the same call, because a printer going
+// quiet is not a printer pulling filament out. Before this edge existed, :435
+// spelled the first and meant the second, and was saved only by an unrelated
+// use_flag guard upstream.
+static int test_release_session_refuses_tail(void)
+{
+    State s;
+
+    // Named, from TAIL(2): refused, and the merger is untouched.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    ams_merger::to_tail(s);
+    CHECK(ams_merger::release_session(s, 2u) == ams_merger::release_refused_tail, 241);
+    CHECK(is(s, ams_merger::stage_tail, 2u), 242);
+
+    // The same call through release() does let go. This pair is the whole
+    // reason the two functions exist separately.
+    CHECK(ams_merger::release(s, 2u) == ams_merger::release_done, 243);
+    CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 244);
+
+    // Wildcard, from TAIL(2): refused as well. Unchanged behaviour -- this is
+    // what release(s, 0xFF) did, and :461 now spells it here instead.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    ams_merger::to_tail(s);
+    CHECK(ams_merger::release_session(s, kNoChannel) == ams_merger::release_refused_tail, 245);
+    CHECK(is(s, ams_merger::stage_tail, 2u), 246);
+
+    // From LOADED, both forms release: an idle session with the strand still at
+    // the key is the ordinary end of a print, and row 9 keeps it.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    CHECK(ams_merger::release_session(s, 2u) == ams_merger::release_done, 247);
+    CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 248);
+
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    CHECK(ams_merger::release_session(s, kNoChannel) == ams_merger::release_done, 249);
+    CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 250);
+
+    // A named session release for a channel that does not own the merger is
+    // ignored, so a stale now_filament_num cannot release someone else's.
+    ams_merger::reset(s);
+    ams_merger::acquire(s, 2u);
+    CHECK(ams_merger::release_session(s, 0u) == ams_merger::release_none, 251);
+    CHECK(is(s, ams_merger::stage_loaded, 2u), 252);
+
+    // ... including when the owner is in TAIL: not-the-owner is answered before
+    // the TAIL refusal, exactly as release() orders them.
+    ams_merger::to_tail(s);
+    CHECK(ams_merger::release_session(s, 0u) == ams_merger::release_none, 253);
+    CHECK(is(s, ams_merger::stage_tail, 2u), 254);
+
+    // Nothing held: no change, no error, either form.
+    ams_merger::reset(s);
+    CHECK(ams_merger::release_session(s, 2u) == ams_merger::release_none, 255);
+    CHECK(ams_merger::release_session(s, kNoChannel) == ams_merger::release_none, 256);
+    CHECK(is(s, ams_merger::stage_unloaded, kNoChannel), 257);
+
+    return 0;
+}
+
 int main(void)
 {
     int rc = 0;
@@ -484,5 +550,6 @@ int main(void)
     if ((rc = test_runout_pause_and_morning_retract()) != 0) return rc;
     if ((rc = test_the_symptom_is_a_lost_merger()) != 0) return rc;
     if ((rc = test_stop_on_use_in_tail_does_not_release()) != 0) return rc;
+    if ((rc = test_release_session_refuses_tail()) != 0) return rc;
     return 0;
 }

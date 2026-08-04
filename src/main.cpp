@@ -156,9 +156,11 @@ void ams_state_set_loaded(uint8_t filament_ch)
 static uint16_t g_tail_refused_count = 0u;
 static uint8_t  g_tail_refused_reported = 0u;
 
-void ams_state_set_unloaded(uint8_t filament_ch)
+// Shared by both release intents: they differ in which policy edge they take,
+// never in what is done with the answer.
+static void ams_state_apply_release(uint8_t result)
 {
-    switch (ams_merger::release(g_merger, filament_ch))
+    switch (result)
     {
     case ams_merger::release_done:
         g_state_dirty = 1u;
@@ -177,6 +179,16 @@ void ams_state_set_unloaded(uint8_t filament_ch)
     default:
         break;
     }
+}
+
+void ams_state_set_unloaded(uint8_t filament_ch)
+{
+    ams_state_apply_release(ams_merger::release(g_merger, filament_ch));
+}
+
+void ams_state_session_idle(uint8_t filament_ch)
+{
+    ams_state_apply_release(ams_merger::release_session(g_merger, filament_ch));
 }
 
 // LOADED(ch) -> TAIL(ch): the owning channel's key has read empty for the whole

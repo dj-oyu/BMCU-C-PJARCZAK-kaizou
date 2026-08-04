@@ -158,27 +158,22 @@ enum ReleaseResult : uint8_t
     release_preempted_tail = 3u // a claiming channel took the merger off a TAIL
 };
 
-// A printer-commanded release naming a channel, or -- with `ch >= kChannels` --
-// ending the session outright.
+// A printer-commanded retract: "the printer is pulling this filament out".
+// before_pull_back at bambu_bus_ams.cpp:398 and the read_num 0xFF unload at
+// :428, both passing ams_ptr->now_filament_num.
 //
-// A session release frees LOADED but not TAIL. TAIL has to be named.
+// This takes TAIL, and must: it is TAIL's main exit while design row 3 stays
+// deferred, since the commanded retract is precisely the event TAIL was being
+// held for.
 //
-// This is the difference between fixing the reported symptom and not. The idle
-// reset at bambu_bus_ams.cpp:458 passes 0xFF, and idle frames keep arriving
-// while a printer sits paused. On a runout the sequence is: the tail clears the
-// switch, TAIL is entered, the printer pauses and waits for a human, and idle
-// frames flow the whole time. A session release that freed TAIL would drop the
-// merger during that pause, and the retract prelude in the morning would be
-// refused for want of allow_stop -- which is the original complaint, arriving
-// by a new route. It is also exactly why TAIL has no timeout: an unbounded
-// pause is expected, so nothing may quietly expire during one.
+// The `ch >= kChannels` arm below is the session release, and it no longer has
+// a caller -- both idle sites moved to release_session(). It is kept because it
+// is the safe answer for a caller that names nobody, and because removing it
+// would silently turn a future wildcard into "release whoever holds it".
 //
-// The commanded exits are unaffected because they all name a channel:
-// before_pull_back at :395, the read_num 0xFF unload at :425, and the
-// statu_flags 0x01 path at :431 all pass ams_ptr->now_filament_num.
-//
-// The other caller that passes 0xFF is send_out at :275, and it means something
-// else entirely -- see preempt() below. It does not come through here.
+// A release naming a channel that does not own the merger is ignored rather
+// than treated as an error: a stale now_filament_num must never be able to
+// release someone else's merger.
 inline uint8_t release(State& s, uint8_t ch)
 {
     if (is_free(s)) return release_none;
@@ -191,6 +186,46 @@ inline uint8_t release(State& s, uint8_t ch)
     }
 
     if (s.owner != ch) return release_none;
+
+    reset(s);
+    return release_done;
+}
+
+// The printer's session went quiet: the 0xFF/statu-0x01 idle frame at
+// bambu_bus_ams.cpp:435 and the full idle reset at :461.
+//
+// The opposite intent to release() above, and the reason it is a separate
+// function rather than a flag. Both spell "let go of this channel" and both may
+// name the same channel, so release()'s owner check cannot tell them apart --
+// exactly the collision that preempt() was split out of, one layer down.
+// Nothing is being pulled here. The conversation merely stopped, and a strand
+// lying between the online key and the extruder is still lying there. Design
+// row 10: a session going idle does not clear the path.
+//
+// Naming a channel or not makes no difference to the answer, unlike release().
+// Both idle sites mean the same thing; :435 happens to know which channel the
+// session was using and :461 does not. The owner check is kept for the named
+// form for the same reason as above -- a stale now_filament_num must not
+// release someone else's merger -- and not because the two forms differ in
+// intent.
+//
+// Why this is a separate function and not the `use_flag != 0x04` guard that
+// stood here before. That guard did hold: use_flag is 0x04 for exactly as long
+// as the merger is held, because both acquire sites set it in the same branch,
+// so :435 was never reached with a TAIL. But it held by a coincidence of two
+// variables that nothing coupled on purpose and no comment mentioned, and a
+// one-line change at either end broke it -- verified by mutation in
+// ci/bambu_bus_conversation_test.cpp, which keeps both mutations documented as
+// the standing proof that this no longer matters. The guard stays where it is;
+// it is doing something else for the non-merger state. It is simply no longer
+// what protects TAIL.
+inline uint8_t release_session(State& s, uint8_t ch)
+{
+    if (is_free(s)) return release_none;
+
+    if (ch < kChannels && s.owner != ch) return release_none;
+
+    if (s.tail) return release_refused_tail;
 
     reset(s);
     return release_done;
