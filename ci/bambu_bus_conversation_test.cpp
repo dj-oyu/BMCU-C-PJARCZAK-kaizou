@@ -131,7 +131,7 @@ int test_idle_frames_do_not_take_tail(void)
     CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 104);
     CHECK(host_bus::merger_owner() == 1u, 105);
 
-    // ... and no release was ever offered to the policy. The catch-all at
+    // ... and no session-idle release was ever offered to the policy. The catch-all at
     // bambu_bus_ams.cpp:440 returns early whenever the channel named by
     // now_filament_num is in the on_use family, and owning the merger implies
     // exactly that: the two acquire sites (:308, :378) are inside the
@@ -149,7 +149,7 @@ int test_idle_frames_do_not_take_tail(void)
     // "the wildcard never met a TAIL" and "the wildcard never ran" pass the
     // assertion above identically, and only one of them is a statement about
     // the routing.
-    CHECK(host_bus::wildcard_release_calls == 0, 112);
+    CHECK(host_bus::session_idle_calls == 0, 112);
 
     // The morning. The retract prelude is gated on allow_stop, which is true in
     // TAIL because TAIL is ownership.
@@ -180,55 +180,81 @@ int test_idle_frames_do_not_take_tail(void)
 // commanded retract at :394, so the question is entirely what use_flag happens
 // to be holding when the frame lands.
 //
-// It is 0x04, and it is 0x04 for a structural reason rather than a lucky one:
-// the merger is acquired at exactly two sites, :308 in before_on_use and :378
-// in on_use, and both set use_flag = 0x04 in the same branch a few lines above.
-// Every path that then moves use_flag off 0x04 -- the 0xFF/0x03 retract at
-// :428, send_out's preempt at :279, the accept-path channel switch at :259 --
-// releases the merger in the same call. So "the merger is owned" implies
-// "use_flag == 0x04" implies this branch is inert, and the implication is
-// checked frame-by-frame over forty thousand frames in
-// merger_ownership_invariant_walk below rather than argued here.
+// It used to be closed by luck. `use_flag` is 0x04 whenever the merger is held
+// -- both acquire sites, :308 in before_on_use and :378 in on_use, set it in
+// the same branch a few lines above -- so the guard was always shut and the
+// release was never reached. That held, but it held by a coincidence of two
+// variables nothing coupled on purpose and no comment mentioned. One line
+// elsewhere broke it.
 //
-// Which makes this a second door that is closed, not a live hole. But it is
-// closed by a coincidence of two unrelated state variables, with no comment at
-// either end saying so, and it would open the moment any branch set use_flag to
-// something other than 0x04 while leaving the merger held. That is a one-line
-// change away and nothing in src/ would notice. Hence this vector.
+// It is now closed by construction: :435 calls ams_state_session_idle, a third
+// funnel intent alongside set_unloaded and preempt, and the policy refuses a
+// TAIL on that edge whether or not the call names the owning channel. The
+// use_flag guard is untouched and still does whatever it does for the
+// non-merger state; it is simply no longer what protects TAIL.
+//
+// THE STANDING PROOF. "By construction" is not a claim a happy-path assertion
+// can carry, so it is stated as a mutation matrix instead. Apply any of these
+// to a scratch copy of src/ and rerun this file; the first three must stay
+// green and the fourth must fail.
+//
+//   1. SURVIVABLE. In bambu_bus_ams.cpp:435, drop `filament_use_flag != 0x04`
+//      from the guard, so every idle frame reaches the funnel with the merger
+//      held. Before ams_state_session_idle this failed at 125.
+//   2. SURVIVABLE. In bambu_bus_ams.cpp:435, drop `ch < 4` instead.
+//   3. SURVIVABLE. In the on_use branch, set `filament_use_flag = 0x02` at the
+//      acquire, breaking the use_flag coupling outright. Before this change it
+//      failed at 123 here and at 910 in the walk.
+//   4. MUST FAIL. Mutation 1 together with deleting `if (s.tail) return
+//      release_refused_tail;` from ams_merger::release_session. Fails at 131
+//      here and 912 in the walk, the latter reporting 300 TAILs cleared.
+//
+// Assertions 123 and 910 are deliberately gone. Both asserted the coincidence
+// rather than the requirement, so both would have failed mutation 3 -- which is
+// precisely the mutation that is now supposed to be harmless. What replaced
+// them is tail_cleared_by_idle: TAILs actually lost through the idle path,
+// which is zero under 1, 2 and 3 and non-zero under 4. That is the difference
+// between a property that holds and a property that is enforced.
 int test_statu01_idle_frame_does_not_take_tail(void)
 {
     host_bus::reset();
     load_channel(1u);
 
     // A sensor-entered TAIL: the runout case. Nothing here went through the
-    // commanded retract at :394, which is what makes this branch's guard the
-    // only thing in the way.
+    // commanded retract at :398, which is what used to make the guard at :435
+    // the only thing in the way.
     ams_state_set_tail();
     CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 121);
     CHECK(host_bus::merger_owner() == 1u, 122);
-
-    // The precondition that decides everything, pinned. If a future change
-    // leaves use_flag at anything but 0x04 here, this fails first and names the
-    // reason, rather than the failure surfacing as a refused retract three
-    // assertions later.
-    CHECK(ams[0].filament_use_flag == 0x04u, 123);
     CHECK(ams[0].now_filament_num == 1u, 124);
 
-    // The frame. Repeated, because a paused printer sends it over and over.
+    // The guarantee itself, asserted directly at the funnel rather than through
+    // the routing. Today's routing does not deliver this call while a TAIL is
+    // held -- the use_flag guard is still upstream -- so without this the
+    // structural property would go untested and only the mutations would show
+    // it. Naming the owning channel is the hard case: it is the one release()
+    // would have honoured.
+    ams_state_session_idle(1u);
+    CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 131);
+    CHECK(host_bus::merger_owner() == 1u, 132);
+    CHECK(host_bus::session_idle_refused_tail == 1, 133);
+    CHECK(host_bus::tail_cleared_by_idle == 0, 134);
+
+    // The frames. Repeated, because a paused printer sends them over and over.
     for (int i = 0; i < 200; ++i)
     {
         host_bus::poll_motion_short(kSelf, 0x01u, kNoChannel, 0x00u);
         host_clock_advance_ms(20u);
     }
 
-    // The guard held: not one call reached the funnel.
-    CHECK(host_bus::named_release_calls == 0, 125);
-    CHECK(host_bus::merger_events_of(host_bus::kMergerReleased) == 0, 126);
+    CHECK(host_bus::tail_cleared_by_idle == 0, 126);
     CHECK(host_bus::merger_stage() == ams_merger::stage_tail, 127);
     CHECK(host_bus::merger_owner() == 1u, 128);
 
     // And the morning's retract prelude is still accepted, which is the
-    // requirement all of this exists to protect.
+    // requirement all of this exists to protect. It goes through
+    // ams_state_set_unloaded -- the commanded-retract intent -- which does take
+    // TAIL, because that is what a retract is for.
     host_bus::poll_motion_short(kSelf, kStatuBeforePullBack, 1u, kFlagBeforePullBack);
     CHECK(motion_of(1u) == _filament_motion::before_pull_back, 129);
     CHECK(host_bus::merger_stage() == ams_merger::stage_unloaded, 130);
@@ -659,39 +685,25 @@ int test_merger_ownership_invariant_walk(void)
             return 902;
         }
 
-        // The second implication, and the one that closes the 0xFF/0x01 door at
-        // :435: a held merger implies use_flag == 0x04, which is exactly the
-        // value that branch refuses to act on. Nothing in src/ states this
-        // coupling; it falls out of both acquire sites setting use_flag in the
-        // same branch, and of every path that moves it off 0x04 releasing in the
-        // same call. If that ever stops being true this fails, and the release
-        // at :435 becomes reachable against a sensor-entered TAIL -- the
-        // overnight scenario, through a door bd2e2e1's owner check does not
-        // cover, because this call names a real channel.
-        if (ams[0].filament_use_flag != 0x04u)
-        {
-            printf("  step %d: merger owned by %u with use_flag 0x%02X\n",
-                   step, owner, ams[0].filament_use_flag);
-            return 910;
-        }
+        // There used to be a third assertion here: that a held merger implies
+        // use_flag == 0x04, which was what kept the 0xFF/0x01 branch at :435
+        // away from a TAIL. It is deliberately gone. That coupling was real but
+        // incidental, and asserting it would mean this walk failed the moment
+        // TAIL protection stopped depending on it -- which is exactly what
+        // ams_state_session_idle was introduced to achieve. The requirement it
+        // stood in for is now tail_cleared_by_idle, checked below.
     }
 
-    // The consequence: across the whole walk the wildcard release at :461 was
-    // never once offered to the policy while a TAIL was held. If this ever
-    // stops being true, the refusal path in ams_merger::release has become
-    // load-bearing at the routing level and the first regression vector above
-    // needs rewriting around the sequence that got here.
-    if (host_bus::merger_events_of(host_bus::kMergerRefusedTail) != 0)
-    {
-        printf("  wildcard release reached a TAIL %d time(s)\n",
-               host_bus::merger_events_of(host_bus::kMergerRefusedTail));
-        return 903;
-    }
+    // Note what is deliberately NOT asserted here any more: that the idle path
+    // never reaches a TAIL. It used to be, back when reaching one meant the
+    // merger was about to be lost. Now reaching one is the designed case and
+    // the policy refuses it, so a refusal count is a measurement rather than a
+    // failure -- and asserting it at zero would fail exactly the mutations that
+    // are supposed to be survivable. The requirement moved to
+    // tail_cleared_by_idle below.
 
-    // The above is only a statement about the routing if the wildcard ran at
-    // all. It runs constantly -- the catch-all at :440 is most of an idle bus --
-    // and every one of those calls found the merger already free.
-    CHECK(host_bus::wildcard_release_calls > 1000, 908);
+    // Non-vacuity for the commanded-retract intent, which is the one that is
+    // still allowed to take a TAIL.
     CHECK(host_bus::named_release_calls > 100, 909);
 
     // Likewise for the 0xFF/0x01 door: the branch was entered with the merger
@@ -703,25 +715,25 @@ int test_merger_ownership_invariant_walk(void)
         return 911;
     }
 
-    // The sharper result, and the one worth carrying into the design document.
-    // Rows 9 and 10 of section 5 both name `0xFF/0x01` as an input: row 9 says
-    // it releases a LOADED merger (the stated recovery path for a printer that
-    // power-cycled or aborted), row 10 says it must leave a TAIL alone. The
-    // shipped branch can do neither. Its guard passes only when use_flag is not
-    // 0x04, and use_flag is 0x04 for exactly as long as the merger is held --
-    // so on every frame where releasing would mean anything, the guard is shut,
-    // and on every frame where the guard is open, the merger is already free
-    // and ams_state_set_unloaded finds nothing to do.
-    //
-    // Row 10 is therefore satisfied by accident rather than by the state
-    // machine, and row 9 is not implemented at all. Neither is a bug today.
-    // Both are worth knowing before someone edits either end.
-    if (statu01_would_release != 0)
+    // Design row 10, as a number: a session going idle never took the merger
+    // out of a channel's tail. Not once in forty thousand frames -- and, unlike
+    // the use_flag invariant this replaced, not because the idle path failed to
+    // run. It runs constantly and the policy is what refuses it.
+    if (host_bus::tail_cleared_by_idle != 0)
     {
-        printf("  :435 could have released the merger %d time(s)\n",
-               statu01_would_release);
+        printf("  a session-idle release cleared a TAIL %d time(s)\n",
+               host_bus::tail_cleared_by_idle);
         return 912;
     }
+    CHECK(host_bus::session_idle_calls > 1000, 913);
+
+    // Kept as a measurement rather than a requirement: how many frames would
+    // have reached the release under the old arrangement, i.e. how much the
+    // use_flag guard was carrying on its own. Zero today because that guard is
+    // still upstream of the call. If it ever goes non-zero the idle path is
+    // being driven against a held merger for real, which is fine now and was
+    // not before.
+    (void)statu01_would_release;
 
     // Sanity: the walk actually exercised the states it claims to cover, rather
     // than passing by never leaving UNLOADED.

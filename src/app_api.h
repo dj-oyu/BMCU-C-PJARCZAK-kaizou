@@ -29,10 +29,20 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx);
 // ams_state_is_tail as well.
 void ams_state_set_loaded(uint8_t filament_ch);
 
-// A printer-commanded release. `filament_ch >= 4` ends the session, which frees
-// LOADED but leaves TAIL held -- idle frames arrive continuously while a
-// printer is paused mid-runout, and one of them must not take the merger.
+// A printer-commanded retract: before_pull_back, or the read_num 0xFF unload.
+// The printer is pulling this filament out, so this takes TAIL -- it is the
+// state's main exit. `filament_ch >= 4` names nobody and has no caller.
 void ams_state_set_unloaded(uint8_t filament_ch);
+
+// The printer's session went quiet: the 0xFF/statu-0x01 idle frame and the full
+// idle reset. Nothing is being pulled, so this must not take TAIL, whether or
+// not it names the channel that holds it.
+//
+// Distinct from set_unloaded for the same reason preempt is: both name a real
+// channel and both mean "let go", so the state machine cannot tell them apart
+// from the arguments alone. The difference is entirely in what the printer was
+// doing, which only the call site knows. Design row 10.
+void ams_state_session_idle(uint8_t filament_ch);
 
 // `claiming_ch` is beginning a load and is taking the merger, TAIL included.
 // Distinct from set_unloaded(0xFF) because send_out and the idle reset both

@@ -121,6 +121,15 @@ extern int merger_event_totals[kMergerEventKinds];
 extern int wildcard_release_calls;
 extern int named_release_calls;
 
+// The session-idle intent (ams_state_session_idle): calls made, calls that met
+// a TAIL and were refused, and -- the one that must stay zero forever -- calls
+// that actually took a TAIL away. Design row 10 is exactly the last of these
+// being zero, and it is now zero by construction rather than because the
+// use_flag guard upstream happened to be shut.
+extern int session_idle_calls;
+extern int session_idle_refused_tail;
+extern int tail_cleared_by_idle;
+
 extern OwnershipSample ownership_trace[kMaxRecords];
 extern int ownership_trace_count;
 

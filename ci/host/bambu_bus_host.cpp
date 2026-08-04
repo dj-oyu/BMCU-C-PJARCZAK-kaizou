@@ -104,6 +104,9 @@ bambubus_package_type last_type = bambubus_package_type::none;
 int merger_event_totals[kMergerEventKinds] = {};
 int wildcard_release_calls = 0;
 int named_release_calls = 0;
+int session_idle_calls = 0;
+int session_idle_refused_tail = 0;
+int tail_cleared_by_idle = 0;
 
 static void record_merger(uint8_t kind, uint8_t channel, uint32_t count)
 {
@@ -235,6 +238,41 @@ void ams_state_set_unloaded(uint8_t filament_ch)
     }
 }
 
+// The session-idle intent. Mirrors main.cpp, and additionally records whether a
+// TAIL was ever actually lost through this path -- which the policy forbids by
+// construction, so the counter existing at all is what lets a test say the
+// guarantee is structural rather than incidental.
+void ams_state_session_idle(uint8_t filament_ch)
+{
+    ++host_bus::session_idle_calls;
+    const bool was_tail = ams_merger::is_tail(g_merger);
+
+    const uint8_t result = ams_merger::release_session(g_merger, filament_ch);
+
+    switch (result)
+    {
+    case ams_merger::release_done:
+        g_tail_refused_reported = 0u;
+        host_bus::record_merger(host_bus::kMergerReleased, filament_ch, 0u);
+        if (was_tail) ++host_bus::tail_cleared_by_idle;
+        break;
+
+    case ams_merger::release_refused_tail:
+        if (g_tail_refused_count != 0xFFFFu) ++g_tail_refused_count;
+        ++host_bus::session_idle_refused_tail;
+        if (!g_tail_refused_reported)
+        {
+            g_tail_refused_reported = 1u;
+            host_bus::record_merger(host_bus::kMergerRefusedTail, 0xFFu,
+                                    g_tail_refused_count);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
 void ams_state_preempt(uint8_t claiming_ch)
 {
     const uint8_t result = ams_merger::preempt(g_merger);
@@ -310,6 +348,9 @@ void reset(void)
     for (int i = 0; i < kMergerEventKinds; ++i) merger_event_totals[i] = 0;
     wildcard_release_calls = 0;
     named_release_calls = 0;
+    session_idle_calls = 0;
+    session_idle_refused_tail = 0;
+    tail_cleared_by_idle = 0;
     ownership_trace_count = 0;
     service_frame_count = 0;
     status_change_mask = 0u;

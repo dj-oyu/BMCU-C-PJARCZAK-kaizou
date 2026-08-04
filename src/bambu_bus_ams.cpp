@@ -431,8 +431,10 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         else if (statu_flags == 0x01)
         {
             const uint8_t ch = ams_ptr->now_filament_num;
+            // Session idle, not a commanded retract: nothing is being pulled,
+            // so a tail still in the merger stays there. See ams_state_session_idle.
             if (ch < 4 && ams_ptr->filament_use_flag != 0x04)
-                ams_state_set_unloaded(ch);
+                ams_state_session_idle(ch);
         }
         else
         {
@@ -458,7 +460,9 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
             ams_ptr->filament_use_flag = 0x00;
             ams_ptr->pressure = 0xF9C6;
             ams_ptr->now_filament_num = 0xFF;
-            ams_state_set_unloaded(0xFFu);
+            // The same session-idle intent as :435, spelled without a channel
+            // because this path has just forgotten which one it was using.
+            ams_state_session_idle(0xFFu);
         }
     }
 
