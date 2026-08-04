@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -44,6 +45,25 @@ class WebUIBuildTests(unittest.TestCase):
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0,
                          result.stderr or result.stdout)
+
+    def test_staged_page_matches_the_web_sources(self):
+        # tools/build_web_ui.py has had --check since it was written; nothing
+        # called it. So a change under web/src/ could land with the committed
+        # gz still holding the previous page, and every other check here would
+        # pass: they assert the artifact is present, bounded and timestamp-free,
+        # never that it is the current one. That happened -- 47725a4 changed the
+        # STATUS decoder for the 27/31 rollout and left the staged page behind,
+        # so the deployed bridge and the repository disagreed.
+        #
+        # This rebuilds through npm, so it skips where Node is absent rather
+        # than failing. The build script compares decompressed bytes, not gzip
+        # bytes, because deflate output differs between zlib builds.
+        if shutil.which("npm") is None and shutil.which("npm.cmd") is None:
+            self.skipTest("npm is not installed")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "build_web_ui.py"), "--check"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     def test_generated_registry_carries_the_tags_the_ui_reads(self):
         source = GENERATED.read_text(encoding="utf-8")

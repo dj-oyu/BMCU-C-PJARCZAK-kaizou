@@ -68,10 +68,10 @@ standing between an oversized build and code that overlaps and eventually
 corrupts the persisted filament/calibration/loaded-latch records. **The
 build-enforced ceiling for code and constant data is 60 KiB (61440 bytes),
 not the chip's physical 64 KiB**, and the last 4 KiB is off-limits by
-convention, not by hardware protection. The worst configuration measured at the time of writing (DM two-microswitch,
-filament RGB, soft load) reads `text+data = 57420` against
+convention, not by hardware protection. The worst configuration in the release matrix (soft load, autoload on,
+filament RGB, AMS_B, 0.90 m retract) reads `text+data = 57616` against
 `board_upload.maximum_size = 61440` (`.pio/build/fw/firmware.elf`,
-`riscv-wch-elf-size`), leaving 4020 bytes of actual headroom before the postbuild check fails, and 8116 bytes before it would
+`riscv-wch-elf-size`), leaving 3824 bytes of actual headroom before the postbuild check fails, and 7920 bytes before it would
 start colliding with the NVM sector if the check were ever loosened.
 
 RAM: 20480 bytes, agreed by the board JSON and the linker script; nothing in

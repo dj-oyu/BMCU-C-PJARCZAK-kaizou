@@ -15,8 +15,8 @@ and a stale citation is a correction, not a contradiction. The S4 section has
 already had one description corrected this way — AHUB personality selection
 is runtime, not compile-time — which is the distinction working as intended.
 
-This plan is deliberately small. The binding constraints are: **4020 bytes of
-flash headroom** (worst-configuration text+data 57420 against the 61440
+This plan is deliberately small. The binding constraints are: **3824 bytes of
+flash headroom** (worst-configuration text+data 57616 against the 61440
 postbuild ceiling,
 `BMCU_TARGET_HARDWARE.md` §2 — the ceiling exists because the last 4 KiB of
 the part is the NVM sector, `Flash_saves.h:9`, protected by convention only);
@@ -70,7 +70,7 @@ checkable in CI.
 
 ## 3. Budget policy
 
-4020 bytes is the whole purse. The plan spends it in two installments with a
+3824 bytes is the whole purse. The plan spends it in two installments with a
 checkpoint: steps S2-S3 are budgeted at ≤ 600 bytes combined; if the measured
 total exceeds that, stop and re-evaluate before S5. S4a, if it applies, is
 the only step that *adds* headroom, which is why it runs early. At least
