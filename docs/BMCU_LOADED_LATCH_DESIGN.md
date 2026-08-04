@@ -1,13 +1,41 @@
 # Merger ownership: the loaded latch, its missing state, and the write funnel
 
-Status: design; first implementation round exists (`aa4bf1b`, `3b07e3e`, under
-revision). Verified against commit `9747e99`. Section 12 lists where this design
-expected the implementation to diverge, and this document is what the result is
-measured against.
+Status: design, authoritative for what it marks as specification (section 0).
+The implementation has landed through `6dd50fb` — the host shim, the TAIL
+state, the session/preempt intent split, and the timer consolidation are in
+the tree. Descriptions below are current as of `6dd50fb` where cited; the
+transition table's line references were re-verified at that commit.
 
-Every code citation below was re-checked against the tree at `9747e99` on
-2026-08-04. Where an earlier conversational sketch was wrong, the correction is
-stated inline and collected in section 11.
+## 0. Convention: specification versus description
+
+Every claim in this document is one of two kinds, and the distinction is
+load-bearing:
+
+- **Specification** — what must be true. Authoritative. If the code disagrees,
+  **the code is wrong** and gets brought to the document.
+- **Description** — what is true today, cited to file and line, offered as
+  orientation. If the code disagrees, **the description is stale** and gets
+  corrected. Descriptions rot; that is their nature, and a description is
+  never a reason to preserve behaviour.
+
+The rule exists because this document violated it and was caught by the host
+harness: row 9 asserted that the `0xFF` idle clears were "today's recovery
+path" for a restarted printer. That was a description wearing specification's
+clothes — and it was false on the day it was written (see row 9's note for
+the mechanism; measured across 40,000 frames, the clear it described never
+once affected the merger). A specification can be wrong and argued with; a
+description can only be checked, and this one never was.
+
+Markings: transition-table Notes carry explicit **Spec:** and **Desc:**
+segments. Prose sections that are wholly one kind say so at the head.
+`docs/BMCU_TARGET_HARDWARE.md` is description by design and says so; that is
+the correct handling for that kind of document and it is not repeated here.
+
+A drifted line number in a description is not a defect to sweep. Citations
+are dated; the tree moves; a stale citation gets corrected when the passage
+it lives in is next touched, not chased wholesale on every commit. What the
+convention forbids is only the thing row 9 did: a description asserting a
+*property* the code does not have. Numbers rot harmlessly; properties do not.
 
 ## 1. What the latch is, and what is inherent
 
@@ -99,7 +127,7 @@ two-nibble LOADED/TAIL mask byte):
   the mask's help.
 - The claim "no consumer needs the owner index" is **false** as of `9747e99`:
   the debounce feed indexes the key array by owner
-  (`MC_ONLINE_key_stu[loaded_ch]`, `src/Motion_control.cpp:3108-3113`). With a
+  (`MC_ONLINE_key_stu[...]`, `src/Motion_control.cpp:3140-3148`). With a
   mask that becomes a ctz, and CH32V203 is RV32IMAC with no B extension. A
   four-iteration loop would do, but it is a cost, not the absence of one.
 - The debugger-legibility argument stands on its own: `owner=2, state=TAIL` is
@@ -144,17 +172,17 @@ transitions. Every row cites where the input is produced today.
 
 | # | From | Input (source) | To | Cause code | Notes |
 |---|------|-------|----|-------|-------|
-| 1 | UNLOADED | `before_on_use(ch)` / `on_use(ch)` accepted (`:305`, `:375`) | LOADED(ch) | `cmd_load` | Unchanged from today. |
-| 2 | LOADED(ch) | `on_use(ch)` (`:375`) | LOADED(ch) | — | Redundant re-latch; no event, no flash write. Today suppressed by `main.cpp:136`. |
-| 3 | LOADED(ch) | `before_pull_back(ch)` (`:377-395`) or `0xFF` pull command (`:406-426`) | **TAIL(ch)** | `cmd_retract` | **Changed — deferred; see the note below this table.** Today both call `set_unloaded` at command time (`:395`, `:425`) — i.e. today treats "retract commanded" as "path clear", which is wrong in the other direction from the sensor bug: a failed retract leaves the path occupied and the latch already gone. |
-| 4 | LOADED(ch) | key-zero held ≥ `LOADED_LATCH_DROP_MS` (`Motion_control.cpp:3108-3113`) | **TAIL(ch)** | `sensor_runout` | **The central change.** Today this is the clear at `:3113`. TAIL entry, not release. |
-| 5 | TAIL(ch) | retract sequence terminal: `redetect` exits — key reported (`Motion_control.cpp:2474-2486`) or redetect timeout (`:2487-2488`, bounded by `4e9adf6`) | UNLOADED | `retract_done` / `retract_gone` | The strand is parked at the switch (key case: presence stays advertised) or fully gone (timeout case). Either way the merger is clear. |
-| 6 | TAIL(ch) | debounced key-close **and** channel motion idle | LOADED(ch) | `sensor_return` | Filament pushed back in before any retract ran. The motion-idle condition prevents re-latching from key flap during an active retract. Hold window: the 100 ms class, not the 1500 ms class. |
-| 7 | TAIL(ch) | `send_out(other)` (`:268-281`) | UNLOADED, then rows 1 as the load proceeds | `preempted` | The printer is the master; refusing its load of another channel buys nothing (it would push regardless). Accept, release, and **log loudly** — if the tail was genuinely still in the merger this is the collision case and the event is the only witness. Today's equivalent is the force-clear at `:275-276`. |
-| 8 | LOADED(ch) | `send_out(ch)` — same channel (`:275-276`) | LOADED(ch) | — | **Changed.** Today `send_out` force-clears even for the owner. Re-feeding the owner's own channel does not change ownership. |
-| 9 | LOADED(ch) | `0xFF` idle reset (`:434-459`) or `0xFF/0x01` idle (`:428-432`) | UNLOADED | `printer_idle` | Kept, because these are today's recovery path for a printer that power-cycled or aborted, and `:441-446` already guards the full reset against firing mid-use. |
-| 10 | TAIL(ch) | `0xFF` idle reset / `0xFF/0x01` | **TAIL(ch)** | — | **Changed.** Session going idle does not clear the path. The tail is still in the merger; the escapes are rows 5-7, not time. |
-| 12 | any | boot restore (`main.cpp:234-254`) | LOADED(ch), TAIL(ch), or UNLOADED | `boot` | TAIL is restored from its own flash record; section 6. |
+| 1 | UNLOADED | `before_on_use(ch)` / `on_use(ch)` accepted (`:308`, `:378`) | LOADED(ch) | `cmd_load` | **Spec.** Desc: implemented — both sites funnel to `ams_merger::acquire`. |
+| 2 | LOADED(ch) | `on_use(ch)` (`:378`) | LOADED(ch) | — | **Spec:** a redundant re-latch is a no-op — no event, no flash write. Desc: the funnel returns unchanged for the current owner and the flash write dedups (`Flash_saves.cpp:399` shape). |
+| 3 | LOADED(ch) | `before_pull_back(ch)` or `0xFF` pull command | **TAIL(ch)** | `cmd_retract` | **Spec, deferred — see the note below this table.** Desc: today both paths release at command time (`:398`, `:428`), i.e. "retract commanded" is treated as "path clear", wrong in the opposite direction from the sensor bug: a failed retract leaves the path occupied and unowned. |
+| 4 | LOADED(ch) | key-zero held ≥ `LOADED_LATCH_DROP_MS` | **TAIL(ch)** | `sensor_runout` | **Spec — the central change.** Desc: implemented (`Motion_control.cpp:3140-3148`, `ams_merger::to_tail`; the debounce disarms while TAIL is held). |
+| 5 | TAIL(ch) | retract sequence terminal: `redetect` exits — key reported or redetect timeout (bounded by `4e9adf6`) | UNLOADED | `retract_done` / `retract_gone` | **Spec — contingent, unverified.** Nobody chose to defer this row; its unreachability is a *consequence* of the row-3 deferral (which was the decision): the command-time release (`:398`, `:428`) precedes any motion terminal, so this transition would exit a state the code has already left. It becomes implementable, and verifiable, only when row 3 lands ("together with row 3 or not at all", `ams_merger_policy.h:55-59`). |
+| 6 | TAIL(ch) | ~~debounced key-close + motion idle~~ commanded acquire (`before_on_use`/`on_use`, row 1 machinery) | LOADED(ch) | `cmd_load` | **Spec, revised — the original sensor form is retracted.** The implementation showed the sensor promotion would be *actively wrong* after a runout: new filament at the key says nothing about the old tail still in the bowden (`ams_merger_policy.h:61-69`). Promotion happens on the printer's next commanded acquire; the wire bits may lag the physical change and nothing gates on the lag (`allow_any`/`allow_stop` answer the same in TAIL and LOADED for the owner). |
+| 7 | LOADED/TAIL | `send_out` from a claiming channel (`:275-280`) | UNLOADED, then row 1 as the load proceeds | `preempted` | **Spec:** the printer is master; refusing its load buys nothing. Release and **report** — a preempted TAIL is the witness that a strand was still in the tube when the next was pushed in. Desc: implemented (`ams_merger_policy.h:225-231`, `release_preempted_tail`; call site distinguishes claiming from session-ending, `:275-277` comment). |
+| 8 | LOADED(ch) | `send_out(ch)` — same channel | LOADED(ch) | — | **Spec as written is NOT implemented, and is demoted to an open question (OQ-5).** Desc: the call site preempts whenever an owner exists and `prev != send_out` (`:278-280`) — including the owner's own re-feed — and `preempt()` takes no channel (`ams_merger_policy.h:225`), so it cannot distinguish. Today: transient UNLOADED during a same-channel re-feed, then re-acquire — which is also pre-TAIL behaviour, preserved. Nobody has verified whether the transient window matters; see OQ-5 before either implementing the guard or retracting this row. |
+| 9 | LOADED(ch) | `0xFF` idle reset (`:437-461`) or `0xFF/0x01` (`:431-436`) | **LOADED(ch)** — no change | — | **Spec, rewritten: session-idle inputs never release a held merger, in any state.** Recovery from a printer restart is row 7 — a resuming printer opens with `send_out`. Desc + history, the motivating case for section 0: the original row claimed these clears were "today's recovery path". False when written — `:435`'s release sits behind `filament_use_flag != 0x04`, and `use_flag` is 0x04 for exactly as long as the merger is held (set at `:297`/`:368`, lines above both acquires at `:308`/`:378`), so the guard is shut on every frame where releasing would mean anything. Measured across 40,000 frames: zero effect on the merger, ever. |
+| 10 | TAIL(ch) | `0xFF` idle reset / `0xFF/0x01` | **TAIL(ch)** | — | **Spec — a requirement, not an observation:** a session going idle leaves TAIL held; the escapes are rows 5-7, not time. Desc: **not yet structural.** The landed `release_refused_tail` guard (`ams_merger_policy.h:157-158`) protects only the *wildcard* arm (`ch >= kChannels`) — and that arm is exactly the door the harness proved unreachable while the merger is owned. The reachable door, `:435` passing a real channel, takes the owner-checked arm and resets unconditionally, TAIL included. What holds this row today is still the row-9 `use_flag` coincidence, demonstrated fragile by mutation — which is why the row is written as a requirement. In flight: a third funnel intent for "the session went quiet", distinct from the commanded retract that shares its shape; acceptance criterion: removing the `ch < 4` guard **and** setting `use_flag = 0x02` at the `on_use` acquire must each leave the TAIL vectors green. |
+| 12 | any | boot restore | LOADED(ch), TAIL(ch), or UNLOADED | `boot` | **Spec.** Desc: implemented — `STA_TAIL_TAG` record (`Flash_saves.cpp:249`, `:383-412`, write `:448`), restored through the funnel. Section 6. |
 
 Gate changes that consume the state: `allow_any` becomes
 `state == UNLOADED || owner == ch`; `allow_stop` becomes
@@ -197,12 +225,12 @@ which is why row 7 is the row that must always emit an event, and why the
 event carries the epoch: a collision report and the preempt that allowed it
 must be joinable after the fact.
 
-**Row 3 deferral (first implementation round).** `bambu_bus_ams.cpp` is
-untouched for now: the commanded-retract paths still release at command
-time (`:395`, `:425`). Stated plainly so this document does not overclaim: on
-every retract, commanded or runout alike, **the merger is occupied-but-unowned
-from the moment of `:395`/`:425` until redetect completes, and a jammed
-retract leaves it that way indefinitely.** That is today's behaviour, not a
+**Row 3 deferral (description as of `6dd50fb`).** The commanded-retract paths
+still release at command time (`:398`, `:428`). Stated plainly so this
+document does not overclaim: on every retract, commanded or runout alike,
+**the merger is occupied-but-unowned from the moment of `:398`/`:428` until
+redetect completes, and a jammed retract leaves it that way indefinitely.**
+That is today's behaviour, not a
 regression — but ownership does not track physical occupancy until row 3
 lands, and no text in this document should be read as claiming it does. The
 deferral is sound separability, worth recording: the widening (`allow_stop`
@@ -269,11 +297,10 @@ event stream should not have to.
 
 ## 7. Wire reporting
 
-Channel-flags bit 5 today means "this channel holds `g_loaded_ch`"
-(`src/bmcu_link.h:12`, `src/Motion_control.cpp:3230`), and per `bd30fd3` it
-stays 1 through the debounce window, dropping on the pass that clears.
-
-With TAIL: **bit 5 = owns (LOADED or TAIL); bit 6 = TAIL.** Rationale:
+Spec: **bit 5 = owns (LOADED or TAIL); bit 6 = TAIL.** Desc: implemented
+(`src/Motion_control.cpp:3311-3313`); bit 5's pre-TAIL meaning and its
+behaviour through the debounce window are per `bd30fd3` (`src/bmcu_link.h:12`).
+Rationale:
 
 - bit 5 keeping its meaning as "owns" is truthful for existing decoders — a
   TAIL channel does hold the latch — so old decoders degrade gracefully.
@@ -304,7 +331,7 @@ mechanically incomplete**, and the incompleteness matters for testing:
 - **Pre-debounce**, the clear ran every control pass while the key read 0, so
   between any `on_use` and the retract prelude the clear had always won:
   `stop_on_use` and `before_pull_back` land on `allow_stop == false` and return
-  before writing anything (`:311`, `:381`). Deterministic refusal — consistent
+  before writing anything (`:314`, `:384`). Deterministic refusal — consistent
   with "switchover has never once worked".
 - **Post-`a705cc3`**, the clear needs 1500 ms of continuous key-zero, and each
   `on_use` re-latch restarts the window. Whether the retract prelude finds the
@@ -332,12 +359,14 @@ being accepted, that is printer-side logic this repository cannot see (OQ-1).
 
 ## 9. Timer consolidation — adjacent, riding the same branch
 
-Verified inventory of the seven windows derived from the key signal:
+Description as of `6dd50fb` — the consolidation has landed
+(`signal_hold_policy.h`, consumed at `Motion_control.cpp:2852`, `:2996`); the
+inventory below records what it found and why the split came out as it did:
 
 | Constant | Value | Site | Kind |
 |---|---|---|---|
 | `DM_AUTO_S1_DEBOUNCE_MS` | 100 | `:272`, used `:1317` | **state dwell** (revised — see below) |
-| inline `100u` on `dm_loaded_drop_t0_ms` | 100 | `:2828` | signal hold |
+| `DM_LOADED_DROP_MS` (was inline `100u`) | 100 | `:311`, via `signal_hold::held_for` `:2852` | signal hold — **consolidated** |
 | `LOADED_LATCH_DROP_MS` | 1500 | `:340`, used `:3112` | signal hold |
 | `AUTO_UNLOAD_EMPTY_MS` | 1500 | `:349`, used `:2986` | signal hold |
 | `AUTO_UNLOAD_ARM_MS` | 1000 | `:347`, used `:2941`, `:2952` | **gesture window** |
@@ -405,19 +434,19 @@ header, compiled and driven on the host.
    the phase order: `stop_on_use → before_pull_back → 0xFF pull → send_out →
    before_on_use → on_use`), asserting the ownership trace
    LOADED→TAIL→UNLOADED→LOADED with no spurious releases.
-3. **Funnel-routing tests.** This family is the guard on the funnel, and
-   `bambu_bus_ams.cpp` is untouched and the old `ams_state_*` call sites are
-   the bus layer's only interface to the state machine. The family exists
-   the first implementation contained exactly the leak it targets: **`release(s,
-   0xFF)` skipped its owner check and reached `reset()`, so the idle-frame
-   wildcard at `:458` dropped TAIL** — the overnight case, defeating the whole
-   branch, invisibly. The conversation test that catches it: runout entry,
-   continued `on_use` polls, interleaved idle frames (`0xFF/0x01` and the
-   `0xFF` reset pattern), pause, retract prelude — assert the prelude is
-   accepted. Companion assertions: `set_loaded(ch)` while TAIL(ch) goes
-   TAIL→LOADED without passing through UNLOADED (row 6, no event/flash churn);
-   `set_unloaded(ch)` from the commanded paths (`:395`, `:425`) is an
-   owner-checked, evented release.
+3. **Funnel-routing tests.** This family guards the funnel: the `ams_state_*`
+   call sites in `bambu_bus_ams.cpp` are the bus layer's only interface to
+   the state machine, and the family exists because the first implementation
+   contained exactly the leak it targets — **`release(s, 0xFF)` skipped its
+   owner check and reached `reset()`, so the idle-frame wildcard (now `:461`)
+   dropped TAIL** — the overnight case, defeating the whole branch,
+   invisibly. The conversation test that catches it: runout entry, continued
+   `on_use` polls, interleaved idle frames (`0xFF/0x01` and the `0xFF` reset
+   pattern), pause, retract prelude — assert the prelude is accepted.
+   Companion assertions: a commanded acquire while TAIL(ch) goes TAIL→LOADED
+   without passing through UNLOADED (row 6, revised form); the commanded
+   releases (`:398`, `:428`) are owner-checked and evented. Desc: this family
+   ran, and found rows 9 and 10 as recorded in the table.
 4. **Runout race sweep** — the scenario of section 8 as a parameterized test:
    key-zero at t=0, `on_use` polls at cadence *p*, pause sequence at delay *d*
    after the last poll; assert the retract prelude is accepted for **all**
@@ -474,12 +503,15 @@ pause timing and whether it stops polling before or after the retract prelude.
 
 ## 12. Where the in-flight implementation is expected to diverge
 
-Checked against `9747e99`, where no TAIL code exists yet. Round-one status,
-in the first implementation: items 1-3 all materialized — item 1 is now the recorded row-3
-deferral (section 5); item 2 materialized as the `release(s, 0xFF)` owner-check
-leak (section 10, family 3); item 3 materialized as the in-band `0x80|ch`
-persistence and was caught in review (section 6). Items 4-7 remain open
-against the revision. The original list, kept as the review checklist:
+Historical description: this list was written against `9747e99`, before any
+TAIL code existed, as a prediction of where implementation would diverge. Its
+scorecard, now that implementation has landed: items 1-3 materialized (item 1
+is the recorded row-3 deferral; item 2 was the `release(s, 0xFF)` owner-check
+leak, caught by test family 3; item 3 was the in-band `0x80|ch` persistence,
+caught in review). Item 5 materialized as the row-8 finding, now OQ-5. Item 6
+was resolved by revising row 6 rather than by code — the implementation's
+argument won. Items 4 and 7 did not materialize. Kept as a record of what
+this kind of checklist catches:
 
 1. **Row 3** — commanded retract entering TAIL rather than clearing
    immediately. The obvious minimal patch keeps `:395`/`:425` as releases and
@@ -503,7 +535,10 @@ against the revision. The original list, kept as the review checklist:
 
 ## 13. Budget
 
-DM build stands at 93.0 % of 61440 bytes (~4300 free). This design adds: the
+Description; the authoritative budget numbers live in
+`docs/BMCU_TARGET_HARDWARE.md` §2 and `docs/BMCU_REFACTOR_PLAN.md` §3 and
+supersede the snapshot here. At design time the DM build stood at ~93 % of
+61440. This design adds: the
 policy header (pure functions, inlined — the comparable
 `ams_loaded_latch_policy.h` costs well under 200 bytes of text), one event
 record constructor, one channel-flags bit, and the `STA_TAIL_TAG` read/write
@@ -526,7 +561,15 @@ ownership state; the timer consolidation's measured RAM delta is zero
   `on_use` resume of a different channel with no preceding `send_out`. No known
   printer sequence does that, but its absence is unproven. The counter is a
   requirement, not yet implemented.
-- **OQ-4**: Row 9 keeps two weakly-informed printer-idle clears because they
-  are today's recovery path. If the ownership event stream shows them firing
-  spuriously in practice, they should be narrowed — but with data, not by
-  design fiat.
+- **OQ-4** (settled by measurement): the printer-idle clears row 9 originally
+  preserved never fired — the `use_flag` guard is shut whenever the merger is
+  held (row 9's note). The requirement replacing them is idle-neutrality:
+  session-idle inputs never release ownership, in any state.
+- **OQ-5**: Row 8's disposition. The same-channel `send_out` guard specified
+  there was never implemented — the preempt fires for the owner's own re-feed
+  and `preempt()` cannot distinguish channels (`ams_merger_policy.h:225`).
+  The transient UNLOADED window it causes is also pre-TAIL behaviour, and it
+  emits a row-7 event each time, so the ownership event stream will show how
+  often it happens in practice. Decide from that data whether to implement
+  the guard (spec kept) or retract the row (spec withdrawn); until then the
+  row is neither.

@@ -5,6 +5,16 @@ section 8 states what shrinks if it does not. Verified against the tree at
 `83355ed`; budget numbers come from `docs/BMCU_TARGET_HARDWARE.md` and are
 cited, not assumed.
 
+Convention: this document follows the specification/description distinction
+defined in `docs/BMCU_LOADED_LATCH_DESIGN.md` §0. The steps and rules (R1-R4)
+are **specification** — if practice disagrees, practice is wrong or the step
+is renegotiated here, not silently. Code citations and size figures are
+**description**, dated to `83355ed`; line numbers drift as the tree moves
+(the shim commits have already shifted `bambu_bus_ams.cpp` by a few lines)
+and a stale citation is a correction, not a contradiction. The S4 section has
+already had one description corrected this way — AHUB personality selection
+is runtime, not compile-time — which is the distinction working as intended.
+
 This plan is deliberately small. The binding constraints are: **4020 bytes of
 flash headroom** (worst-configuration text+data 57420 against the 61440
 postbuild ceiling,
