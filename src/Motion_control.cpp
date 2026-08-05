@@ -297,7 +297,10 @@ enum : uint8_t
 static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
 static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until ks==0 (<0.6V)
 static uint8_t  dm_auto_state[4]        = {0,0,0,0};
-static uint8_t  dm_autoload_gate[4]     = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+ks==0
+// 0=allow Stage1, 1=block Stage1 until idle+ks==0. Set when Stage1 reaches
+// S1_PUSH, not when the debounce is entered, so a debounce that aborts leaves
+// the retry intact. Stage2 is not gated; see the entry branch.
+static uint8_t  dm_autoload_gate[4]     = {0,0,0,0};
 static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
 static uint32_t dm_auto_t0_ms[4] = {0u,0u,0u,0u};
 static int32_t  dm_auto_remain_counts[4] = {0,0,0,0};
@@ -1314,11 +1317,16 @@ public:
                                 {
                                     if (dm_autoload_gate[CHx] == 0u)
                                     {
-                                        dm_autoload_gate[CHx] = 1u;
                                         dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
                                         dm_auto_t0_ms[CHx] = now_ms;
                                     }
                                 }
+                                // Direct S2 entry deliberately sets no gate. Stage2
+                                // bounds its own retries with dm_auto_try (3, then
+                                // dm_fail_latch); the gate exists to bound Stage1,
+                                // which has no try counter. Gating here would also
+                                // block a later Stage1 after a Stage2 that ended
+                                // harmlessly.
                                 else if (ks == 1u)
                                 {
                                     dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
@@ -1341,6 +1349,12 @@ public:
                                 }
                                 else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_DEBOUNCE_MS)
                                 {
+                                    // Gate where Stage1 actually starts, not on the
+                                    // first `outer` flicker: an aborted debounce is
+                                    // not an attempt and must not consume the retry.
+                                    // This is also the S2_PUSH -> S1_DEBOUNCE route,
+                                    // which previously reached S1_PUSH ungated.
+                                    dm_autoload_gate[CHx] = 1u;
                                     dm_auto_state[CHx] = DM_AUTO_S1_PUSH;
                                     dm_auto_t0_ms[CHx] = now_ms;
                                 }
