@@ -313,6 +313,23 @@ static int32_t  dm_auto_last_counts[4]   = {0,0,0,0};
 // level on the key -- so they are named apart rather than shared.
 static constexpr uint32_t DM_LOADED_DROP_MS = 100u;
 static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
+
+// How long the key must read empty, continuously, before a latched DM autoload
+// fault is forgiven. dm_fail_latch is the only fault signal this machine has,
+// and clearing it on a bare ks == 0 meant a momentary lever excursion erased
+// faults that had already latched -- the failure mode suppressed its own
+// report. Across a full bench session the latch fired exactly once, and only
+// because nothing glitched before that channel was withdrawn.
+//
+// Deliberately longer than DM_LOADED_DROP_MS. This is not filtering chatter to
+// a measured width -- the excursions seen on the bench were counted, never
+// timed, described only as tens to hundreds of milliseconds. It asks a coarser
+// question that does not need that number: did someone actually pull the
+// filament out. Half a second sits above the described range with margin, and
+// nothing is time-critical about forgiving a fault. Narrow it once teardown
+// events make excursion widths measurable.
+static constexpr uint32_t DM_FAIL_CLEAR_MS = 500u;
+static uint32_t dm_fail_clear_t0_ms[4] = {0u,0u,0u,0u};
 #endif
 
 // How long the owning channel's online key must read empty, continuously,
@@ -2838,11 +2855,18 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             dm_auto_remain_counts[ch] = 0;
             dm_auto_last_counts[ch]   = 0;
             dm_loaded_drop_t0_ms[ch] = 0u;
+            dm_fail_clear_t0_ms[ch]  = 0u;
             dm_autoload_gate[ch]     = 0u;
             continue;
         }
 
         const uint8_t ks = MC_ONLINE_key_stu[ch];
+
+        // Evaluated on every pass, not inside the branch below: held_for needs
+        // to see the passes where ks is non-zero in order to reset, which is
+        // exactly what makes a momentary excursion fail to clear the latch.
+        const bool withdrawn = signal_hold::held_for(
+            dm_fail_clear_t0_ms[ch], ks == 0u, time_now, DM_FAIL_CLEAR_MS);
 
         if (ks == 0u)
         {
@@ -2850,7 +2874,10 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                 dm_autoload_gate[ch] = 0u;
 
             dm_loaded[ch]            = 0u;
-            dm_fail_latch[ch]        = 0u;
+            // The rest of this block still tears down on the instant reading;
+            // only the fault latch is protected. Widening that is a separate
+            // change and needs the excursion widths this one does not.
+            if (withdrawn) dm_fail_latch[ch] = 0u;
             dm_auto_state[ch]        = DM_AUTO_IDLE;
             dm_auto_try[ch]          = 0u;
             dm_auto_t0_ms[ch]        = 0u;
