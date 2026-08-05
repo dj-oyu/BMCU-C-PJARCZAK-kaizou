@@ -3330,6 +3330,7 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     output->sensor_good = AS5600_is_good(channel) ? 1u : 0u;
     output->motion_fault = MOTOR_CONTROL[channel].motion_fault;
     output->controller_motion = static_cast<uint8_t>(MOTOR_CONTROL[channel].motion);
+    output->polarity_valid = MOTOR_CONTROL[channel].motor_polarity_valid ? 1u : 0u;
     return true;
 }
 

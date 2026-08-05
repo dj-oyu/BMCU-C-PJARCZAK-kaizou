@@ -191,6 +191,15 @@ export const ChannelRecord = {
   SensorOnlineBit: 1 << 2,
   SensorGoodBit: 1 << 3,
   /**
+   * Clear means this channel's motor polarity was never learned, and the
+   * channel is therefore completely dead while reporting nothing else: no
+   * LED, no fault latch, no motion. Every motor path goes through the same
+   * early return -- autoload, the idle pull PID, the buffer gesture, manual
+   * unload. Firmware predating this bit also reports 0, so check the link
+   * record's build_hash before reading a clear bit as a diagnosis.
+   */
+  PolarityValidBit: 1 << 5,
+  /**
    * The high byte of the u16 at ``FlagsOffset`` is the STATUS channel-flags
    * byte shifted up whole, in the same bit order. It is the only free space a
    * channel record has left, and carrying it unrepacked means one decoder

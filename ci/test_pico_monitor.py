@@ -269,6 +269,34 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertTrue(message["channel_data"]["sensor_online"])
         self.assertTrue(message["channel_data"]["sensor_good"])
 
+    def _channel_record(self, own_flags):
+        record_data = bytearray(16)
+        record_data[0] = 2
+        record_data[6:8] = own_flags.to_bytes(2, "little")
+        payload = ((1).to_bytes(2, "little") + bytes((0, 1, 2, 0)) +
+                   (10).to_bytes(4, "little") + bytes(record_data))
+        message = {}
+        self.monitor._handle_snapshot(payload, message, 100)
+        return message["channel_data"]
+
+    def test_a_channel_with_no_learned_polarity_is_visible(self):
+        # The whole point: such a channel is completely dead -- autoload, the
+        # idle pull PID, the buffer gesture and manual unload all stop at the
+        # same early return -- while reporting nothing else at all. A bench
+        # session was spent rediscovering that by hand.
+        self.assertFalse(self._channel_record(0x0c)["polarity_valid"])
+        self.assertTrue(self._channel_record(0x2c)["polarity_valid"])
+
+    def test_polarity_bit_does_not_disturb_the_folded_flags_byte(self):
+        # Bit 5 sits between the record's own bits and the STATUS byte folded
+        # in at bit 8; setting it must not bleed into either neighbour.
+        channel = self._channel_record(0x2c | (0x16 << 8))
+        self.assertTrue(channel["polarity_valid"])
+        self.assertTrue(channel["sensor_online"])
+        self.assertTrue(channel["sensor_good"])
+        self.assertEqual(channel["channel_flags"]["ks"], 2)
+        self.assertTrue(channel["channel_flags"]["dm_fail_latch"])
+
     def test_sequence_gap_discards_old_baseline_and_resyncs(self):
         self.hello()
         self.monitor.status = {"old": True}

@@ -810,6 +810,12 @@ class BMCUMonitor:
                 "pull_pct": record_data[4], "sensor_validity": record_data[5],
                 "flags": flags, "sensor_online": bool(flags & (1 << 2)),
                 "sensor_good": bool(flags & (1 << 3)),
+                # False means the motor polarity was never learned, so every
+                # motor path on this channel is dead while reporting nothing
+                # else -- no LED, no fault latch, no motion. Firmware
+                # predating this bit also reports False, so check the link
+                # record's build_hash before reading it as a diagnosis.
+                "polarity_valid": bool(flags & (1 << 5)),
                 # Bits 8..12 are the STATUS channel-flags byte for this channel,
                 # shifted up whole so one decoder serves both carriers.
                 "channel_flags": decode_channel_flags((flags >> 8) & 0xff),

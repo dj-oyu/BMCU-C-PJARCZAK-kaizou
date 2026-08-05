@@ -24,6 +24,14 @@ struct MotionControlChannelTelemetry
     uint8_t motion_fault;
     uint8_t sensor_good;
     uint8_t controller_motion;
+    // A channel whose polarity was never learned is completely dead and says
+    // nothing about it: _MOTOR_CONTROL::run returns before producing any PWM,
+    // which kills DM autoload, the idle pull PID, the buffer gesture and
+    // manual_empty_pull alike. The level is reported rather than the learn
+    // timeout because the timeout is only one of four routes to it -- the
+    // other three (AS5600 not good at boot, AS5600 dropping out mid-test, a
+    // failed Motion_control_read) leave no trace at all.
+    uint8_t polarity_valid;
 };
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);

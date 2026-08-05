@@ -627,6 +627,13 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
             if (telemetry.sensor_online) flags |= 1u << 2;
             if (telemetry.sensor_good) flags |= 1u << 3;
             if (telemetry.motion_fault != MOTION_FAULT_NONE) flags |= 1u << 4;
+            // Bit 5 rather than the last reserved bit in BmcuChannelFlags:
+            // spending that is a one-way door, and this record already carries
+            // the AS5600 validity this sits beside. A build predating this
+            // sends 0 here, which reads as "polarity not learned" and is not a
+            // fault -- the link record's build_hash is what tells the two
+            // apart.
+            if (telemetry.polarity_valid) flags |= 1u << 5;
             // record.data[0..15] is otherwise full, so the high byte of this
             // u16 is the only free space left in a channel record. Bits 8..12
             // are the STATUS channel-flags byte shifted up whole: same order,
