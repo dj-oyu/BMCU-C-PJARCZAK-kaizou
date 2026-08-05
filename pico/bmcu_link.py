@@ -297,6 +297,12 @@ class BMCUMonitor:
         self.last_valid_ms = None
         self.last_ping_ms = None
         self.tick_hz = None
+        # None until a HELLO long enough to carry them arrives. A BMCU built
+        # before build identity existed sends the 9-byte HELLO and leaves these
+        # unset, which is the honest answer -- not a zero that reads like a
+        # variant with everything disabled.
+        self.variant_flags = None
+        self.build_hash = None
         self.status = None
         self.snapshot = None
         self.snapshot_at_ms = None
@@ -611,7 +617,11 @@ class BMCUMonitor:
         self.last_valid_ms = now_ms
         kind, payload = frame["kind"], frame["payload"]
         message = {"type": "frame", "kind": kind, "sequence": frame["sequence"]}
-        if kind == HELLO and len(payload) == 9:
+        # >= 9, not == 9: HELLO grew to 15 bytes when build identity was added,
+        # and a bridge that rejected the longer frame would drop the one message
+        # that drives resync -- the link would never come up at all. Trailing
+        # bytes beyond what this bridge understands are ignored on purpose.
+        if kind == HELLO and len(payload) >= 9:
             self.bmcu_boot_session += 1
             if self.soft_reset is not None and self.soft_reset.get("state") == "scheduled":
                 self.soft_reset["state"] = "rebooted"
@@ -632,8 +642,15 @@ class BMCUMonitor:
             self._snapshot_retries = 0
             self.link_state = "resyncing"
             self.tick_hz = _u32(payload, 5)
+            if len(payload) >= 15:
+                self.variant_flags = _u16(payload, 9)
+                self.build_hash = _u32(payload, 11)
+            else:
+                self.variant_flags = None
+                self.build_hash = None
             message.update({"type": "hello", "protocol": payload[0], "capabilities": _u16(payload, 1),
                             "firmware": [payload[3], payload[4]], "tick_hz": self.tick_hz,
+                            "variant_flags": self.variant_flags, "build_hash": self.build_hash,
                             "bmcu_boot_session": self.bmcu_boot_session})
             self._emit(message)
             self._request_missing_baseline()

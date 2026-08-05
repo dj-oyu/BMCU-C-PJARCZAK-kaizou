@@ -28,6 +28,35 @@ enum Capability : uint16_t
     CAP_FULL_STATUS = 1u << 6, CAP_SOFT_RESET = 1u << 7,
 };
 
+// Build identity, carried by KIND_HELLO from alpha.3 onward as payload[9..14].
+//
+// The firmware is not one artefact -- the matrix builds 780 variants -- and a
+// board on the bench could be running any of them, or something built by hand
+// from an unknown tree. Before this existed there was no way to ask. A bench
+// session was spent reasoning about line numbers that could not be confirmed to
+// match what was executing.
+//
+// VariantFlag packs the compile-time configuration into a u16, which names the
+// variant exactly. BUILD_HASH (bmcu_link.cpp) is a hash of the translation
+// unit's build timestamp folded with those flags: it does not decode to
+// anything, but two boards reporting the same value are running the same build,
+// and the matrix manifest maps it back to a commit.
+//
+// Bits 6..15 hold AMS_RETRACT_LEN in thousandths, which is the axis the matrix
+// varies most, so the u16 is fully spent. A new boolean needs a wider field
+// rather than a spare bit here.
+enum VariantFlag : uint16_t
+{
+    VARIANT_DM_TWO_MICROSWITCH = 1u << 0,
+    VARIANT_ONLINE_LED_FILAMENT_RGB = 1u << 1,
+    VARIANT_P1S = 1u << 2,
+    VARIANT_SOFT_LOAD = 1u << 3,
+    VARIANT_AMS_NUM_SHIFT = 4u,
+    VARIANT_AMS_NUM_MASK = 0x3u << 4,
+    VARIANT_RETRACT_MILLI_SHIFT = 6u,
+    VARIANT_RETRACT_MILLI_MASK = 0x3FFu << 6,
+};
+
 enum FullStatusSection : uint8_t
 {
     FULL_SECTION_GLOBAL = 1u << 0, FULL_SECTION_CHANNELS = 1u << 1,

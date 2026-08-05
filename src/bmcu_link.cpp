@@ -353,9 +353,75 @@ void put32(uint8_t* output, uint32_t value)
     output[3] = static_cast<uint8_t>(value >> 24);
 }
 
+// The encoding must read the same macros the firmware compiled against, not a
+// second set of defaults -- a variant byte that disagrees with the running code
+// is worse than none. Motion_control.h (included above) supplies the fallbacks
+// for these four, notably AMS_RETRACT_LEN = 0.2f, which is not zero. Defining
+// them again here would shadow that if the includes were ever reordered, so
+// fail instead.
+#if !defined(AMS_RETRACT_LEN) || !defined(BAMBU_BUS_AMS_NUM) || \
+    !defined(BMCU_DM_TWO_MICROSWITCH) || !defined(BMCU_ONLINE_LED_FILAMENT_RGB)
+#error "Motion_control.h must be included before the variant encoding"
+#endif
+
+// These two have no fallback anywhere; the variant envs define only what they
+// vary, and `#if UNDEFINED` is 0, so 0 is what the firmware already assumes.
+#ifndef BMCU_P1S
+#define BMCU_P1S 0
+#endif
+#ifndef BMCU_SOFT_LOAD
+#define BMCU_SOFT_LOAD 0
+#endif
+
+// Thousandths, rounded. The matrix's retract lengths are all under 1.024 m, so
+// they fit the 10 bits VariantFlag leaves; anything longer saturates rather
+// than wrapping into the boolean bits below it.
+constexpr uint16_t retract_milli()
+{
+    return (static_cast<uint32_t>(AMS_RETRACT_LEN * 1000.0f + 0.5f) > 0x3FFu)
+               ? 0x3FFu
+               : static_cast<uint16_t>(AMS_RETRACT_LEN * 1000.0f + 0.5f);
+}
+
+constexpr uint16_t VARIANT_FLAGS =
+    (BMCU_DM_TWO_MICROSWITCH ? VARIANT_DM_TWO_MICROSWITCH : 0u) |
+    (BMCU_ONLINE_LED_FILAMENT_RGB ? VARIANT_ONLINE_LED_FILAMENT_RGB : 0u) |
+    (BMCU_P1S ? VARIANT_P1S : 0u) |
+    (BMCU_SOFT_LOAD ? VARIANT_SOFT_LOAD : 0u) |
+    static_cast<uint16_t>((BAMBU_BUS_AMS_NUM & 0x3u) << VARIANT_AMS_NUM_SHIFT) |
+    static_cast<uint16_t>(retract_milli() << VARIANT_RETRACT_MILLI_SHIFT);
+
+// The two packed fields are the ones a shift or mask edit can silently corrupt;
+// the booleans are their own witness. Checked per build, so every variant in
+// the matrix proves its own encoding rather than one hand-picked config.
+static_assert(((VARIANT_FLAGS & VARIANT_RETRACT_MILLI_MASK) >>
+               VARIANT_RETRACT_MILLI_SHIFT) == retract_milli(),
+              "retract length does not survive the variant packing");
+static_assert(((VARIANT_FLAGS & VARIANT_AMS_NUM_MASK) >>
+               VARIANT_AMS_NUM_SHIFT) == (BAMBU_BUS_AMS_NUM & 0x3u),
+              "AMS number does not survive the variant packing");
+
+// FNV-1a. Recursive so it folds at compile time under C++11 constexpr rules;
+// it runs on the string literal only, and emits no code.
+constexpr uint32_t fnv1a(const char* text, uint32_t hash = 2166136261u)
+{
+    return (*text == '\0')
+               ? hash
+               : fnv1a(text + 1,
+                       (hash ^ static_cast<uint32_t>(
+                                   static_cast<unsigned char>(*text))) *
+                           16777619u);
+}
+
+// The variant is folded in because the matrix builds all 780 back to back and
+// neighbours share a __TIME__ second. Timestamp alone would collide; the pair
+// does not.
+constexpr uint32_t BUILD_HASH =
+    (fnv1a(__DATE__ " " __TIME__) ^ VARIANT_FLAGS) * 16777619u;
+
 void send_hello()
 {
-    uint8_t* payload = reserve_payload(KIND_HELLO, g_sequence, 9u);
+    uint8_t* payload = reserve_payload(KIND_HELLO, g_sequence, 15u);
     if (payload == nullptr) return;
     payload[0] = VERSION;
     put16(&payload[1], CAP_STATUS_EVENTS | CAP_LED_OVERRIDE | CAP_PING_PONG |
@@ -364,7 +430,9 @@ void send_hello()
     payload[3] = 1u;
     payload[4] = 1u;
     put32(&payload[5], time_hw_tpus * 1000000u);
-    commit_payload(9u);
+    put16(&payload[9], VARIANT_FLAGS);
+    put32(&payload[11], BUILD_HASH);
+    commit_payload(15u);
     ++g_sequence;
 }
 

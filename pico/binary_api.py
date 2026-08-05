@@ -36,7 +36,7 @@ SNAPSHOT_VERSION = 1
 # passed through untouched, so these sit above them.
 RECORD_LINK = 0xF0
 RECORD_EVENT = 0xF1
-LINK_RECORD_BYTES = 16
+LINK_RECORD_BYTES = 24
 
 # Mirrors the link_states group of docs/bmcu_binary_registry.json.
 LINK_STATE_CODES = {
@@ -85,11 +85,23 @@ def _link_record(monitor):
         0  B  link state code      4  I  bmcu boot session
         1  B  channels present     8  I  tick_hz, 0 when the BMCU has not said
         2  H  snapshot age ms     12  I  sequence gap count
+                                 16  H  variant flags, 0xFFFF when unreported
+                                 18  H  reserved
+                                 20  I  build hash, 0 when unreported
 
     The age exists because every other record in a snapshot looks exactly the
     same whether it arrived a moment ago or forty minutes ago. Reading a stale
     snapshot as current is the specific mistake this field prevents; 65535
     means at least that old, or never taken.
+
+    Variant flags and build hash say which of the 780 firmware builds is on the
+    board. They belong in the snapshot rather than /api/current.bin precisely
+    because they are frozen per link session: they cannot change without a
+    HELLO, and a HELLO resets the session anyway.
+
+    0xFFFF, not 0, marks an unreported variant -- 0 is a legitimate encoding
+    (every option off, retract 0.0) and would read as fact. A BMCU built before
+    build identity existed sends the 9-byte HELLO and reports neither.
     """
     body = bytearray(LINK_RECORD_BYTES)
     body[0] = LINK_STATE_CODES.get(monitor.link_state, 0)
@@ -100,6 +112,11 @@ def _link_record(monitor):
         monitor.bmcu_boot_session & 0xFFFFFFFF,
         (monitor.tick_hz or 0) & 0xFFFFFFFF,
         monitor.sequence_gap_count & 0xFFFFFFFF)
+    variant = monitor.variant_flags
+    struct.pack_into(
+        ">HHI", body, 16,
+        0xFFFF if variant is None else variant & 0xFFFF, 0,
+        (monitor.build_hash or 0) & 0xFFFFFFFF)
     return bytes(body)
 
 

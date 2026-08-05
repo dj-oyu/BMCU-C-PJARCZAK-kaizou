@@ -46,6 +46,30 @@ class PicoMonitorTests(unittest.TestCase):
         payload = bytes((0x83, 0x7f, 0, 1, 2)) + (144000000).to_bytes(4, "little")
         self.monitor._handle_frame(frame(link.HELLO, sequence, payload), 100)
 
+    def test_hello_carries_build_identity(self):
+        # 0x3211: dm_two_microswitch, ams_num 1, retract 0.200 m.
+        payload = (bytes((0x83, 0x7f, 0, 1, 2)) +
+                   (144000000).to_bytes(4, "little") +
+                   (0x3211).to_bytes(2, "little") +
+                   (0xDEADBEEF).to_bytes(4, "little"))
+        self.monitor._handle_frame(frame(link.HELLO, 10, payload), 100)
+
+        self.assertEqual(self.monitor.variant_flags, 0x3211)
+        self.assertEqual(self.monitor.build_hash, 0xDEADBEEF)
+        hello = [m for m in self.messages if m.get("type") == "hello"][-1]
+        self.assertEqual(hello["variant_flags"], 0x3211)
+        self.assertEqual(hello["build_hash"], 0xDEADBEEF)
+
+    def test_a_short_hello_still_brings_the_link_up(self):
+        # A BMCU built before build identity existed sends 9 bytes. Rejecting it
+        # would drop the one message that drives resync, so the link would never
+        # come up at all -- worse than not knowing which build is running.
+        self.hello()
+
+        self.assertEqual(self.monitor.link_state, "resyncing")
+        self.assertIsNone(self.monitor.variant_flags)
+        self.assertIsNone(self.monitor.build_hash)
+
     def test_decoder_retains_a_fixed_noise_bound(self):
         decoder = link.FrameDecoder()
         decoder.feed(b"x" * 10000)

@@ -28,9 +28,9 @@ GENERATED = ROOT / "web" / "src" / "api" / "generated.ts"
 # prose or the endpoint list. Changing either makes this test fail, and the
 # only correct fix is to bump revision in docs/bmcu_wire_layout.json and
 # record the new revision and digest here together.
-LAYOUT_REVISION = 8
+LAYOUT_REVISION = 9
 LAYOUT_DIGEST = \
-    "61c6b55f7c8b6bf119bbfa5828fe621e464052013395f9254f05838bee5a1f9e"
+    "f508bcc16223cee95ddfee39247314e297c999e764dd798c02a19a540e037d3f"
 
 # littlefs on the Pico 2 W also holds the journal (8 x 64 KB) and the modules.
 # A page beyond this is a signal that a dependency was pulled in by accident.
@@ -170,6 +170,21 @@ class WebUIBuildTests(unittest.TestCase):
             ("OnlineMaskOffset", status["online_mask"]),
             ("MotionOffset", status["motion"]),
             ("PullPercentOffset", status["pull_pct"]),
+        ):
+            self.assertIn("%s: %d," % (name, offset), source)
+
+        # link_record went unpinned until it grew build identity, and layout.ts
+        # kept its old offsets without anything failing.
+        link = {f["name"]: f["offset"]
+                for f in layout["structures"]["link_record"]["fields"]}
+        for name, offset in (
+            ("StateOffset", link["link_state"]),
+            ("ChannelsPresentOffset", link["channels_present"]),
+            ("BootSessionOffset", link["bmcu_boot_session"]),
+            ("TickHzOffset", link["tick_hz"]),
+            ("SequenceGapOffset", link["sequence_gap_count"]),
+            ("VariantFlagsOffset", link["variant_flags"]),
+            ("BuildHashOffset", link["build_hash"]),
         ):
             self.assertIn("%s: %d," % (name, offset), source)
 

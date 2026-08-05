@@ -42,6 +42,8 @@ class FakeMonitor:
         self.events = []
         self.bmcu_boot_session = 0
         self.tick_hz = None
+        self.variant_flags = None
+        self.build_hash = None
         self.sequence_gap_count = 0
         self.capture = None
         self.snapshot_age = 0xFFFF
@@ -157,6 +159,22 @@ class SnapshotTests(unittest.TestCase):
         route, _outbox, _log = build([monitor])
         body = parse_snapshot(route("/api/snapshot.bin"))[0]["data"]
         self.assertEqual(struct.unpack_from(">H", body, 2)[0], 1234)
+
+    def test_link_record_carries_which_firmware_is_running(self):
+        monitor = FakeMonitor(variant_flags=0x3211, build_hash=0xDEADBEEF)
+        route, _outbox, _log = build([monitor])
+        body = parse_snapshot(route("/api/snapshot.bin"))[0]["data"]
+        self.assertEqual(struct.unpack_from(">HHI", body, 16),
+                         (0x3211, 0, 0xDEADBEEF))
+
+    def test_an_unreported_variant_is_not_confusable_with_a_real_one(self):
+        # 0 is a legitimate variant -- every option off, retract 0.0 -- so it
+        # cannot double as "the BMCU did not say". Reading one as the other is
+        # exactly the mistake this field exists to stop.
+        monitor = FakeMonitor()
+        route, _outbox, _log = build([monitor])
+        body = parse_snapshot(route("/api/snapshot.bin"))[0]["data"]
+        self.assertEqual(struct.unpack_from(">HHI", body, 16), (0xFFFF, 0, 0))
 
     def test_refresh_query_asks_every_link_for_a_new_snapshot(self):
         monitors = [FakeMonitor(0), FakeMonitor(1)]

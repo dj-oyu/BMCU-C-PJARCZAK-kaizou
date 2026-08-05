@@ -393,7 +393,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 8,
+ "revision": 9,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -650,9 +650,26 @@
      "name": "sequence_gap_count",
      "offset": 12,
      "type": "u32"
+    },
+    {
+     "name": "variant_flags",
+     "note": "which of the 780 firmware builds is running, packed from the compile-time options: bit 0 dm_two_microswitch, bit 1 online_led_filament_rgb, bit 2 p1s, bit 3 soft_load, bits 4-5 ams_num, bits 6-15 AMS_RETRACT_LEN in thousandths of a metre. 65535 means the BMCU did not report it -- 0 is a legitimate variant, so it cannot mean unknown. Carried by HELLO from 15-byte payloads onward.",
+     "offset": 16,
+     "type": "u16"
+    },
+    {
+     "name": "reserved",
+     "offset": 18,
+     "type": "u16"
+    },
+    {
+     "name": "build_hash",
+     "note": "identifies the build without decoding to anything: two boards reporting the same value are running the same firmware, and ci/firmware_matrix.py's manifest maps it back to a commit. 0 means not reported. Folds the variant flags in because the matrix builds neighbouring variants within the same __TIME__ second.",
+     "offset": 20,
+     "type": "u32"
     }
    ],
-   "size": 16
+   "size": 24
   },
   "link_wire": {
    "description": "BMCU Link frame, pico/bmcu_link.py encode_frame. Note the endianness change: sequence and CRC are little-endian while every BMB1 field above is big-endian.",

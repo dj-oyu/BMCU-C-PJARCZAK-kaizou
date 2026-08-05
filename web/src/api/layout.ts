@@ -161,6 +161,17 @@ export const LinkRecord = {
   BootSessionOffset: 4,
   TickHzOffset: 8,
   SequenceGapOffset: 12,
+  /**
+   * Which of the 780 firmware builds is on the board. 0xFFFF means the BMCU
+   * did not report it -- 0 is a legitimate variant (every option off) and so
+   * cannot double as unknown.
+   */
+  VariantFlagsOffset: 16,
+  /**
+   * Build fingerprint. Does not decode to anything; equal values mean equal
+   * firmware, and the matrix manifest maps it back to a commit. 0 if unreported.
+   */
+  BuildHashOffset: 20,
 } as const
 
 /** Channel record body, BMCUMonitor._handle_snapshot record_type 2. */
