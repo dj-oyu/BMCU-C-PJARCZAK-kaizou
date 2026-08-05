@@ -107,6 +107,16 @@ void bmcu_link_ams_registration_confirm(void);
 void bmcu_link_ams_registration_reset(void);
 void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fault);
 
+// The DM autoload machine left `state` because of `cause`, with the key
+// reading `ks`, after `held_ms` in that state. held_ms is the payload that
+// matters: sizing a tolerance for lever float needs excursion widths, and the
+// bench session that raised the question recorded only how many there were.
+// Repeats of the same state and cause on one channel are rate limited, since
+// the ring is eight slots and the hardware in question is the kind that
+// chatters; the skipped ones are counted, not lost.
+void bmcu_link_dm_teardown(uint8_t channel, uint8_t state, uint8_t cause, uint8_t ks,
+                           uint32_t held_ms);
+
 // A wildcard release was refused because the merger is held in TAIL. Called
 // from the merger funnel in main.cpp, which edge-latches it to one emission per
 // TAIL episode -- idle frames arrive continuously while a printer is paused,

@@ -7,8 +7,16 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
+#include "bmcu_link_protocol.h"
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
+
+// Aliased rather than opened with a using-directive: this file is large and
+// the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
+// would be uncomfortably close to local ones. bmcu_link.h deliberately does
+// not pull the protocol header in, so reaching the teardown causes is this
+// file's own business.
+namespace proto = bmcu_link_protocol;
 
 static inline uint8_t bmcu_pressure_class(uint16_t pressure)
 {
@@ -1361,6 +1369,13 @@ public:
 
                                 if (ks != 2u)
                                 {
+                                    // The measurement the chatter question needs:
+                                    // how long the key held `outer` before it
+                                    // deviated. Under 100 ms every time means the
+                                    // debounce is unreachable on this hardware.
+                                    bmcu_link_dm_teardown(CHx, DM_AUTO_S1_DEBOUNCE,
+                                                          proto::TEARDOWN_KS_DEVIATED, ks,
+                                                          now_ms - dm_auto_t0_ms[CHx]);
                                     dm_auto_state[CHx] = DM_AUTO_IDLE;
                                     dm_auto_t0_ms[CHx] = 0u;
                                 }
@@ -1383,6 +1398,9 @@ public:
 
                                 if (ks == 0u)
                                 {
+                                    bmcu_link_dm_teardown(CHx, DM_AUTO_S1_PUSH,
+                                                          proto::TEARDOWN_KS_EMPTY, ks,
+                                                          now_ms - dm_auto_t0_ms[CHx]);
                                     dm_auto_state[CHx] = DM_AUTO_IDLE;
                                     dm_auto_t0_ms[CHx] = 0u;
                                 }
@@ -1395,6 +1413,9 @@ public:
                                 }
                                 else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_TIMEOUT_MS)
                                 {
+                                    bmcu_link_dm_teardown(CHx, DM_AUTO_S1_PUSH,
+                                                          proto::TEARDOWN_TIMEOUT, ks,
+                                                          now_ms - dm_auto_t0_ms[CHx]);
                                     dm_fail_latch[CHx] = 1u;
                                     dm_auto_state[CHx] = DM_AUTO_S1_FAIL_RETRACT;
                                     dm_auto_t0_ms[CHx] = now_ms;
@@ -1438,6 +1459,11 @@ public:
                                     }
                                     else
                                     {
+                                        bmcu_link_dm_teardown(
+                                            CHx, DM_AUTO_S2_PUSH,
+                                            ks == 0u ? proto::TEARDOWN_KS_EMPTY
+                                                     : proto::TEARDOWN_KS_DEVIATED,
+                                            ks, now_ms - dm_auto_t0_ms[CHx]);
                                         dm_auto_state[CHx]    = DM_AUTO_IDLE;
                                         dm_auto_try[CHx]      = 0u;
                                         dm_auto_remain_counts[CHx] = 0;
@@ -1460,6 +1486,9 @@ public:
                                 if (MC_PULL_pct_q[CHx] >
                                     static_cast<int32_t>(DM_AUTO_BUF_ABORT_PCT * 100.0f))
                                 {
+                                    bmcu_link_dm_teardown(CHx, DM_AUTO_S2_PUSH,
+                                                          proto::TEARDOWN_BUFFER_ABORT, ks,
+                                                          now_ms - dm_auto_t0_ms[CHx]);
                                     uint8_t t = dm_auto_try[CHx];
                                     if (t < 255u) t++;
                                     dm_auto_try[CHx] = t;
@@ -2878,6 +2907,15 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             // only the fault latch is protected. Widening that is a separate
             // change and needs the excursion widths this one does not.
             if (withdrawn) dm_fail_latch[ch] = 0u;
+            // This is the teardown the state machine never sees: it happens in
+            // the sweep, above and outside the machine, so from inside there is
+            // simply no state any more. Reporting it only when something was
+            // actually running keeps an idle channel from narrating.
+            if (dm_auto_state[ch] != DM_AUTO_IDLE)
+                bmcu_link_dm_teardown(ch, dm_auto_state[ch], proto::TEARDOWN_GLOBAL_CLEAR, ks,
+                                      dm_auto_t0_ms[ch] != 0u
+                                          ? (uint32_t)(time_now - dm_auto_t0_ms[ch])
+                                          : 0u);
             dm_auto_state[ch]        = DM_AUTO_IDLE;
             dm_auto_try[ch]          = 0u;
             dm_auto_t0_ms[ch]        = 0u;

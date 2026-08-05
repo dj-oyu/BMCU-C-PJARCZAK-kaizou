@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 9,
+  "revision": 10,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -122,6 +122,18 @@
         {"name": "foreign_count", "offset": 4, "type": "u32", "note": "frames addressed to another AMS on the bus, suppressed from the event stream; this is the only place their volume appears"},
         {"name": "unsupported_type", "offset": 8, "type": "u16", "count": 2, "note": "long-frame types the parser resolved to nothing, first-seen-wins; 0 means the slot is unused"},
         {"name": "unsupported_count", "offset": 12, "type": "u16", "count": 2, "note": "occurrences of the type at the same index, saturating at 65535"}
+      ]
+    },
+    "dm_teardown_payload": {
+      "description": "event_payload payload when record_type is 11 (dm_teardown): the DM autoload state machine left a state because the online key read something it did not expect. Repeats of the same state and cause on one channel are rate limited to 250 ms, because the event ring is eight slots and a chattering channel would otherwise evict every other event; the skipped ones are counted rather than lost.",
+      "endianness": "little",
+      "size": 8,
+      "fields": [
+        {"name": "slot", "offset": 0, "type": "u8"},
+        {"name": "dm_auto_state", "offset": 1, "type": "u8", "note": "the DM_AUTO_* state being left: 0 idle, 1 s1_debounce, 2 s1_push, 3 s1_fail_retract, 4 s2_push, 5 s2_retract, 6 s2_fail_retract"},
+        {"name": "cause", "offset": 2, "type": "u8", "enum": "dm_teardown_cause"},
+        {"name": "ks", "offset": 3, "type": "u8", "note": "the key reading that caused the teardown, same encoding as channel_flags.ks: 0 none, 1 both, 2 external only, 3 internal only"},
+        {"name": "held_ms", "offset": 4, "type": "u32", "note": "how long the machine had been in that state. This is the point of the record: for a s1_debounce deviation it is the width of the lever excursion that aborted an in-progress load, and sizing any tolerance for lever float needs those widths. The bench session that raised the question recorded only how many excursions there were, never how wide."}
       ]
     },
     "log_payload": {

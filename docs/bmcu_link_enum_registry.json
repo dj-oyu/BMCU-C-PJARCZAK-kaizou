@@ -122,7 +122,15 @@
       "7": "safety_decision",
       "8": "diagnostic_counter",
       "9": "printer_long_transaction",
-      "10": "reset_state"
+      "10": "reset_state",
+      "11": "dm_teardown"
+    },
+    "dm_teardown_cause": {
+      "1": "ks_deviated",
+      "2": "ks_empty",
+      "3": "timeout",
+      "4": "global_clear",
+      "5": "buffer_abort"
     },
     "diag_counter": {
       "1": "ams_service_gap_ms",

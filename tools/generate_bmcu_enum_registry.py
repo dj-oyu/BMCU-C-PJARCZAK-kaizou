@@ -13,7 +13,7 @@ PREFIXES = {
     "RecordSeverity": "SEVERITY_", "RecordSource": "SOURCE_",
     "CommandOwner": "OWNER_", "TransactionOutcome": "OUTCOME_",
     "DecisionReason": "REASON_", "RecordType": "RECORD_",
-    "DiagCounter": "DIAG_COUNTER_",
+    "DiagCounter": "DIAG_COUNTER_", "DmTeardownCause": "TEARDOWN_",
     "ResetState": "RESET_", "ResetCancelReason": "RESET_CANCEL_",
     "SensorValidity": "SENSOR_", "StateField": "STATE_FIELD_",
 }
@@ -22,7 +22,7 @@ NAMES = {
     "FullStatusRecordType": "full_status_record_type", "AckResult": "ack_result",
     "RecordSeverity": "severity", "RecordSource": "source", "CommandOwner": "command_owner",
     "TransactionOutcome": "outcome", "DecisionReason": "reason", "RecordType": "record_type",
-    "DiagCounter": "diag_counter",
+    "DiagCounter": "diag_counter", "DmTeardownCause": "dm_teardown_cause",
     "ResetState": "reset_state", "ResetCancelReason": "reset_cancel_reason",
     "SensorValidity": "sensor_validity", "StateField": "state_field",
 }

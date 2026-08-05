@@ -153,6 +153,16 @@ StatusCache g_status_cache = {};
 PrinterBusCache g_printer_bus = {};
 PrinterTransactionEventCache g_printer_transaction_event = {};
 uint32_t g_printer_transaction_event_suppressed = 0u;
+
+struct DmTeardownGate
+{
+    uint32_t last_emit_tick;
+    uint8_t state;
+    uint8_t cause;
+    uint8_t valid;
+};
+DmTeardownGate g_dm_teardown[4] = {};
+uint32_t g_dm_teardown_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
 UnsupportedLongCache g_unsupported_long = {};
 uint32_t g_printer_foreign_count = 0u;
@@ -1372,6 +1382,52 @@ void bmcu_link_motion_fault(uint8_t channel, uint8_t previous_fault, uint8_t fau
     g_status_dirty |= BMCU_STATUS_CHANGE_MOTION;
 }
 
+
+void bmcu_link_dm_teardown(uint8_t channel, uint8_t state, uint8_t cause, uint8_t ks,
+                           uint32_t held_ms)
+{
+    if (channel >= 4u) return;
+
+    // The event ring is eight slots. That is ample for teardowns at human
+    // scale -- a bench session counted thirteen lever excursions in total --
+    // but the hardware this record exists to characterise is precisely the
+    // hardware that chatters, and a channel crossing its threshold repeatedly
+    // could fill the ring and push every other event out. Suppress a repeat of
+    // the same state and cause on the same channel; a different cause always
+    // gets through, because that is a different fact.
+    //
+    // Widths survive the suppression: the question is what excursions look
+    // like, which a sample answers. How many were skipped is counted rather
+    // than lost, so a suspiciously quiet channel cannot be mistaken for a
+    // healthy one.
+    const uint32_t tick = time_ticks32();
+    const uint32_t repeat_interval = time_hw_tpms * 250u;
+    if (g_dm_teardown[channel].valid != 0u &&
+        g_dm_teardown[channel].state == state &&
+        g_dm_teardown[channel].cause == cause && repeat_interval != 0u &&
+        static_cast<uint32_t>(tick - g_dm_teardown[channel].last_emit_tick) < repeat_interval)
+    {
+        if (g_dm_teardown_suppressed != 0xFFFFFFFFu) ++g_dm_teardown_suppressed;
+        return;
+    }
+    g_dm_teardown[channel].valid = 1u;
+    g_dm_teardown[channel].state = state;
+    g_dm_teardown[channel].cause = cause;
+    g_dm_teardown[channel].last_emit_tick = tick;
+
+    LogRecord record = {};
+    record.header.hw_tick32 = tick;
+    record.header.type = RECORD_DM_TEARDOWN;
+    record.header.severity = SEVERITY_INFO;
+    record.header.source = SOURCE_MOTION;
+    record.header.payload_length = sizeof(LogDmTeardownPayload);
+    record.payload.dm_teardown.slot = channel;
+    record.payload.dm_teardown.state = state;
+    record.payload.dm_teardown.cause = cause;
+    record.payload.dm_teardown.ks = ks;
+    record.payload.dm_teardown.held_ms = held_ms;
+    push_log_record(record);
+}
 
 void bmcu_link_merger_tail_refused(uint32_t count)
 {

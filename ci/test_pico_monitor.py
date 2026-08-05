@@ -269,6 +269,23 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertTrue(message["channel_data"]["sensor_online"])
         self.assertTrue(message["channel_data"]["sensor_good"])
 
+    def test_dm_teardown_event_carries_how_long_the_state_was_held(self):
+        # held_ms is the whole reason the record exists. A S1_DEBOUNCE
+        # teardown with cause ks_deviated says the key left `outer` after this
+        # many milliseconds, which is the excursion width the bench could only
+        # ever count.
+        payload = (bytes((2, 1, 1, 3)) + (37).to_bytes(4, "little"))
+        data = ((500).to_bytes(4, "little") + bytes((11, 1, 2, 8)) + payload)
+        self.monitor._handle_frame(frame(link.EVENT, 11, data), 100)
+
+        event = self.monitor.events[-1]
+        self.assertEqual(event["event_name"], "dm_teardown")
+        self.assertEqual(event["slot"], 2)
+        self.assertEqual(event["dm_auto_state"], 1)
+        self.assertEqual(event["cause"], 1)
+        self.assertEqual(event["ks"], 3)
+        self.assertEqual(event["held_ms"], 37)
+
     def _channel_record(self, own_flags):
         record_data = bytearray(16)
         record_data[0] = 2

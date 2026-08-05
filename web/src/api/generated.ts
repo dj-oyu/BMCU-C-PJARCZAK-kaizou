@@ -279,6 +279,16 @@ export const BmcuDiagCounter = {
 } as const
 export type BmcuDiagCounter = (typeof BmcuDiagCounter)[keyof typeof BmcuDiagCounter]
 
+/** BMCU Link dm_teardown_cause */
+export const BmcuDmTeardownCause = {
+  KsDeviated: 1,
+  KsEmpty: 2,
+  Timeout: 3,
+  GlobalClear: 4,
+  BufferAbort: 5,
+} as const
+export type BmcuDmTeardownCause = (typeof BmcuDmTeardownCause)[keyof typeof BmcuDmTeardownCause]
+
 /** BMCU Link full_status_record_type */
 export const BmcuFullStatusRecordType = {
   Global: 1,
@@ -369,6 +379,7 @@ export const BmcuRecordType = {
   DiagnosticCounter: 8,
   PrinterLongTransaction: 9,
   ResetState: 10,
+  DmTeardown: 11,
 } as const
 export type BmcuRecordType = (typeof BmcuRecordType)[keyof typeof BmcuRecordType]
 

@@ -46,6 +46,7 @@ FULL_RECORD_PROBE = 13
 RECORD_PRINTER_TRANSACTION = 3
 RECORD_PRINTER_LONG_TRANSACTION = 9
 RECORD_RESET_STATE = 10
+RECORD_DM_TEARDOWN = 11
 
 
 def crc16_ccitt_false(data):
@@ -739,6 +740,15 @@ class BMCUMonitor:
             event.update({"event_name": "reset_state",
                           "operation_id": _u32(payload, 0), "reset_state": payload[4],
                           "request_reason": payload[5], "cancel_reason": payload[6]})
+        elif (event["record_type"] == RECORD_DM_TEARDOWN and
+              event["payload_length"] >= 8):
+            # held_ms is why this record exists: it is how long the machine had
+            # been in that state, which for a S1_DEBOUNCE deviation is the width
+            # of the lever excursion that aborted the load. The bench that
+            # raised the question could only count those, never time them.
+            event.update({"event_name": "dm_teardown", "slot": payload[0],
+                          "dm_auto_state": payload[1], "cause": payload[2],
+                          "ks": payload[3], "held_ms": _u32(payload, 4)})
         elif (event["record_type"] == RECORD_PRINTER_LONG_TRANSACTION and
               event["payload_length"] >= 8):
             event.update({"event_name": "printer_long_transaction",

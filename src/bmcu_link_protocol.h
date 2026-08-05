@@ -122,6 +122,24 @@ enum RecordType : uint8_t
     RECORD_STATE_CHANGE = 4u, RECORD_SENSOR = 5u, RECORD_COMMAND_RESULT = 6u,
     RECORD_SAFETY_DECISION = 7u, RECORD_DIAGNOSTIC_COUNTER = 8u,
     RECORD_PRINTER_LONG_TRANSACTION = 9u, RECORD_RESET_STATE = 10u,
+    RECORD_DM_TEARDOWN = 11u,
+};
+
+// Why the DM autoload state machine left the state it was in. The machine is
+// torn down from several places on a key reading it did not expect, and until
+// this record existed every one of those was silent: the bench could see that
+// autoload had not happened and nothing about why.
+//
+// TEARDOWN_KS_DEVIATED is the one the chatter investigation needs. S1_DEBOUNCE
+// resets on any deviation from `outer`, with no tolerance, so a lever that
+// floats across a threshold aborts a load the operator is actively attempting.
+// The record carries how long the state had been held, which is the excursion
+// width the bench measured only as a count.
+enum DmTeardownCause : uint8_t
+{
+    TEARDOWN_KS_DEVIATED = 1u, TEARDOWN_KS_EMPTY = 2u,
+    TEARDOWN_TIMEOUT = 3u, TEARDOWN_GLOBAL_CLEAR = 4u,
+    TEARDOWN_BUFFER_ABORT = 5u,
 };
 
 // Counter ids carried by RECORD_DIAGNOSTIC_COUNTER (LogDiagnosticCounterPayload).
@@ -280,6 +298,18 @@ struct LogDiagnosticCounterPayload
     uint32_t value;
 };
 
+// held_ms is the point of the record. Sizing the hold in items 5-6 of the
+// bench notes needs excursion widths, and the session that raised the question
+// recorded only how many there were.
+struct LogDmTeardownPayload
+{
+    uint8_t slot;
+    uint8_t state;
+    uint8_t cause;
+    uint8_t ks;
+    uint32_t held_ms;
+};
+
 union LogRecordPayload
 {
     LogBootPayload boot;
@@ -292,6 +322,7 @@ union LogRecordPayload
     LogCommandResultPayload command_result;
     LogSafetyDecisionPayload safety_decision;
     LogDiagnosticCounterPayload diagnostic_counter;
+    LogDmTeardownPayload dm_teardown;
     uint8_t raw[8];
 };
 
@@ -312,6 +343,8 @@ static_assert(sizeof(LogPrinterLongTransactionPayload) == 8u,
               "LogPrinterLongTransactionPayload ABI changed");
 static_assert(sizeof(LogResetStatePayload) == 8u,
               "LogResetStatePayload ABI changed");
+static_assert(sizeof(LogDmTeardownPayload) == 8u,
+              "LogDmTeardownPayload ABI changed");
 static_assert(sizeof(LogRecord) == 16u, "LogRecord ABI changed");
 }
 
