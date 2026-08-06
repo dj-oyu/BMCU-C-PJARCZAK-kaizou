@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 10,
+  "revision": 11,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -134,6 +134,15 @@
         {"name": "cause", "offset": 2, "type": "u8", "enum": "dm_teardown_cause"},
         {"name": "ks", "offset": 3, "type": "u8", "note": "the key reading that caused the teardown, same encoding as channel_flags.ks: 0 none, 1 both, 2 external only, 3 internal only"},
         {"name": "held_ms", "offset": 4, "type": "u32", "note": "how long the machine had been in that state. This is the point of the record: for a s1_debounce deviation it is the width of the lever excursion that aborted an in-progress load, and sizing any tolerance for lever float needs those widths. The bench session that raised the question recorded only how many excursions there were, never how wide."}
+      ]
+    },
+    "dm_key_record_data": {
+      "description": "record_data of full_status_record when record_type is 14 (dm_key). Raw online-key voltages and the per-channel \"none\" threshold, in millivolts. STATUS carries only the decoded four-value ks, which cannot distinguish a switch that was pressed but fell short of its band from one that never moved.",
+      "endianness": "little",
+      "size": 16,
+      "fields": [
+        {"name": "key_mv", "offset": 0, "type": "u16", "count": 4, "unit": "millivolt", "note": "raw ADC reading per channel, the value dm_key_to_state decodes. Bands: below none_thr_mv is none, above 1700 is both, above 1400 is outer, otherwise inner. The 1400 and 1700 bounds are hardcoded and shared by every channel; only none_thr_mv is per-channel. Saturates at 65535."},
+        {"name": "none_thr_mv", "offset": 8, "type": "u16", "count": 4, "unit": "millivolt", "note": "MC_DM_KEY_NONE_THRESH, restored from calibration NVM and floored at 600 mV. A channel calibrated while its lever floated gets a threshold sitting close to its own resting voltage and will read none intermittently ever after, which is indistinguishable on the wire from a switch that is genuinely released."}
       ]
     },
     "log_payload": {

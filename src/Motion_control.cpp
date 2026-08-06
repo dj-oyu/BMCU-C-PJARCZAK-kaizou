@@ -239,6 +239,11 @@ float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
 int8_t MC_PULL_POLARITY[4]     = {1, 1, 1, 1};
 float MC_DM_KEY_NONE_THRESH[4] = {0.60f, 0.60f, 0.60f, 0.60f};
 
+// Last raw online-key reading per channel, in volts. Only ever written by the
+// ADC read and only ever read by the link accessor below; the control paths
+// keep using their own locals.
+static float g_dm_key_v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
 uint8_t MC_PULL_pct[4]        = {50, 50, 50, 50};
 static int16_t MC_PULL_pct_q[4] = {5000, 5000, 5000, 5000}; // 0.01 percent
 
@@ -633,6 +638,12 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
         if (pct_q > 10000) pct_q = 10000;
         MC_PULL_pct_q[i] = static_cast<int16_t>(pct_q);
     }
+
+    // Kept so the link can report what dm_key_to_state actually saw. Everything
+    // downstream of that function sees only the decoded ks, which cannot say
+    // whether a pressed switch reached its band or fell short of it.
+    g_dm_key_v[0] = key0; g_dm_key_v[1] = key1;
+    g_dm_key_v[2] = key2; g_dm_key_v[3] = key3;
 
 #if BMCU_DM_TWO_MICROSWITCH
     const float keyv[4] = { key0, key1, key2, key3 };
@@ -3370,6 +3381,22 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     output->controller_motion = static_cast<uint8_t>(MOTOR_CONTROL[channel].motion);
     output->polarity_valid = MOTOR_CONTROL[channel].motor_polarity_valid ? 1u : 0u;
     return true;
+}
+
+static inline uint16_t volts_to_mv_saturating(float v)
+{
+    if (!(v > 0.0f)) return 0u;            // also catches NaN
+    const float mv = v * 1000.0f + 0.5f;
+    return (mv >= 65535.0f) ? 65535u : static_cast<uint16_t>(mv);
+}
+
+void Motion_control_get_dm_key_millivolts(uint16_t key_mv[4], uint16_t none_thr_mv[4])
+{
+    for (uint8_t i = 0; i < kChCount; ++i)
+    {
+        key_mv[i] = volts_to_mv_saturating(g_dm_key_v[i]);
+        none_thr_mv[i] = volts_to_mv_saturating(MC_DM_KEY_NONE_THRESH[i]);
+    }
 }
 
 uint8_t Motion_control_get_channel_flags(uint8_t channel)

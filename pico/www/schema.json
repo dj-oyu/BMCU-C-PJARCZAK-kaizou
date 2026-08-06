@@ -401,7 +401,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 10,
+ "revision": 11,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -532,6 +532,29 @@
     }
    ],
    "header_size": 16
+  },
+  "dm_key_record_data": {
+   "description": "record_data of full_status_record when record_type is 14 (dm_key). Raw online-key voltages and the per-channel \"none\" threshold, in millivolts. STATUS carries only the decoded four-value ks, which cannot distinguish a switch that was pressed but fell short of its band from one that never moved.",
+   "endianness": "little",
+   "fields": [
+    {
+     "count": 4,
+     "name": "key_mv",
+     "note": "raw ADC reading per channel, the value dm_key_to_state decodes. Bands: below none_thr_mv is none, above 1700 is both, above 1400 is outer, otherwise inner. The 1400 and 1700 bounds are hardcoded and shared by every channel; only none_thr_mv is per-channel. Saturates at 65535.",
+     "offset": 0,
+     "type": "u16",
+     "unit": "millivolt"
+    },
+    {
+     "count": 4,
+     "name": "none_thr_mv",
+     "note": "MC_DM_KEY_NONE_THRESH, restored from calibration NVM and floored at 600 mV. A channel calibrated while its lever floated gets a threshold sitting close to its own resting voltage and will read none intermittently ever after, which is indistinguishable on the wire from a switch that is genuinely released.",
+     "offset": 8,
+     "type": "u16",
+     "unit": "millivolt"
+    }
+   ],
+   "size": 16
   },
   "dm_teardown_payload": {
    "description": "event_payload payload when record_type is 11 (dm_teardown): the DM autoload state machine left a state because the online key read something it did not expect. Repeats of the same state and cause on one channel are rate limited to 250 ms, because the event ring is eight slots and a chattering channel would otherwise evict every other event; the skipped ones are counted rather than lost.",

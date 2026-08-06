@@ -43,6 +43,7 @@ FULL_RECORD_PRINTER_TX_FAULT = 10
 FULL_RECORD_AMS_SERVICE = 11
 FULL_RECORD_AMS_REGISTRATION = 12
 FULL_RECORD_PROBE = 13
+FULL_RECORD_DM_KEY = 14
 RECORD_PRINTER_TRANSACTION = 3
 RECORD_PRINTER_LONG_TRANSACTION = 9
 RECORD_RESET_STATE = 10
@@ -836,6 +837,16 @@ class BMCUMonitor:
                 "controller_motion": (record_data[15] & 0x7f) if record_data[15] & 0x80 else None,
             }
             message["channel_data"] = channel
+        if record_type == FULL_RECORD_DM_KEY and len(record_data) >= 16:
+            # STATUS carries only the decoded ks, so a switch that was pressed
+            # but fell short of the 1400 mV `outer` band looks exactly like one
+            # that never moved. These are the numbers behind that decode.
+            message.update({
+                "dm_key": {
+                    "key_mv": [_u16(record_data, i * 2) for i in range(4)],
+                    "none_thr_mv": [_u16(record_data, 8 + i * 2) for i in range(4)],
+                }})
+            return
         if record_type == FULL_RECORD_PRINTER_AUTH:
             message["printer_auth_data"] = {
                 "last_type": _u16(record_data, 0), "count_040d": _u16(record_data, 2),

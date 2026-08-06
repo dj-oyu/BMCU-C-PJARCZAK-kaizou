@@ -73,6 +73,16 @@ enum FullStatusRecordType : uint8_t
     FULL_RECORD_PRINTER_TX_CORE = 9u, FULL_RECORD_PRINTER_TX_FAULT = 10u,
     FULL_RECORD_AMS_SERVICE = 11u, FULL_RECORD_AMS_REGISTRATION = 12u,
     FULL_RECORD_PROBE = 13u,
+    // Raw DM online-key voltages and the per-channel "none" threshold, in
+    // millivolts. Everything downstream of dm_key_to_state sees only the
+    // decoded four-value ks, so a channel that reads `inner` when its outer
+    // switch is pressed is indistinguishable from one whose switch never
+    // moved. The bands are 1.4 V and 1.7 V, hardcoded and shared by every
+    // channel, while none_thr alone is per-channel and comes from calibration
+    // -- so both "the switch does not reach the band" and "the threshold sits
+    // on top of the resting voltage" are live explanations that the wire could
+    // not tell apart. This record carries the numbers that separate them.
+    FULL_RECORD_DM_KEY = 14u,
 };
 
 enum AckResult : uint8_t

@@ -110,17 +110,13 @@ struct PrinterAuthCache
 // GLOBAL 1 + CHANNEL 4 + PRINTER_BUS 1 + PRINTER_AUTH 1 + PRINTER_RX 3 +
 // PRINTER_TX 2 + AMS_SERVICE 1 + AMS_REGISTRATION 1 + COUNTERS 1 = 15.
 // A full snapshot with every section and all four channels emits:
-//   global 1, channel 4, probe 1, printer_bus 1, printer_auth 1,
+//   dm_key 1, global 1, channel 4, probe 1, printer_bus 1, printer_auth 1,
 //   printer_rx core/loss/dma 3, printer_tx core/fault 2, ams_service 1,
-//   ams_registration 1, counters 1  =  16
+//   ams_registration 1, counters 1  =  17
 //
-// This was 15. append_full_record routes the overflow to a throwaway slot and
-// counts it in g_full_record_drop, so counters -- the last record built -- was
-// silently dropped from every complete snapshot. Nothing reported it, because
-// the drop counter lives in the record being dropped.
-//
-// Sized with margin so adding a record is a deliberate act rather than a
-// silent eviction of whatever happens to be built last.
+// The margin left when this was raised to 18 is what dm_key spends. Adding
+// another record needs the cap raised again -- append_full_record does not
+// fail on overflow, it drops silently into g_full_record_drop.
 constexpr uint8_t kMaxFullStatusRecords = 18u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
@@ -632,6 +628,24 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
     g_full_sequence = sequence;
     g_full_tick = time_ticks32();
     ++g_full_snapshot_id;
+
+    if (section_mask & FULL_SECTION_CHANNELS)
+    {
+        // Four key voltages and four thresholds, in millivolts: exactly the
+        // sixteen bytes a record holds. Carried in FULL_STATUS rather than as
+        // an event because it is a level, not a transition, and the event ring
+        // is eight slots -- a voltage that moves every ADC pass would evict
+        // everything else, which is the mistake pressure already made.
+        FullStatusRecord& key = append_full_record(FULL_RECORD_DM_KEY);
+        uint16_t key_mv[4] = {0u, 0u, 0u, 0u};
+        uint16_t thr_mv[4] = {0u, 0u, 0u, 0u};
+        Motion_control_get_dm_key_millivolts(key_mv, thr_mv);
+        for (uint8_t ch = 0u; ch < 4u; ++ch)
+        {
+            put16(&key.data[ch * 2u], key_mv[ch]);
+            put16(&key.data[8u + ch * 2u], thr_mv[ch]);
+        }
+    }
 
     if (section_mask & FULL_SECTION_GLOBAL)
     {

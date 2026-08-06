@@ -36,6 +36,13 @@ struct MotionControlChannelTelemetry
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output);
 
+// Raw online-key voltage and the per-channel "none" threshold, in millivolts,
+// for all four channels. The decoded ks that STATUS carries cannot answer
+// whether a pressed switch actually reaches the 1.4 V `outer` band, nor
+// whether a calibrated threshold sits too close to the resting voltage; these
+// are the numbers behind that decode. Saturating at 65535 mV.
+void Motion_control_get_dm_key_millivolts(uint16_t key_mv[4], uint16_t none_thr_mv[4]);
+
 // Packed fault-latch and switch state for one channel; see BmcuChannelFlags in
 // bmcu_link.h for the bit assignment. Kept out of MotionControlChannelTelemetry
 // because this is raw state going straight to the wire, not something any
