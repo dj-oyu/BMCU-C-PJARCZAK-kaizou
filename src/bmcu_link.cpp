@@ -1,5 +1,6 @@
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "pressure_event_policy.h"
 #include "bmcu_soft_reset_policy.h"
 #include "bmcu_ams_service_watch.h"
 #include "_bus_hardware.h"
@@ -500,12 +501,36 @@ void set_cached_u8(uint8_t& cached, uint8_t value, StateField field, uint8_t slo
     if (emit) push_state_event(field, slot, previous, value, source, severity);
 }
 
-void set_cached_u16(uint16_t& cached, uint16_t value, StateField field,
-                    RecordSource source, RecordSeverity severity, bool emit)
+// Pressure is the one analogue value in a mechanism built for discrete state.
+// The rule for when a change is worth an event lives in
+// src/pressure_event_policy.h, where it can be tested on the host; the reasoning
+// and the bench measurements that produced the deadband are in its header.
+uint16_t g_pressure_reported = 0u;
+bool g_pressure_reported_valid = false;
+
+void set_cached_pressure(uint16_t value, bool emit)
 {
-    const uint16_t previous = cached;
-    cached = value;
-    if (emit) push_state_event(field, 0xFFu, previous, value, source, severity);
+    // The cache is what STATUS puts on the wire, so it always takes the true
+    // reading. Holding it back to serve as the event reference would make every
+    // STATUS report a stale pressure.
+    g_status_cache.pressure = value;
+
+    if (!emit || !g_pressure_reported_valid)
+    {
+        g_pressure_reported = value;
+        g_pressure_reported_valid = true;
+        return;
+    }
+
+    const uint16_t reported = g_pressure_reported;
+    if (!pressure_event::should_report(reported, value)) return;
+
+    g_pressure_reported = value;
+    // previous is the last reported value rather than the last sample, which
+    // keeps the event stream self-consistent: each event's previous equals the
+    // preceding event's value, with no invisible gap between them.
+    push_state_event(STATE_FIELD_PRESSURE, 0xFFu, reported, value,
+                     SOURCE_SENSOR, SEVERITY_INFO);
 }
 
 void apply_status_changes(uint32_t reasons, bool emit_events)
@@ -531,8 +556,7 @@ void apply_status_changes(uint32_t reasons, bool emit_events)
                           STATE_FIELD_MOTION, ch, SOURCE_MOTION, SEVERITY_INFO, emit);
     }
     if (all || (reasons & BMCU_STATUS_CHANGE_PRESSURE))
-        set_cached_u16(g_status_cache.pressure, state.pressure, STATE_FIELD_PRESSURE,
-                       SOURCE_SENSOR, SEVERITY_INFO, emit);
+        set_cached_pressure(state.pressure, emit);
     if (all || (reasons & BMCU_STATUS_CHANGE_LED))
         set_cached_u8(g_status_cache.led_mode, g_led_mode, STATE_FIELD_LED_MODE, 0xFFu,
                       SOURCE_MANAGEMENT, SEVERITY_INFO, emit);
