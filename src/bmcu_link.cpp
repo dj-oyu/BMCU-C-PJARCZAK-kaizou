@@ -631,6 +631,10 @@ void capture_full_status(uint8_t section_mask, uint8_t channel_mask, uint16_t se
 
     if (section_mask & FULL_SECTION_CHANNELS)
     {
+        // TEMPORARY -- see issues/16 for the end condition. Deleting this
+        // block is most of the removal; the rest is the accessor it calls and
+        // the decoders that read it.
+        //
         // Four key voltages and four thresholds, in millivolts: exactly the
         // sixteen bytes a record holds. Carried in FULL_STATUS rather than as
         // an event because it is a level, not a transition, and the event ring

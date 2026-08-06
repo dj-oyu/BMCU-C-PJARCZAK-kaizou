@@ -73,6 +73,11 @@ enum FullStatusRecordType : uint8_t
     FULL_RECORD_PRINTER_TX_CORE = 9u, FULL_RECORD_PRINTER_TX_FAULT = 10u,
     FULL_RECORD_AMS_SERVICE = 11u, FULL_RECORD_AMS_REGISTRATION = 12u,
     FULL_RECORD_PROBE = 13u,
+    // TEMPORARY -- remove when the bench question is answered.
+    // https://github.com/dj-oyu/BMCU-C-PJARCZAK-kaizou/issues/16 carries the
+    // end condition and the full deletion inventory. This record was added to
+    // settle one question, not to become part of the interface.
+    //
     // Raw DM online-key voltages and the per-channel "none" threshold, in
     // millivolts. Everything downstream of dm_key_to_state sees only the
     // decoded four-value ks, so a channel that reads `inner` when its outer
