@@ -109,7 +109,19 @@ struct PrinterAuthCache
 
 // GLOBAL 1 + CHANNEL 4 + PRINTER_BUS 1 + PRINTER_AUTH 1 + PRINTER_RX 3 +
 // PRINTER_TX 2 + AMS_SERVICE 1 + AMS_REGISTRATION 1 + COUNTERS 1 = 15.
-constexpr uint8_t kMaxFullStatusRecords = 15u;
+// A full snapshot with every section and all four channels emits:
+//   global 1, channel 4, probe 1, printer_bus 1, printer_auth 1,
+//   printer_rx core/loss/dma 3, printer_tx core/fault 2, ams_service 1,
+//   ams_registration 1, counters 1  =  16
+//
+// This was 15. append_full_record routes the overflow to a throwaway slot and
+// counts it in g_full_record_drop, so counters -- the last record built -- was
+// silently dropped from every complete snapshot. Nothing reported it, because
+// the drop counter lives in the record being dropped.
+//
+// Sized with margin so adding a record is a deliberate act rather than a
+// silent eviction of whatever happens to be built last.
+constexpr uint8_t kMaxFullStatusRecords = 18u;
 constexpr uint8_t kEventSlots = 8u;
 static_assert((kEventSlots & (kEventSlots - 1u)) == 0u, "Event ring must be power of two");
 
