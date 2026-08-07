@@ -17,7 +17,24 @@ test too, and passed. **Nothing in the tree is now unvalidated.** The open items
 are the three low-priority defects in §2.2/§2.3/§2.4, the untested runout path
 in §5 Test C, and one non-urgent mechanical question in §6.9.
 
-**State at writing:** branch `alpha` at `b4725ee`, **pushed to origin**. Both
+**Addendum, later on 2026-08-08 — read §10 before using any snapshot-derived
+observation point in §7.** A second session that afternoon added an OLED status
+panel to the Pico bridge (§10.1) and, in validating it, established that **the
+printer-side link has had no baseline since the Pico last rebooted**: STATUS
+still streams and every field in it is correct, but `snapshot.bin` carries no
+channel data and `link_state` reads `stale` (§10.2). That is not a regression
+and not a firmware fault — it is what the bridge does when it joins a BMCU that
+is already running — but it silently disables the DM_KEY record, the
+motion-fault code and `motor_pwm`, which several procedures below depend on.
+The printer was mid-print at writing, so the BMCU reboot that would fix it was
+deliberately not performed.
+
+**State at writing:** branch `alpha` at `1f9d41d`, **pushed to origin** (the
+firmware work below is at `b4725ee`; `11b38df` adds the Pico panel and its
+tests, `1f9d41d` repairs CI). Host suite 288 tests green locally. **GitHub
+`host-tests` had failed on every push since 2026-08-03** — see §10.3; it was a
+CI toolchain gap, never a code defect, but it means the green ticks on
+`b4725ee` and everything before it were absent, not passing. Both
 firmware fixes are committed (`fd4ae8d` pull-fault, `d441061` livelock) and a
 rebuild of that tree is byte-identical to the binary that passed Tests B and D,
 sha256 `e87f5d9c...4de49120`. One working BMCU
@@ -540,3 +557,106 @@ Still open and easy to lose: ams-a slot 4 "swallows a few cm, `ks` never moves"
 whether AHUB mode is alive; the Pico's accumulated journal, **now ~40 MB** and
 still never cleaned up; and the Bambuddy colour-hold edit (`dj-oyu/bambuddy#5`)
 was never confirmed to have released the held jobs.
+
+## 10. Addendum, 2026-08-08 afternoon — the panel, the baseline, and CI
+
+Bridge-side work only. No firmware was flashed, no BMCU was reset, and the
+printer was mid-print throughout; everything below was established over HTTP or
+by deploying the Pico, neither of which touches the BMCU.
+
+### 10.1 An OLED status ticker on the Pico bridge
+
+`pico/oled_ticker.py` + `pico/oled_ssd1306.py`, commit `11b38df`, running on
+`bmcu-monitor-a`. SSD1306 128x64 on **I2C1, GPIO6 (physical 9) SDA / GPIO7
+(physical 10) SCL**, 3V3 from physical pin 36. Enabled by default; a panel that
+does not answer costs one `oled` warning at boot and nothing at run time.
+
+**The wiring trap that cost the first hour:** the panel first went to *physical*
+pins 6 and 7, which are **GP4/GP5 — `bmcu-b`'s UART1 in the default link map**.
+The module was fine and answered at 0x3C the whole time; main.py had simply
+claimed the pins as a UART first. Symptom was `[Errno 5] EIO` at init with both
+lines reading high against an internal pull-down (the module's own pull-ups).
+An I2C scan on GP4/GP5 is what proved the module innocent.
+
+Row format, `1*#oK2U 85LJ`: slot, `*` merger owner (`T` once the tail passed the
+online key), `#` inserted, `o` at the online key, `K2` decoded ks (`K?` when the
+firmware predates the flags byte), motion char, pull %, then latches `L`/`J`/`D`
+low-pull/jam/DM-autoload and `F` motion fault. The top row is
+`A? -56 U+`: per-link state (`+` online, `~` resyncing, `?` stale, `!`
+incompatible, `x` offline), RSSI, and the Bambuddy uplink. The bottom row
+scrolls decoded events — `dm_teardown` with its `held_ms` included, which makes
+the panel the only ~10 Hz-resolution view that needs no polling script.
+
+Two properties worth not breaking. It writes **one 128-byte page per main-loop
+iteration** (~3 ms); a whole frame would stall the UART drain for ~23 ms. And
+it allocates nothing in the steady state, because MicroPython has no reference
+counting and main.py collects at most once a minute — the body is redrawn only
+when an integer digest of the page changes. `pico/README.md` documents the
+digest, the 24-bit mask it needs on a 31-bit-small-int port, and the one case
+the digest does not help (during a load, `pull_pct` moves every second, so the
+body really does redraw at `OLED_REFRESH_MS` and costs ~2 KB each time).
+
+### 10.2 The link has no baseline, and every snapshot procedure depends on one
+
+Measured 2026-08-08 afternoon, from the synthetic 0xF0 link record:
+
+```
+state_code=3 (stale)   channels_present=0     snapshot_age_ms=65535 (never)
+boot_session=0         tick_hz=0              variant=0xffff  build=0x00000000
+```
+
+`boot_session=0` is the diagnosis: **the Pico has never seen a HELLO**, because
+it rebooted into a BMCU that was already running. `link_state` only reaches
+`online` when a full snapshot completes (`bmcu_link.py:952`), and
+`GET_FULL_STATUS` is not being answered, so it retries three times and settles
+back to `stale` (`:545`).
+
+**STATUS is unaffected and correct.** Decoded live off the wire that afternoon:
+`current_slot=2`, `inserted_mask=0b1111`, `online_mask=0b0101`,
+`motion=[0,0,2,0]`, `pull=[45,53,52,48]`, `pressure=2621`, flags
+`[ks=2] [clear] [ks=1, loaded] [clear]` — internally consistent, the loaded
+channel being the one the printer selected, in `on_use`, with both switches
+closed. The panel rows matched it.
+
+What is unavailable until the BMCU reboots: **`FULL_RECORD_DM_KEY` (the
+key_mv/threshold record §7 calls the most useful record for anything
+switch-related), the motion-fault code, `motor_pwm`, and the firmware
+identity.** Test C and any `?refresh=1` procedure need those. A BMCU power
+cycle sends HELLO and restores them; it was not done because a print was
+running.
+
+Also worth knowing: `stale` makes `soft_reset_guard_error` refuse soft resets,
+so the link being down fails safe rather than open.
+
+### 10.3 CI has been red since 2026-08-03 for a toolchain reason
+
+`host-tests` failed on every push from 2026-08-03 while `web-ui` passed.
+`ci/test_web_ui_build.py::test_staged_page_matches_the_web_sources` rebuilds
+the page through npm and guarded on `shutil.which("npm")` — but a runner always
+has npm and never has the installed dependencies, so `npm run build` exited 127
+(`vite: not found`) and the test reported a missing toolchain as a drifted
+artifact. Fixed in `1f9d41d` by installing the web dependencies in that job
+(the suite refuses to skip, so the toolchain belongs there) and by also
+guarding on `web/node_modules`, so a developer without `npm ci` now gets a skip
+that says so. **No test was ever actually failing on content** — the 235/247/288
+counts quoted in this document were green locally throughout.
+
+### 10.4 Bridge heap, measured
+
+`heap_min_free` bottomed at **5,088 bytes** (free 58.7 KB, GC every ~60 s at
+26.7 ms, zero exceptions, 307 s uptime). The same ~5 KB low-water appeared at a
+similar uptime on the previous boot, which points at the HTTP endpoints rather
+than the panel — `/api/snapshot.bin` assembles 17 records in one pass, and the
+panel's steady-state allocation is nil. **Not confirmed.** The A/B that settles
+it is `OLED_ENABLED = False` for five minutes against five minutes with it on,
+with no HTTP requests during either window; it was deferred to after the print.
+
+### 10.5 Open, in order
+
+1. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
+   the snapshot completes — if it does not even after a HELLO, §10.2 becomes a
+   firmware question rather than a startup-order one.
+2. Run the heap A/B in §10.4.
+3. The `.local` name resolved fine from both `curl` and `urllib` this session,
+   which is not what §7's IPv6 warning predicts. One session is not enough to
+   retract it; if it keeps working, drop the warning.
