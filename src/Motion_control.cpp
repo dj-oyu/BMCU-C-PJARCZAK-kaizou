@@ -10,6 +10,7 @@
 #include "bmcu_link_protocol.h"
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
+#include "motion_fault_policy.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -2640,11 +2641,15 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
         if (held_mask & static_cast<uint8_t>(1u << i)) continue;
 
         auto &motor = MOTOR_CONTROL[i];
+        // This release check sits below the held_mask skip, so it is reachable
+        // only because latch_pull_fault forces filament_now_position back to
+        // idle in the same call that sets the fault -- a held channel can never
+        // be a faulted one. A fault-setting site that leaves the channel in
+        // filament_pulling_back or filament_redetect would make this release
+        // silently unreachable; keep the two coupled.
         if (motor.motion_fault != MOTION_FAULT_NONE)
         {
-            const bool explicit_pull_retry =
-                (i == num) && (motion == _filament_motion::pull_back);
-            if (explicit_pull_retry)
+            if (motion_fault::releases_pull_fault(i == num, motion))
             {
                 const uint8_t previous_fault = motor.motion_fault;
                 motor.motion_fault = MOTION_FAULT_NONE;
