@@ -275,6 +275,21 @@ web = WebUI(
 wifi.start(time.ticks_ms())
 web.start()
 
+# The panel is optional hardware on I2C1 (GPIO6/7 by default). A missing or
+# miswired display must cost one warning and nothing else: the bridge's job is
+# the UART link, and the ticker is a read-only view of it.
+oled = None
+try:
+    import oled_ticker
+
+    oled = oled_ticker.build(
+        config, monitors, wifi=wifi, client=client, metrics=metrics,
+        outbox=outbox, journal=journal,
+        platform_stats=lambda: (cached_wifi_rssi, cached_temperature_milli_c),
+        exception_count=lambda: runtime_log.exception_count)
+except Exception as error:  # noqa: BLE001 - no display is not a boot failure
+    runtime_log.warning("oled", "display unavailable: %s" % error)
+
 next_uart_index = 0
 last_loop_us = monotonic_us.now()
 last_diagnostic_ms = None
@@ -359,6 +374,13 @@ def service_once(now_ms):
         gc.collect()
         metrics.observe_gc(monotonic_us.now() - started)
         last_gc_ms = now_ms
+    # One 128-byte page per loop, about 3 ms on the 400 kHz bus. Pushing a
+    # whole 1 KB frame here instead would stall the UART drain for ~23 ms.
+    if oled is not None:
+        try:
+            oled.service(now_ms)
+        except Exception as error:
+            record_exception("oled", error)
     for monitor in monitors:
         try:
             monitor.ping_if_idle(now_ms)
