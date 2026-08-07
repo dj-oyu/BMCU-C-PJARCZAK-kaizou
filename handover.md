@@ -1,9 +1,8 @@
-# Handover — the loaders got fixed, and doing it turned up three firmware bugs
+# Handover — the loaders got fixed, and doing it turned up four firmware bugs
 
 Rewritten 2026-08-08, replacing the 2026-08-07 pull-fault handover, which
-survives at `git show 6f2a86f:handover.md` plus the working-tree version before
-this edit. Code line numbers are against tree `6f2a86f` unless a symbol name is
-given; the working tree adds the pull-fault fix, so numbers drift by a few
+survives at `git show 6f2a86f:handover.md`. Code line numbers are against tree
+`6f2a86f` unless a symbol name is given; the two fixes shift them by a few
 lines.
 
 **What changed since the last version.** The 2026-08-07 session ended with two
@@ -11,16 +10,17 @@ channels behaving inexplicably and a firmware fix awaiting hardware validation.
 The 2026-08-07/08 session resolved both channels — **both faults were
 mechanical, and the electronics were innocent in both cases** — and along the
 way produced the first-ever `dm_teardown` captures from the printer-side board.
-Those captures exposed three firmware defects that nobody was looking for; one
+Those captures exposed four firmware defects that nobody was looking for; one
 of them, an autoload livelock that drives the motor forever, is fixed and
 tested. The pull-fault fix from the previous session finally got its hardware
-test too, and passed. **Nothing in the tree is now unvalidated** — the open
-items are the two low-priority defects in §2.2/§2.3 and the untested runout
-path in §5 Test C.
+test too, and passed. **Nothing in the tree is now unvalidated.** The open items
+are the three low-priority defects in §2.2/§2.3/§2.4, the untested runout path
+in §5 Test C, and one non-urgent mechanical question in §6.9.
 
-**State at writing:** branch `alpha`, tree head `6f2a86f` plus **uncommitted
-changes** (the pull-fault fix, the livelock fix, their tests, this document).
-One working BMCU
+**State at writing:** branch `alpha` at `b4725ee`, **pushed to origin**. Both
+firmware fixes are committed (`fd4ae8d` pull-fault, `d441061` livelock) and a
+rebuild of that tree is byte-identical to the binary that passed Tests B and D,
+sha256 `e87f5d9c...4de49120`. One working BMCU
 (ams-a) on an **A1 mini**; the second unit's motherboard is destroyed and its
 main board survives as a bench rig (24 V input broken, COM6, switch/ADC only).
 Telemetry via the Pico bridge `bmcu-monitor-a` at `http://192.168.1.73` (use the
@@ -29,9 +29,9 @@ IPv4 — mDNS answers IPv6 first and urllib hangs).
 **What is running on the board — wire-verified 2026-08-08:**
 `variant_flags=0x9601`, `build_hash=0x0C0C8F38`. 0x9601 decodes as DM
 two-microswitch **on**, RGB off, not P1S, not soft-load, ams_a, retract 600 mm.
-This is `dist-2026-08-08\ams_a_060_autoload1_rgb0_livelock-fix.bin`, which
-carries **both** uncommitted fixes: the Stage2 livelock fix (tested, §5 Test D)
-and the pull-fault veto fix (still untested, §5 Test B).
+This is `dist-2026-08-08\ams_a_060_autoload1_rgb0_livelock-fix.bin`, carrying
+**both** fixes, and both have now passed on hardware: the Stage2 livelock fix
+(§5 Test D) and the pull-fault veto fix (§5 Test B).
 
 ---
 
@@ -93,11 +93,11 @@ the finger test possible. Also, `MC_PULL_calibration_boot()` early-returns when
 `Flash_MC_PULL_cal_read()` succeeds, so a reboot with hardware detached does
 **not** silently recalibrate.
 
-## 2. Three firmware defects found while doing that
+## 2. Four firmware defects found while doing that
 
-None of these caused the loader failures. All three are real and all three were
-invisible before this session. §2.1 is fixed in tree and awaiting a hardware
-test; §2.2 and §2.3 are untouched.
+None of these caused the loader failures. All four are real and all four were
+invisible before this session. §2.1 is fixed and hardware-tested; §2.4 is what
+fixing it exposed; §2.2 and §2.3 are untouched.
 
 ### 2.1 Autoload Stage2 livelocks — the retry limiter is defeated
 
@@ -177,6 +177,37 @@ The 200 ms online window decomposes as 100 ms `S1_DEBOUNCE` + 102 ms
 `DM_AUTO_IDLE`, so from inside the machine there is no state left — the source
 comment at `:2925` says as much. **Any diagnosis keyed on seeing cause=2 from
 `S1_PUSH` will wait forever.**
+
+### 2.4 `DM_AUTO_S2_FAIL_RETRACT` is unreachable, so a failed autoload leaves the buffer stuffed
+
+Exposed by fixing §2.1, and pre-existing rather than caused by it. The
+three-strike branch sets the latch and schedules the recovery retract in the
+same pass (`Motion_control.cpp` ~`:1526`):
+
+```c
+if (spent) {
+    dm_fail_latch[CHx] = 1u;
+    dm_auto_state[CHx] = DM_AUTO_S2_FAIL_RETRACT;
+}
+```
+
+but the next pass opens with (~`:1349`):
+
+```c
+if (dm_fail_latch[CHx]) { dm_autoload_x = 0; ...red... }
+else { ...the entire state machine, including case DM_AUTO_S2_FAIL_RETRACT... }
+```
+
+The latch skips the state machine wholesale, so the retract that is supposed to
+back the strand out and relieve the buffer never runs. `DM_AUTO_S2_FAIL_EXTRA`
+is reachable only from it and is dead for the same reason. The channel parks
+red with the buffer wherever the third abort left it — **observed at 100 % on
+ch2, 2026-08-08**.
+
+This was latent before §2.1 was fixed, because nothing ever reached three
+strikes. Not urgent: a stuffed buffer does not block a printer-commanded load
+(§6.9 covers what does), and withdrawing the filament clears it. But the
+recovery it was written to perform has never once executed.
 
 ## 3. The event ring is flooded, and it is not a cosmetic problem
 
@@ -358,21 +389,62 @@ Ordered by how settled they are.
    Fork-local. Closed.
 3. **Stage1 teardown has no debounce; `KS_EMPTY` is dead code** — §2.2, §2.3.
    Neither blocked any channel, so priority is low, but both are real.
-4. **Printer long-frames flood the event ring** — §3. Identity still unknown.
+
+4. **`S2_FAIL_RETRACT` is unreachable** — §2.4. The recovery retract after a
+   three-strike autoload failure has never executed; the buffer stays stuffed
+   until someone withdraws the filament.
+5. **Printer long-frames flood the event ring** — §3. Identity still unknown.
    Promoted from "no harm attributable" to "actively destroys diagnostics".
-5. **Per-loader lever geometry varies more than either document assumed** — ch0
+6. **Per-loader lever geometry varies more than either document assumed** — ch0
    parks at `both` (the *upstream* `dm_loaded` premise) while ch3 parked at
    `inner` (what this fork recorded as the norm), on the same board. Any
    `dm_loaded` redesign must assume both patterns coexist.
-6. **Loaded-latch (merger mutex) release design** — `src/ams_merger_policy.h`,
+7. **Loaded-latch (merger mutex) release design** — `src/ams_merger_policy.h`,
    `docs/BMCU_LOADED_LATCH_DESIGN.md`. The TAIL work addressed the runout case
    but rows 3 and 5 are deliberately deferred: commanded retracts still release
    at command time, not completion, so the merger is occupied-but-unowned during
    every retract. Untested on hardware (§5 Test C).
-7. **Motion-fault latch may fire in normal situations** — *suspected*, zero
+8. **Motion-fault latch may fire in normal situations** — *suspected*, zero
    observed latch sequences. Catch one via the field=8 ERROR event before
    redesigning the latch condition.
-8. **Enclosure warp pinches the gear** — bench board slots 1 and 3,
+9. **Path resistance can exceed what the BMCU is able to push — not urgent, but
+   it will recur.** A print started 2026-08-08 with a *different filament type*
+   on slot 3 failed to load, and the account is worth keeping because the
+   firmware was innocent at every step and looked guilty at several.
+
+   What happened: slot 1's unload latched `PULL_NO_PROGRESS` and left its
+   strand short of home; slot 3's load then pushed into the shared path and
+   went nowhere. The buffer filled to **100 %**, autoload spent its three
+   strikes on `BUFFER_ABORT` and parked red (§2.1 working as intended, and
+   §2.4 leaving the buffer stuffed), and the printer retried `send_out` for
+   half an hour without progress. The operator finally **pushed the strand into
+   the extruder by hand, with considerable force, and it went**. The load then
+   completed normally: `LOADED=True`, buffer settled to 54 %.
+
+   That last fact is the diagnosis. **The buffer decouples the motor from the
+   filament tip**, so when path resistance is high the push turns into buckling
+   inside the buffer instead of travel at the tip — which is exactly what
+   `BUFFER_ABORT` measures. A human pushing at the loader exit bypasses the
+   buffer and can apply force the BMCU structurally cannot. No firmware change
+   makes the BMCU stronger here; `DM_AUTO_PWM_PUSH` is not the limit, the
+   buffer is.
+
+   **The non-urgent check:** find the resistance before the next filament
+   change on that spool. Candidates, in the order they are worth eliminating —
+   the filament itself (different type: diameter, surface finish, softness),
+   the PTFE path (tight bend, scored bore, swarf from the earlier jam), and the
+   merger entrance (chamfer or concentricity, structurally the most likely
+   place for it). Ask the operator where the force was needed; that localises
+   it faster than any telemetry can.
+
+   Two loose ends from the same incident. ch0 still carries a latched
+   `PULL_NO_PROGRESS` — harmless, and the next slot-1 load releases it by the
+   §2 fix. And **the fix was confirmed in the field, unprompted**: ch2 latched
+   `PULL_NO_PROGRESS` at 06:01:24 and was released by the printer's own
+   `send_out` retry, which before 2026-08-08 would have deadlocked until a
+   power cycle. Evidence `2026-08-08-autoload-livelock/`.
+
+10. **Enclosure warp pinches the gear** — bench board slots 1 and 3,
    mechanically confirmed; fix is a reprint with clearance. Printer-side board
    shows no sign of it.
 
@@ -421,7 +493,10 @@ for o in range(0,len(b)-16,1) if b[o:o+4]==b'BSNP' and b[o+6]==0xF0))"
 
 | path | what |
 |---|---|
-| `..\diagnostics\2026-08-08-autoload-livelock\` | the livelock log **and all four watcher tools** |
+| `..\diagnostics\2026-08-08-autoload-livelock\` | the livelock log, both passing test logs, **and all four watcher tools** |
+| `..\diagnostics\2026-08-08-autoload-livelock\testD-fix-confirmed-0519.log` | Test D pass: three aborts then latch, withdrawal restores the budget |
+| `..\diagnostics\2026-08-08-autoload-livelock\testB-pullfault-confirmed-0535.log` | Test B pass: `PULL_NO_PROGRESS` latched then released, no reboot |
+| `..\diagnostics\2026-08-08-autoload-livelock\load-failure-different-filament-0555.log` | §6.9: buffer at 100 %, the retry loop, and ch2's fault released in the field |
 | `..\diagnostics\2026-08-08-autoload-livelock\autoload_watch.py` | ~10 Hz teardown catcher; filters the printer-frame flood |
 | `..\diagnostics\2026-08-08-autoload-livelock\band_sweep.py` | raw key-mV trajectory; answers "can this loader reach `both`" |
 | `..\diagnostics\2026-08-08-autoload-livelock\runout_watch.py` | loaded/tail/ks/motion for §5 Test C |
