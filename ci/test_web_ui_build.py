@@ -55,11 +55,19 @@ class WebUIBuildTests(unittest.TestCase):
         # STATUS decoder for the 27/31 rollout and left the staged page behind,
         # so the deployed bridge and the repository disagreed.
         #
-        # This rebuilds through npm, so it skips where Node is absent rather
-        # than failing. The build script compares decompressed bytes, not gzip
-        # bytes, because deflate output differs between zlib builds.
+        # This rebuilds through npm, so it skips where the toolchain is absent
+        # rather than failing. The build script compares decompressed bytes,
+        # not gzip bytes, because deflate output differs between zlib builds.
+        #
+        # The presence of `npm` is not the precondition -- every GitHub runner
+        # ships one. `npm run build` needs the *installed* dependencies, and
+        # without them vite is simply missing and the build exits 127, which
+        # this test reported as a drifted artifact. That was the whole of the
+        # host-tests CI failure from 2026-08-03 to 2026-08-08.
         if shutil.which("npm") is None and shutil.which("npm.cmd") is None:
             self.skipTest("npm is not installed")
+        if not (ROOT / "web" / "node_modules").is_dir():
+            self.skipTest("web dependencies are not installed; run npm ci")
         result = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "build_web_ui.py"), "--check"],
             capture_output=True, text=True)

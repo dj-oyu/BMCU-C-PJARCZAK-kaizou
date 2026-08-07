@@ -41,6 +41,22 @@ jobs:
       - name: Report zig version
         run: zig version
 
+      # ci/test_web_ui_build.py rebuilds the page through npm to prove the
+      # committed artifact still matches its sources. A runner always has npm
+      # but never the installed dependencies, so that build used to exit 127
+      # and the test reported it as drift. The suite below refuses to skip, so
+      # the web toolchain is part of this job's toolchain -- not an optional
+      # extra that a skip could quietly excuse.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
       - name: Firmware configuration table
         run: |
           python ci/firmware_matrix.py validate
