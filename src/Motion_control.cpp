@@ -11,6 +11,7 @@
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
 #include "motion_fault_policy.h"
+#include "dm_autoload_retry_policy.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -315,7 +316,13 @@ static uint8_t  dm_auto_state[4]        = {0,0,0,0};
 // S1_PUSH, not when the debounce is entered, so a debounce that aborts leaves
 // the retry intact. Stage2 is not gated; see the entry branch.
 static uint8_t  dm_autoload_gate[4]     = {0,0,0,0};
-static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
+// Stage2 abort count. Per *insertion*, not per Stage2 entry: it must survive
+// the S1_PUSH -> S2_PUSH and IDLE -> S2_PUSH re-entries, which is the whole
+// reason the three-strike limit can fire at all. Cleared only where the strand
+// demonstrably left -- the ks == 0 and !inserted arms of the sweep below, the
+// completed load, and the fail-retract sequence. See
+// src/dm_autoload_retry_policy.h for what happened when it was not.
+static uint8_t  dm_auto_try[4]          = {0,0,0,0};
 static uint32_t dm_auto_t0_ms[4] = {0u,0u,0u,0u};
 static int32_t  dm_auto_remain_counts[4] = {0,0,0,0};
 static int32_t  dm_auto_last_counts[4]   = {0,0,0,0};
@@ -1366,8 +1373,12 @@ public:
                                 // harmlessly.
                                 else if (ks == 1u)
                                 {
+                                    // dm_auto_try deliberately not cleared: the
+                                    // strand has not left the loader, so this is
+                                    // the same insertion and the same budget.
+                                    // Clearing here is the 2026-08-08 livelock;
+                                    // see src/dm_autoload_retry_policy.h.
                                     dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
-                                    dm_auto_try[CHx]      = 0u;
                                     dm_auto_remain_counts[CHx] = DM_AUTO_S2_TARGET_COUNTS;
                                     dm_auto_last_counts[CHx]   = cur_counts;
                                 }
@@ -1418,8 +1429,12 @@ public:
                                 }
                                 else if (ks == 1u)
                                 {
+                                    // dm_auto_try deliberately not cleared: the
+                                    // strand has not left the loader, so this is
+                                    // the same insertion and the same budget.
+                                    // Clearing here is the 2026-08-08 livelock;
+                                    // see src/dm_autoload_retry_policy.h.
                                     dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
-                                    dm_auto_try[CHx]      = 0u;
                                     dm_auto_remain_counts[CHx] = DM_AUTO_S2_TARGET_COUNTS;
                                     dm_auto_last_counts[CHx]   = cur_counts;
                                 }
@@ -1477,7 +1492,8 @@ public:
                                                      : proto::TEARDOWN_KS_DEVIATED,
                                             ks, now_ms - dm_auto_t0_ms[CHx]);
                                         dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
+                                        if (dm_autoload::insertion_ended(ks))
+                                            dm_auto_try[CHx]  = 0u;
                                         dm_auto_remain_counts[CHx] = 0;
                                         dm_auto_t0_ms[CHx]    = 0u;
                                     }
@@ -1501,13 +1517,12 @@ public:
                                     bmcu_link_dm_teardown(CHx, DM_AUTO_S2_PUSH,
                                                           proto::TEARDOWN_BUFFER_ABORT, ks,
                                                           now_ms - dm_auto_t0_ms[CHx]);
-                                    uint8_t t = dm_auto_try[CHx];
-                                    if (t < 255u) t++;
-                                    dm_auto_try[CHx] = t;
+                                    const bool spent =
+                                        dm_autoload::count_abort(dm_auto_try[CHx]);
 
                                     dm_auto_last_counts[CHx] = cur_counts;
 
-                                    if (t >= 3u)
+                                    if (spent)
                                     {
                                         dm_fail_latch[CHx] = 1u;
                                         dm_auto_state[CHx] = DM_AUTO_S2_FAIL_RETRACT;
@@ -1581,7 +1596,8 @@ public:
                                     else
                                     {
                                         dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
+                                        if (dm_autoload::insertion_ended(ks))
+                                            dm_auto_try[CHx]  = 0u;
                                         dm_auto_remain_counts[CHx] = 0;
                                         dm_auto_t0_ms[CHx]    = 0u;
                                     }
