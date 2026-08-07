@@ -65,13 +65,20 @@ jobs:
       # The native tests skip themselves when zig is missing. A silent skip would
       # let a broken toolchain masquerade as a green run, so the log is checked
       # for skips after the suite passes.
+      #
+      # Matched against what unittest prints for a skip -- a verbose line ending
+      # `... skipped '<reason>'`, or `(skipped=N)` in the summary -- and not
+      # against the bare word. Two tests are *named* for the behaviour they
+      # cover (`test_a_part_without_payload_is_skipped`), and a case-insensitive
+      # search for "skipped" matched their `... ok` lines, so this job could not
+      # have gone green since those names were introduced.
       - name: Host test suite (ci/)
         run: |
           set -o pipefail
           python -m unittest discover -s ci -p "test_*.py" -v 2>&1 | tee host-tests.log
-          if grep -qi "skipped" host-tests.log; then
+          if grep -qE '\.\.\. skipped|\(skipped=[0-9]+\)' host-tests.log; then
             echo "::error::a host test was skipped - the toolchain is incomplete"
-            grep -i "skipped" host-tests.log
+            grep -E '\.\.\. skipped|\(skipped=[0-9]+\)' host-tests.log
             exit 1
           fi
 
