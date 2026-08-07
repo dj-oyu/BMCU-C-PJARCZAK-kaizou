@@ -29,12 +29,12 @@ motion-fault code and `motor_pwm`, which several procedures below depend on.
 The printer was mid-print at writing, so the BMCU reboot that would fix it was
 deliberately not performed.
 
-**State at writing:** branch `alpha` at `1f9d41d`, **pushed to origin** (the
-firmware work below is at `b4725ee`; `11b38df` adds the Pico panel and its
-tests, `1f9d41d` repairs CI). Host suite 288 tests green locally. **GitHub
-`host-tests` had failed on every push since 2026-08-03** — see §10.3; it was a
-CI toolchain gap, never a code defect, but it means the green ticks on
-`b4725ee` and everything before it were absent, not passing. Both
+**State at writing:** branch `alpha` at `dd42015`, **pushed to origin, CI green**
+(the firmware work below is at `b4725ee`; `11b38df` adds the Pico panel and its
+tests, `1f9d41d` and `dd42015` repair CI). Host suite 288 tests. **GitHub
+`host-tests` had failed on every push since 2026-08-03** — see §10.3; both
+causes were in the job, never in the code, but it means the absent green ticks
+on `b4725ee` and everything before it mean "never ran", not "failed". Both
 firmware fixes are committed (`fd4ae8d` pull-fault, `d441061` livelock) and a
 rebuild of that tree is byte-identical to the binary that passed Tests B and D,
 sha256 `e87f5d9c...4de49120`. One working BMCU
@@ -628,18 +628,30 @@ running.
 Also worth knowing: `stale` makes `soft_reset_guard_error` refuse soft resets,
 so the link being down fails safe rather than open.
 
-### 10.3 CI has been red since 2026-08-03 for a toolchain reason
+### 10.3 CI was red for two stacked reasons, both in the job and not the code
 
-`host-tests` failed on every push from 2026-08-03 while `web-ui` passed.
-`ci/test_web_ui_build.py::test_staged_page_matches_the_web_sources` rebuilds
-the page through npm and guarded on `shutil.which("npm")` — but a runner always
-has npm and never has the installed dependencies, so `npm run build` exited 127
-(`vite: not found`) and the test reported a missing toolchain as a drifted
-artifact. Fixed in `1f9d41d` by installing the web dependencies in that job
-(the suite refuses to skip, so the toolchain belongs there) and by also
-guarding on `web/node_modules`, so a developer without `npm ci` now gets a skip
-that says so. **No test was ever actually failing on content** — the 235/247/288
-counts quoted in this document were green locally throughout.
+`host-tests` failed on every push from 2026-08-03 while `web-ui` passed. **Green
+again as of `dd42015`.** Two independent faults, the second hidden behind the
+first:
+
+1. `ci/test_web_ui_build.py::test_staged_page_matches_the_web_sources` rebuilds
+   the page through npm and guarded on `shutil.which("npm")` — but a runner
+   always has npm and never has the installed dependencies, so `npm run build`
+   exited 127 (`vite: not found`) and the test reported a missing toolchain as
+   a drifted artifact. Fixed in `1f9d41d`: install the web dependencies in that
+   job (the suite refuses to skip, so the toolchain belongs there), and guard on
+   `web/node_modules` too, so a developer without `npm ci` gets a skip that says
+   so instead of a build failure that blames the artifact.
+2. With the suite passing, the no-skip guard fired on its own: `grep -qi
+   "skipped"` matched two tests *named* for the behaviour they cover
+   (`test_a_part_without_payload_is_skipped ... ok`). Fixed in `dd42015` by
+   matching what unittest prints for a real skip — `... skipped '<reason>'` or
+   `(skipped=N)`.
+
+Fault 2 predates fault 1, so **this job could not have gone green since those
+test names were introduced**, and no green tick on any firmware commit in this
+document should be read as a pass. **No test was ever failing on content** —
+the 235/247/288 counts quoted here were green locally throughout.
 
 ### 10.4 Bridge heap, measured
 
