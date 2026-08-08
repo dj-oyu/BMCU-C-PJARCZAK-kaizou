@@ -49,7 +49,8 @@
       "10": "printer_tx_fault",
       "11": "ams_service",
       "12": "ams_registration",
-      "13": "probe"
+      "13": "probe",
+      "14": "dm_key"
     },
     "ack_result": {
       "0": "ok",

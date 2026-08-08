@@ -33,8 +33,24 @@ def value(expression, symbols):
         raise ValueError("unsupported ABI expression: " + expression)
     return eval(expression, {"__builtins__": {}}, symbols)
 
+def strip_line_comments(text):
+    """Drop ``// ...`` comments before any structural parsing sees the text.
+
+    Without this, a multi-line explanatory comment inside an enum body --
+    ordinary prose, which routinely contains commas -- gets split apart by
+    the enum-body ``,`` split below and handed to the value()
+    ``name = expression`` parser as if it were a member. That is exactly
+    what FULL_RECORD_DM_KEY's TEMPORARY-removal comment did (added in
+    df4727a): the generator has raised ValueError on every run since,
+    which is a harder failure than "stale" -- it means nobody could
+    regenerate the registry at all, so the drift this script exists to
+    catch went undetected by construction.
+    """
+    return re.sub(r"//[^\n]*", "", text)
+
+
 def registry():
-    text = HEADER.read_text(encoding="utf-8")
+    text = strip_line_comments(HEADER.read_text(encoding="utf-8"))
     protocol = value(re.search(r"constexpr uint8_t VERSION = (.*?);", text).group(1), {
         "VERSION_PRERELEASE": value(re.search(r"VERSION_PRERELEASE = (.*?);", text).group(1), {}),
         "VERSION_REVISION": value(re.search(r"VERSION_REVISION = (.*?);", text).group(1), {}),

@@ -213,6 +213,7 @@
    "11": "ams_service",
    "12": "ams_registration",
    "13": "probe",
+   "14": "dm_key",
    "2": "channel",
    "3": "printer_bus",
    "4": "counters",

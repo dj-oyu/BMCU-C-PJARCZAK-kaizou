@@ -304,6 +304,7 @@ export const BmcuFullStatusRecordType = {
   AmsService: 11,
   AmsRegistration: 12,
   Probe: 13,
+  DmKey: 14,
 } as const
 export type BmcuFullStatusRecordType = (typeof BmcuFullStatusRecordType)[keyof typeof BmcuFullStatusRecordType]
 

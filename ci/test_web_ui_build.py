@@ -7,11 +7,13 @@ Node still finds out.
 """
 import gzip
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,6 +22,20 @@ STAGED = ROOT / "pico" / "www" / "index.html.gz"
 SCHEMA = ROOT / "pico" / "www" / "schema.json"
 LAYOUT = ROOT / "docs" / "bmcu_wire_layout.json"
 GENERATED = ROOT / "web" / "src" / "api" / "generated.ts"
+LINK_REGISTRY = ROOT / "docs" / "bmcu_link_enum_registry.json"
+
+
+def _load_enum_registry_generator():
+    """A fresh module object per call: tests mutate its HEADER constant to
+    point at a synthetic file, and a shared module instance would leak that
+    across tests.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "generate_bmcu_enum_registry",
+        ROOT / "tools" / "generate_bmcu_enum_registry.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 # A consumer fetches /api/schema.json once and caches it by revision, so the
 # revision is the only thing telling it to refetch. Nothing else enforces the
@@ -41,6 +57,32 @@ class WebUIBuildTests(unittest.TestCase):
     def test_generated_registry_is_current(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "generate_ts_registry.py"),
+             "--check"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0,
+                         result.stderr or result.stdout)
+
+    def test_bmcu_link_enum_registry_is_current(self):
+        # docs/bmcu_link_enum_registry.json had no freshness check at all
+        # until this test: generate_ts_registry.py and generate_api_schema.py
+        # both trust it as a source, but nothing verified it still matched
+        # src/bmcu_link_protocol.h. It had drifted -- FULL_RECORD_DM_KEY (14)
+        # was missing -- and the drift was silent because generated.ts and
+        # this registry were stale *together*, so test_generated_registry_is_
+        # current above stayed green throughout. A generated artifact is only
+        # as trustworthy as its freshness is enforced; this is that
+        # enforcement for the registry itself, not just its downstream
+        # consumers.
+        #
+        # The drift also cost real coverage once: ci/test_pico_monitor.py's
+        # regression test for the DM_KEY snapshot-assembly bug (996eda5)
+        # could not use this registry to enumerate FullStatusRecordType --
+        # sourcing from it would have reproduced the exact blind spot that
+        # let the bug through -- and read src/bmcu_link_protocol.h directly
+        # instead.
+        result = subprocess.run(
+            [sys.executable,
+             str(ROOT / "tools" / "generate_bmcu_enum_registry.py"),
              "--check"],
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0,
@@ -201,6 +243,78 @@ class WebUIBuildTests(unittest.TestCase):
         self.assertIn("www/index.html.gz", script,
                       "deploy.ps1 uploads pico/*.py only; without the asset the "
                       "device serves 503 after an update")
+
+
+class BmcuEnumRegistryGeneratorTests(unittest.TestCase):
+    """Exercises the generator itself, not just its committed output.
+
+    test_bmcu_link_enum_registry_is_current above only proves the *checked
+    in* file matches what the generator produces from today's header; it
+    says nothing about whether the generator can survive tomorrow's header.
+    """
+
+    def registry_from(self, header_text):
+        generator = _load_enum_registry_generator()
+        with tempfile.TemporaryDirectory() as directory:
+            header_path = Path(directory) / "bmcu_link_protocol.h"
+            header_path.write_text(header_text, encoding="utf-8")
+            generator.HEADER = header_path
+            return generator.registry()
+
+    HEADER_PREAMBLE = (
+        "constexpr uint8_t VERSION_PRERELEASE = 0;\n"
+        "constexpr uint8_t VERSION_REVISION = 3;\n"
+        "constexpr uint8_t VERSION = "
+        "(VERSION_PRERELEASE << 4) | VERSION_REVISION;\n")
+
+    def test_strip_line_comments_removes_only_the_comment_text(self):
+        stripped = _load_enum_registry_generator().strip_line_comments(
+            "FULL_RECORD_GLOBAL = 1u, // note, with a comma in it\n"
+            "FULL_RECORD_CHANNEL = 2u,")
+        self.assertEqual(
+            stripped,
+            "FULL_RECORD_GLOBAL = 1u, \nFULL_RECORD_CHANNEL = 2u,")
+
+    def test_an_explanatory_comment_full_of_commas_does_not_break_parsing(
+            self):
+        # Regression for the bug that shipped alongside FULL_RECORD_DM_KEY
+        # (df4727a/88b94c2): a multi-line prose comment ahead of a real enum
+        # member, itself containing several commas, used to make the
+        # generator's naive `body.split(",")` hand a comment fragment to the
+        # `name = expression` parser and raise ValueError -- not "produce a
+        # stale registry", but "cannot produce a registry at all". This is
+        # the shape that broke it, reproduced deliberately: a comment with
+        # commas, spanning several lines, sitting directly before the member
+        # it explains.
+        header = self.HEADER_PREAMBLE + (
+            "enum FullStatusRecordType : uint8_t\n"
+            "{\n"
+            "    FULL_RECORD_GLOBAL = 1u, FULL_RECORD_CHANNEL = 2u,\n"
+            "    // TEMPORARY, with a comma, and another one here too,\n"
+            "    // spanning several lines, each carrying commas, of its\n"
+            "    // own, describing the member that follows.\n"
+            "    FULL_RECORD_DM_KEY = 14u,\n"
+            "};\n")
+
+        result = self.registry_from(header)
+
+        self.assertEqual(
+            result["enums"]["full_status_record_type"],
+            {"1": "global", "2": "channel", "14": "dm_key"})
+
+    def test_a_single_line_trailing_comment_is_also_stripped(self):
+        header = self.HEADER_PREAMBLE + (
+            "enum FullStatusRecordType : uint8_t\n"
+            "{\n"
+            "    FULL_RECORD_GLOBAL = 1u, // ordinary trailing note\n"
+            "    FULL_RECORD_CHANNEL = 2u,\n"
+            "};\n")
+
+        result = self.registry_from(header)
+
+        self.assertEqual(
+            result["enums"]["full_status_record_type"],
+            {"1": "global", "2": "channel"})
 
 
 if __name__ == "__main__":
