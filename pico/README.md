@@ -77,6 +77,55 @@ Pico health page. A channel row reads `1*#oK2U 85LJ`:
 | `85` | pull percentage |
 | `LJ` | latches: `L` low pull, `J` jam, `D` DM autoload, `F` motion fault |
 
+The header can also carry an alert badge right after a link's own state, e.g.
+`A+L`. Two conditions are computed purely from fields STATUS already carries
+-- nobody was watching for them the day one happened for real (see
+`handover.md` 10.7):
+
+| badge | condition | what it means |
+| --- | --- | --- |
+| `L` LATCH | a channel is `on use`, online, and its pull is below 40% | the motor has latched off permanently; the extruder is dragging filament unassisted. The online-key check excludes an ordinary runout, which also parks in on_use/low-pull while the tail clears the buffer |
+| `S` STUCK | every channel is idle, pressure reads the idle sentinel (0xFFFF), and some channel's pull is outside 30-70% | parked with a buffer skew, e.g. an unload that never finished |
+
+A badge only lights after its condition holds continuously for `CHIP_HOLD_MS`
+(3 s), and only while the data behind it is both a live link and fresh --
+two separate gates, both required:
+
+- `BMCUMonitor.is_stale()`, not `link_state`, gates on the link being alive at
+  all (any valid frame -- HELLO, EVENT, PONG -- counts). A link can sit in
+  `link_state == "stale"` for reasons other than a quiet STATUS feed (a
+  snapshot-retry exhaustion path leaves it there while STATUS keeps
+  arriving), so `link_state` cannot substitute for it.
+- `last_status_ms` (stamped in `bmcu_link.py` on every decoded STATUS) gates
+  on the *data* being fresh, via `CHIP_STATUS_MAX_AGE_MS` (10 s). A BMCU can
+  keep answering PING -- not stale by the measure above -- while the printer
+  has simply stopped polling it for STATUS, in which case `status` is a
+  frozen snapshot all the same.
+
+Both gates make the chips **fail dark**: a quiet bus means no badge, ever,
+even if the last real reading would still qualify -- never a stale reading
+kept alive, and never a guess in either direction. On a bus the printer is
+actively polling this changes nothing (STATUS arrives roughly every 80ms
+while printing); it only matters on a bench BMCU with the printer powered
+down, where the badges now go dark instead of latching on the last thing
+they saw. That is a known, accepted limitation -- correct behaviour would
+need the Pico to poll `get_status()` on its own schedule, which is a
+separate change; `last_status_ms` is also the plumbing that change would
+need. Idle machines have been measured going tens of minutes between STATUS
+frames today, so without either gate a chip could stay lit off a frozen
+last-known reading long after it stopped being true.
+
+Both badges can be lit at once, shown `L` before `S` (the more actively
+harmful condition first, see `oled_ticker.py`). While any badge is lit the
+marquee shows the alert (`A ch2 LATCH`) instead of the usual event scroll,
+since the whole point is that these are the lines nobody was reading.
+
+There is deliberately no DESYNC badge for the 10.5 merger-ownership loss:
+`oled_ticker.py`'s alert-chips comment explains why no single STATUS frame
+can prove it (the reject that defines a real desync returns before motion is
+written; an ordinary retract makes the merger occupied-but-unowned on
+purpose). 10.5's own buffer-at-100% is still caught by STUCK.
+
 The panel is driven one 128-byte page per main-loop iteration, roughly 3 ms of
 I2C, because pushing a whole 1 KB frame in one pass would stall the UART drain
 for about 23 ms. The marquee occupies only the last page and steps every 120 ms;

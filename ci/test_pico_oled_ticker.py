@@ -44,13 +44,31 @@ class Decoder:
 
 
 class Monitor:
-    def __init__(self, link_id="bmcu-a", link_state="online", status=None):
+    def __init__(self, link_id="bmcu-a", link_state="online", status=None,
+                stale=False, last_status_ms=float("inf")):
         self.link_id = link_id
         self.link_state = link_state
         self.status = status
         self.decoder = Decoder()
         self.sequence_gap_count = 0
         self.events = []
+        # Real BMCUMonitor.is_stale() is keyed off the last valid frame's
+        # timestamp, independent of link_state (a snapshot-retry-exhausted
+        # link can sit at link_state == "stale" while STATUS keeps arriving,
+        # and a link with any other state can still have gone quiet). The
+        # stub takes a flat flag so a test can set it without reproducing
+        # that timing logic.
+        self._stale = stale
+        # Defaults to "infinitely fresh" (never triggers
+        # CHIP_STATUS_MAX_AGE_MS) so every test that does not care about the
+        # age gate can keep constructing a Monitor with a `status` and not
+        # separately think about when it "arrived". Tests that exercise the
+        # age gate itself set this explicitly (e.g. to None, matching a real
+        # BMCUMonitor that has never decoded a STATUS, or to an old tick).
+        self.last_status_ms = last_status_ms
+
+    def is_stale(self, now_ms):
+        return self._stale
 
 
 class Frame:
@@ -507,6 +525,355 @@ class ConfigWiringTests(unittest.TestCase):
                  for name, _ in keys} | {"OLED_ENABLED"}
 
         self.assertEqual(documented - wired, set())
+
+
+class ChipConditionTests(unittest.TestCase):
+    """Raw (undebounced) chip conditions -- what CHIP_HOLD_MS is applied to."""
+
+    def test_latch_lights_on_use_online_below_the_low_latch_threshold(self):
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[2, 0, 0, 0], pull_pct=[39, 0, 0, 0], online_mask=0b0001))
+
+        self.assertTrue(raw & oled_ticker.CHIP_LATCH)
+
+    def test_latch_stays_dark_at_the_threshold_itself(self):
+        # g_on_use_low_latch trips *below* 40%, not at it; 40 is still inside
+        # normal on-use operation.
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[2, 0, 0, 0], pull_pct=[40, 0, 0, 0], online_mask=0b0001))
+
+        self.assertFalse(raw & oled_ticker.CHIP_LATCH)
+
+    def test_latch_stays_dark_off_use_even_at_zero_pull(self):
+        # Low pull during, say, a retract is expected -- the chip is about
+        # ON_USE specifically, the phase where the extruder depends on the
+        # BMCU keeping up.
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[4, 0, 0, 0], pull_pct=[0, 0, 0, 0], online_mask=0b0001))
+
+        self.assertFalse(raw & oled_ticker.CHIP_LATCH)
+
+    def test_latch_stays_dark_once_the_channel_has_cleared_the_online_key(
+            self):
+        # A runout also sits in on_use with pull<40 while the tail clears the
+        # buffer -- ordinary operation, not the 10.7 stall. online_mask is
+        # what tells the two apart: it clears once the filament passes the
+        # online key, which a genuine motor latch never does on its own.
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0000))
+
+        self.assertFalse(raw & oled_ticker.CHIP_LATCH)
+
+    def test_stuck_lights_when_parked_with_pressure_pegged_and_pull_off_centre(
+            self):
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[0, 0, 0, 0], pull_pct=[71, 0, 0, 0], pressure=0xFFFF))
+
+        self.assertTrue(raw & oled_ticker.CHIP_STUCK)
+
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[0, 0, 0, 0], pull_pct=[29, 0, 0, 0], pressure=0xFFFF))
+
+        self.assertTrue(raw & oled_ticker.CHIP_STUCK)
+
+    def test_stuck_stays_dark_inside_the_idle_deadband(self):
+        # The idle controller's own deadband is 30-70, and relief stops right
+        # at the 70 edge, so 30 and 70 are ordinary parked readings, not a
+        # stuck buffer -- the condition is a strict inequality on purpose.
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[0, 0, 0, 0], pull_pct=[70, 50, 50, 50], pressure=0xFFFF))
+        self.assertFalse(raw & oled_ticker.CHIP_STUCK)
+
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[0, 0, 0, 0], pull_pct=[30, 50, 50, 50], pressure=0xFFFF))
+        self.assertFalse(raw & oled_ticker.CHIP_STUCK)
+
+    def test_stuck_stays_dark_while_anything_is_moving(self):
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[2, 0, 0, 0], pull_pct=[90, 0, 0, 0], pressure=0xFFFF))
+
+        self.assertFalse(raw & oled_ticker.CHIP_STUCK)
+
+    def test_stuck_stays_dark_when_pressure_is_not_the_idle_sentinel(self):
+        # A live pressure reading means the printer is in the middle of a
+        # transaction, not sitting parked, so the same pull skew is not the
+        # 10.7 park-jam signature yet.
+        raw = oled_ticker._status_chip_bits(status(
+            motion=[0, 0, 0, 0], pull_pct=[90, 0, 0, 0], pressure=140))
+
+        self.assertFalse(raw & oled_ticker.CHIP_STUCK)
+
+    def test_no_status_yet_lights_nothing(self):
+        self.assertEqual(oled_ticker._status_chip_bits(None), 0)
+
+
+class ChipDebounceTests(unittest.TestCase):
+    """OledTicker debounces chip conditions over CHIP_HOLD_MS."""
+
+    def ticker(self, monitor):
+        return OledTicker(Display(), [monitor])
+
+    def latch_monitor(self):
+        return Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001))
+
+    def test_a_momentary_condition_never_lights_the_chip(self):
+        monitor = self.latch_monitor()
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        # Cleared well inside the hold window.
+        monitor.status["motion"] = [0, 0, 0, 0]
+        ticker._update_chips(500)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_a_condition_held_past_chip_hold_ms_lights_the_chip(self):
+        monitor = self.latch_monitor()
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertTrue(ticker._chip_active_mask[0] & oled_ticker.CHIP_LATCH)
+
+    def test_the_chip_stays_dark_one_tick_before_the_hold_elapses(self):
+        monitor = self.latch_monitor()
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS - 1)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_the_chip_clears_as_soon_as_the_condition_clears(self):
+        monitor = self.latch_monitor()
+        ticker = self.ticker(monitor)
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+        self.assertNotEqual(ticker._chip_active_mask[0], 0)
+
+        monitor.status["motion"] = [0, 0, 0, 0]
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS + 10)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_a_stale_link_never_lights_a_chip_no_matter_how_long_held(self):
+        # A frozen last-known STATUS is not a current condition. Without this
+        # gate a machine that simply stopped talking (idle links have been
+        # measured 42 minutes between frames) would show a permanent, false
+        # alert off whatever it last reported.
+        monitor = self.latch_monitor()
+        monitor._stale = True
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_a_chip_that_went_stale_mid_hold_restarts_from_zero_on_recovery(
+            self):
+        monitor = self.latch_monitor()
+        ticker = self.ticker(monitor)
+        ticker._update_chips(0)
+        ticker._update_chips(1500)  # short of CHIP_HOLD_MS
+
+        monitor._stale = True
+        ticker._update_chips(2000)
+        monitor._stale = False
+        # If the hold had merely paused rather than reset, this would already
+        # be lit (2000 + 1500 >= CHIP_HOLD_MS from the original since[]).
+        ticker._update_chips(3500)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+        ticker._update_chips(3500 + oled_ticker.CHIP_HOLD_MS)
+        self.assertTrue(ticker._chip_active_mask[0] & oled_ticker.CHIP_LATCH)
+
+
+class ChipStatusAgeTests(unittest.TestCase):
+    """CHIP_STATUS_MAX_AGE_MS gates on data freshness, separately from
+    is_stale()'s link-liveness gate -- a BMCU that keeps answering PING while
+    the printer has simply stopped polling it is not stale, but `status` is
+    still a frozen snapshot.
+    """
+
+    def ticker(self, monitor):
+        return OledTicker(Display(), [monitor])
+
+    def latch_monitor(self, last_status_ms):
+        return Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001),
+            last_status_ms=last_status_ms)
+
+    def test_a_chip_does_not_light_once_status_is_older_than_the_max_age(
+            self):
+        monitor = self.latch_monitor(last_status_ms=0)
+        ticker = self.ticker(monitor)
+
+        # The condition has held continuously since t=0, long past
+        # CHIP_HOLD_MS, but the data itself is now older than
+        # CHIP_STATUS_MAX_AGE_MS -- there has been no new STATUS to confirm
+        # it is still true.
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_STATUS_MAX_AGE_MS + 1)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_an_already_lit_chip_goes_dark_once_its_status_ages_out(self):
+        monitor = self.latch_monitor(last_status_ms=0)
+        ticker = self.ticker(monitor)
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+        self.assertTrue(ticker._chip_active_mask[0] & oled_ticker.CHIP_LATCH)
+
+        # No new STATUS arrives; the same reading just gets old.
+        ticker._update_chips(oled_ticker.CHIP_STATUS_MAX_AGE_MS + 1)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_a_fresh_status_relights_the_chip_with_the_hold_restarted(self):
+        monitor = self.latch_monitor(last_status_ms=0)
+        ticker = self.ticker(monitor)
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_STATUS_MAX_AGE_MS + 1)
+        self.assertEqual(ticker._chip_active_mask[0], 0)  # aged out
+
+        # A new STATUS frame arrives: last_status_ms moves forward, same as
+        # BMCUMonitor._handle_frame stamping it on every decoded STATUS.
+        now = oled_ticker.CHIP_STATUS_MAX_AGE_MS + 2000
+        monitor.last_status_ms = now
+        ticker._update_chips(now)
+        # Not yet held long enough from this fresh arrival.
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+        ticker._update_chips(now + oled_ticker.CHIP_HOLD_MS)
+
+        self.assertTrue(ticker._chip_active_mask[0] & oled_ticker.CHIP_LATCH)
+
+    def test_the_age_gate_alone_darkens_a_chip_when_the_link_is_not_stale(
+            self):
+        # The independence this proves: is_stale() can be false (the link is
+        # answering PING) while the age gate alone still refuses the chip,
+        # because the two measure different things.
+        monitor = self.latch_monitor(last_status_ms=0)
+        monitor._stale = False
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_STATUS_MAX_AGE_MS + 1)
+
+        self.assertFalse(monitor.is_stale(oled_ticker.CHIP_STATUS_MAX_AGE_MS + 1))
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_a_monitor_that_has_never_decoded_a_status_never_lights(self):
+        # last_status_ms is None until BMCUMonitor decodes its first STATUS
+        # frame (see bmcu_link.py __init__). Startup, and a link that only
+        # ever gets HELLO/EVENT/PONG, must not light off a status that never
+        # arrived.
+        monitor = self.latch_monitor(last_status_ms=None)
+        ticker = self.ticker(monitor)
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+
+class ChipDisplayTests(unittest.TestCase):
+    """The lit chips have to redraw the panel and stay visible on every page."""
+
+    def test_header_carries_the_lit_chip_letter_for_its_own_link(self):
+        line = header_line(
+            [Monitor("bmcu-a")], wifi_state="online", wifi_rssi=-58,
+            client_state="online", chip_masks=[oled_ticker.CHIP_LATCH])
+
+        self.assertEqual(line, "A+L -58 U+")
+
+    def test_both_lit_chips_order_latch_before_stuck(self):
+        # LATCH first: it is the actively-harmful one -- the motor is
+        # stopped right now and the extruder is dragging filament through
+        # the BMCU unassisted for as long as the print continues (10.7).
+        # STUCK is a parked skew; nothing is being dragged.
+        mask = oled_ticker.CHIP_STUCK | oled_ticker.CHIP_LATCH
+        line = header_line([Monitor("bmcu-a")], chip_masks=[mask])
+
+        self.assertIn("A+LS", line)
+
+    def test_a_lit_chip_changes_the_digest_so_the_header_redraws(self):
+        # content_digest is what gates _draw_body; a chip that toggled but
+        # left the digest unchanged would light up in state only, never on
+        # the panel.
+        monitor = Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001))
+        ticker = OledTicker(Display(), [monitor])
+        before = ticker.content_digest()
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertNotEqual(ticker.content_digest(), before)
+
+    def test_a_lit_chip_actually_redraws_the_body_through_service(self):
+        monitor = Monitor(status=status())
+        ticker, display, _ = TickerLoopTests().ticker(monitors=[monitor])
+        for step in range(8):
+            ticker.service(step)
+        display.written.clear()
+
+        monitor.status["motion"] = [2, 0, 0, 0]
+        monitor.status["pull_pct"] = [10, 0, 0, 0]
+        monitor.status["online_mask"] = 0b0001
+        for step in range(1000, 1000 + oled_ticker.CHIP_HOLD_MS + 8000, 1000):
+            ticker.service(step)
+
+        self.assertTrue(set(display.written) >= {0, 1}, display.written)
+
+    def test_a_stale_link_never_redraws_the_header_off_a_frozen_condition(
+            self):
+        # Without the staleness gate this status would light LATCH forever;
+        # the point of the gate is that a link that has simply gone quiet
+        # must not keep claiming a fault is still happening.
+        monitor = Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001),
+            stale=True)
+        ticker = OledTicker(Display(), [monitor])
+        before = ticker.content_digest()
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertEqual(ticker.content_digest(), before)
+        self.assertEqual(ticker._chip_active_mask[0], 0)
+
+    def test_the_marquee_shows_a_lit_chip_ahead_of_queued_events(self):
+        monitor = Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001))
+        ticker = OledTicker(Display(), [monitor])
+        monitor.events.append({"event_name": "state_change", "field": 4,
+                               "slot": 0, "previous_value": 0, "value": 2})
+        ticker.collect_events()
+        self.assertTrue(ticker._messages)  # a routine event is queued
+
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+
+        self.assertIn("LATCH", ticker.marquee_text())
+        self.assertNotIn("mot", ticker.marquee_text())
+
+    def test_the_marquee_falls_back_to_events_once_the_chip_clears(self):
+        monitor = Monitor(status=status(
+            motion=[2, 0, 0, 0], pull_pct=[10, 0, 0, 0], online_mask=0b0001))
+        ticker = OledTicker(Display(), [monitor])
+        ticker._update_chips(0)
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS)
+        self.assertIn("LATCH", ticker.marquee_text())
+
+        monitor.status["motion"] = [0, 0, 0, 0]
+        ticker._update_chips(oled_ticker.CHIP_HOLD_MS + 10)
+
+        self.assertNotIn("LATCH", ticker.marquee_text())
 
 
 class HealthPageTests(unittest.TestCase):

@@ -60,6 +60,180 @@ SLOT_LABELS = ("1", "2", "3", "4")
 KS_LABELS = ("K0", "K1", "K2", "K3")
 LATCH_LABELS = ("", "L", "J", "LJ", "D", "LD", "JD", "LJD")
 
+# -- alert chips ---------------------------------------------------------
+#
+# Failure modes that are visible on the wire today but were invisible on the
+# panel when they actually happened (handover.md 10.5, 10.7): a printer power
+# cycle erased the BMCU's memory of who owns the merger, and a marginal
+# on-use snag tripped the *silent* variant of the low-pull latch, which
+# leaves no bit set anywhere except pull_pct itself. Both are catchable from
+# fields STATUS already carries; nobody was watching for the combination.
+#
+# There is no DESYNC chip here, on purpose -- an earlier version of this file
+# had one ("no channel loaded, but some channel's motion implies one is
+# owned"), and it was wrong in both directions, confirmed against
+# src/bambu_bus_ams.cpp rather than guessed:
+#
+#   - false negative: a real desync (loaded == 0xFF) hits the `!allow_stop`
+#     guard at bambu_bus_ams.cpp:384, which returns *before* motion is ever
+#     written. The frame that would have proven the desync is exactly the one
+#     that never touches the field this chip read. handover.md 10.5's own
+#     timeline shows motion sitting at [0,0,0,0] for the entire incident.
+#   - false positive: accepting an ordinary retract calls
+#     ams_state_set_unloaded(ch) as part of the *same* transaction that moves
+#     the channel through before_pull_back/pull_back -- ams_merger_policy.h
+#     says outright that the merger is "occupied-but-unowned" on every
+#     retract, runout or not. So the motion side of the old condition is true
+#     on every routine unload, not just a desync.
+#
+# In short: the desync is a fact about what a frame was *not allowed to do*,
+# not a fact any single STATUS snapshot encodes -- release happens at request
+# acceptance, not at completion, and a genuine desync's reject returns before
+# motion is written at all. A single-frame predicate over STATUS cannot see
+# it. Catching it for real needs either a cross-frame view (e.g. "printer
+# commanded before_pull_back/stop_on_use, channel had no loaded flag, request
+# was accepted anyway" traced across the printer_transaction event and the
+# STATUS that follows it) or a firmware-side signal -- an event emitted at
+# the reject itself, or at ams_state_set_unloaded when loaded was already
+# 0xFF -- which does not exist on the wire today. Neither belongs in this
+# Pico-only branch. Today's incident is still covered without it: 10.5's
+# buffer reached 100% twice, which STUCK below catches on its own.
+
+MOTION_ON_USE = 2
+
+# g_on_use_low_latch's actual threshold (Motion_control.cpp). This chip does
+# not read the low_latch wire bit, on purpose: 10.7 found a *second*, silent
+# route into the same stall (the 20s push_hi latch) that never sets it, and
+# leaves pull_pct as its only trace. Recomputing the threshold here catches
+# both routes instead of trusting a bit that is known to miss one of them.
+LOW_LATCH_PULL_PCT = 40
+
+# The idle control deadband is 30-70 and relief stops at the 70 edge
+# (Motion_control.cpp), so a park within that band is ordinary settling, not
+# a stuck buffer. The condition is deliberately ">70 or <30", not "more than
+# 15pp from the 50 centre": 15pp reaches 35..65 for the low side but 65 for
+# the high side is still inside normal relief travel, so a symmetric margin
+# around the centre misfires against the (asymmetric-in-practice) relief
+# behaviour at the top of the band.
+STUCK_HIGH_PULL_PCT = 70
+STUCK_LOW_PULL_PCT = 30
+STUCK_PRESSURE = 0xFFFF
+
+CHIP_LATCH = 1
+CHIP_STUCK = 2
+CHIP_COUNT = 2
+# Priority when both chips are lit at once (they are not mutually exclusive
+# -- different channels on the same link can trip each one in the same
+# STATUS frame). LATCH first: the motor is stopped *right now* and the
+# extruder is dragging filament through the BMCU unassisted for as long as
+# the print continues (10.7). STUCK second: a parked buffer skew is wrong
+# but nothing is actively being dragged.
+CHIP_NAMES = ("LATCH", "STUCK")
+# Indexed by a 2-bit mask (bit0 LATCH, bit1 STUCK). Built once per distinct
+# combination like LATCH_LABELS above, rather than concatenated per bit on
+# every header/marquee rebuild.
+CHIP_SUFFIXES = ("", "L", "S", "LS")
+# How long a chip condition has to hold, continuously, before it lights.
+# On a link the printer is actively polling, STATUS arrives at roughly
+# 12.5 Hz (the interval in src/pressure_event_policy.h), so CHIP_HOLD_MS
+# covers ~37 frames there and mainly exists to reject one noisy or
+# borderline decode. But an idle machine has been measured going quiet for
+# tens of minutes between STATUS frames -- the printer simply stops polling
+# -- so for STUCK specifically (which only fires while parked, i.e. exactly
+# when the link is likely to be this quiet) the wall-clock hold is doing the
+# real debouncing off *one* frame, not confirming across many. That is still
+# the right trade: a frame-count debounce would mean STUCK could never light
+# at all on a quiet link. LATCH only fires during ON_USE, when the printer is
+# actively printing and therefore polling at the rate above, so it gets the
+# full multi-frame confirmation this constant was originally sized for.
+CHIP_HOLD_MS = 3000
+
+# How old the *data*, not the link, is allowed to be before a chip is
+# refused. is_stale() (below) answers "is this link alive at all" -- HELLO,
+# EVENT and PONG all count -- but a BMCU that keeps answering PING while the
+# printer has simply stopped polling it is not stale by that measure, and
+# `status` is still a frozen snapshot. pull_pct is not itself a dirty source
+# on the wire: the firmware only re-sends STATUS on set_motion, a motion
+# transition, INSERTED/ONLINE, a pressure sentinel-class change, LED or
+# ERROR, so a buffer that keeps moving physically produces no new frame if
+# none of those fire while the printer is not asking. Design choice: this
+# gate makes the chips fail dark, not fail loud or fail frozen. A quiet bus
+# means no badge, ever, even if the last real reading would still qualify --
+# never a stale reading kept alive, and never a guess in either direction.
+# On a bus the printer is actively polling this changes nothing (STATUS
+# arrives every ~80ms per CHIP_HOLD_MS's comment above, so 10s of silence
+# never happens); it only matters on a bench BMCU with the printer powered
+# down, where the chips now go dark instead of latching on the last thing
+# they saw -- a known limitation, accepted on purpose over the alternative
+# of an alert that can no longer be trusted to mean "still true". A periodic
+# get_status() poll from the Pico side (not part of this change) would keep
+# a live link's status age under ~2s unconditionally and retire this
+# limitation; last_status_ms is also the plumbing that change would need.
+CHIP_STATUS_MAX_AGE_MS = 10000
+
+
+def _status_chip_bits(status):
+    """Instantaneous (undebounced) chip conditions for one STATUS dict.
+
+    Pure integer arithmetic over an existing dict/lists -- no allocation --
+    so this is safe to call every service() tick. OledTicker is the one that
+    turns a momentary bit into a lit chip.
+    """
+    if not status:
+        return 0
+    motion = status.get("motion") or ()
+    pull = status.get("pull_pct") or ()
+    online_mask = status.get("online_mask", 0)
+    any_on_use_low = False
+    all_idle = True
+    any_far_from_centre = False
+    for index in range(4):
+        m = motion[index] if index < len(motion) else 0
+        p = pull[index] if index < len(pull) else 0
+        if m != 0:
+            all_idle = False
+        # A runout also sits in on_use with pull<40 while the tail clears the
+        # buffer -- that is expected, not a stall, and the online key is what
+        # tells the two apart: online_mask clears when the filament passes it
+        # (decode_channel_flags' `tail` bit is the same signal, folded into
+        # the flags byte instead of the mask). Gating on the mask keeps this
+        # chip specific to 10.7 -- a motor latched off with filament still
+        # present -- instead of firing on every ordinary runout.
+        if m == MOTION_ON_USE and p < LOW_LATCH_PULL_PCT and \
+                (online_mask >> index) & 1:
+            any_on_use_low = True
+        if p > STUCK_HIGH_PULL_PCT or p < STUCK_LOW_PULL_PCT:
+            any_far_from_centre = True
+    bits = 0
+    if any_on_use_low:
+        bits |= CHIP_LATCH
+    if all_idle and status.get("pressure") == STUCK_PRESSURE and \
+            any_far_from_centre:
+        bits |= CHIP_STUCK
+    return bits
+
+
+def _chip_channel(status, bit):
+    """First channel index that explains a chip bit already known to be set.
+
+    Only called while building marquee/alert text, which is already
+    throttled to the scroll-wrap schedule, so recomputing here rather than
+    caching a channel index alongside the bit is fine.
+    """
+    motion = status.get("motion") or ()
+    pull = status.get("pull_pct") or ()
+    online_mask = status.get("online_mask", 0)
+    for index in range(4):
+        m = motion[index] if index < len(motion) else 0
+        p = pull[index] if index < len(pull) else 0
+        if bit == CHIP_LATCH and m == MOTION_ON_USE and \
+                p < LOW_LATCH_PULL_PCT and (online_mask >> index) & 1:
+            return index
+        if bit == CHIP_STUCK and (p > STUCK_HIGH_PULL_PCT or
+                                  p < STUCK_LOW_PULL_PCT):
+            return index
+    return 0
+
 # Resolved at import rather than per call: _service consults the clock several
 # times per loop iteration and the port never changes underneath us.
 if hasattr(time, "ticks_diff"):
@@ -89,8 +263,19 @@ def link_badge(monitor):
 
 
 def header_line(monitors, wifi_state=None, wifi_rssi=None, client_state=None,
-                columns=DEFAULT_COLUMNS):
-    parts = [link_badge(monitor) for monitor in monitors]
+                chip_masks=None, columns=DEFAULT_COLUMNS):
+    """The header, with each link's badge followed by its lit chip letters.
+
+    chip_masks is a per-monitor list of 0..3 (see CHIP_LATCH/CHIP_STUCK).
+    The header is the one line drawn on every page, so this is where the
+    chips have to land to stay visible regardless of which page is up --
+    same as the link and uplink state that already live here.
+    """
+    parts = []
+    for index in range(len(monitors)):
+        mask = chip_masks[index] if chip_masks and index < len(chip_masks) \
+            else 0
+        parts.append(link_badge(monitors[index]) + CHIP_SUFFIXES[mask])
     if wifi_state == "online":
         # The RSSI is the number that moves; the word "online" is not.
         parts.append("%d" % wifi_rssi if wifi_rssi is not None else "wifi")
@@ -282,6 +467,11 @@ class OledTicker:
         self._last_event = [None] * len(monitors)
         self._dirty = (1 << self.rows) - 1
         self._next_flush = 0
+        # One [since_desync, since_latch, since_stuck] tick per monitor,
+        # `None` when that bit is not currently true. Preallocated here, not
+        # grown per call: _update_chips only ever mutates existing slots.
+        self._chip_since_ms = [[None, None, None] for _ in monitors]
+        self._chip_active_mask = [0] * len(monitors)
 
     # -- content -----------------------------------------------------------
 
@@ -313,6 +503,10 @@ class OledTicker:
             monitor = self.monitors[index]
             value = self._mix(value, hash(
                 getattr(monitor, "link_state", None) or ""))
+            # Every monitor's chips, not just the one on the current page:
+            # the header shows all of them on every page, so a chip toggling
+            # on a link that is not currently displayed still has to redraw.
+            value = self._mix(value, self._chip_active_mask[index])
         wifi_state = getattr(self.wifi, "state", None) or ""
         value = self._mix(value, hash(wifi_state))
         value = self._mix(value, hash(
@@ -366,6 +560,65 @@ class OledTicker:
         # uptime, and CPython's str hash is 64-bit and often negative.
         return ((value * 31) + (term & 0xFFFFFF)) & 0xFFFFFF
 
+    def _update_chips(self, now_ms):
+        """Debounce raw chip conditions against CHIP_HOLD_MS.
+
+        Runs unconditionally every service() call, not gated behind the
+        refresh/page schedule, because the hold time has to be measured in
+        real time regardless of how often the body actually redraws. Mutates
+        the preallocated per-monitor lists in place -- no new list, dict, or
+        tuple is created on this path.
+        """
+        for index in range(len(self.monitors)):
+            monitor = self.monitors[index]
+            since = self._chip_since_ms[index]
+            # Two independent gates, both required. is_stale() answers "is
+            # this link alive at all" (any valid frame -- HELLO, EVENT,
+            # PONG -- counts), not_stale/link_state a snapshot-retry
+            # exhaustion path leaves link_state stuck at "stale" while
+            # STATUS keeps arriving (seen on a real board), so link_state
+            # cannot substitute for it. But is_stale() alone is not enough
+            # either: a BMCU that keeps answering PING while the printer has
+            # simply stopped polling it is not stale by that measure, and
+            # `status` is still a frozen snapshot -- that needs the
+            # CHIP_STATUS_MAX_AGE_MS check on last_status_ms below. Called
+            # directly, not through getattr(): the indirection would
+            # materialise a fresh bound-method object on every call on this
+            # port.
+            gated = monitor.is_stale(now_ms)
+            if not gated:
+                last_status_ms = getattr(monitor, "last_status_ms", None)
+                gated = last_status_ms is None or _ticks_diff(
+                    now_ms, last_status_ms) > CHIP_STATUS_MAX_AGE_MS
+            if gated:
+                # A frozen snapshot is not a current condition. Reset so a
+                # chip cannot stay latched on forever off a link that has
+                # simply gone quiet, and so the hold restarts from zero
+                # rather than partway through once fresh data arrives again.
+                for bit_index in range(CHIP_COUNT):
+                    since[bit_index] = None
+                self._chip_active_mask[index] = 0
+                continue
+            status = getattr(monitor, "status", None)
+            raw = _status_chip_bits(status)
+            active = 0
+            for bit_index in range(CHIP_COUNT):
+                bit = 1 << bit_index
+                if raw & bit:
+                    if since[bit_index] is None:
+                        since[bit_index] = now_ms
+                    elif _ticks_diff(now_ms, since[bit_index]) >= CHIP_HOLD_MS:
+                        # Clamp instead of leaving the original timestamp:
+                        # ticks_diff wraps after ~6.2 days of continuous
+                        # truth, which a genuinely abandoned stuck machine
+                        # can reach, and an unclamped since[] would flicker
+                        # the chip off as the wrap crosses zero.
+                        since[bit_index] = _ticks_add(now_ms, -CHIP_HOLD_MS)
+                        active |= bit
+                else:
+                    since[bit_index] = None
+            self._chip_active_mask[index] = active
+
     def _platform(self):
         if self.platform_stats is None:
             return None, None
@@ -408,7 +661,34 @@ class OledTicker:
         if len(self._messages) > 4:
             del self._messages[:len(self._messages) - 4]
 
+    def _chip_alerts(self):
+        """Alert copy for every lit chip, LATCH first then STUCK.
+
+        Only called from marquee_text(), which only runs at the scroll-wrap
+        boundary, so building strings here does not touch the loop budget.
+        """
+        alerts = []
+        for bit_index in range(CHIP_COUNT):
+            bit = 1 << bit_index
+            name = CHIP_NAMES[bit_index]
+            for index in range(len(self.monitors)):
+                if not self._chip_active_mask[index] & bit:
+                    continue
+                monitor = self.monitors[index]
+                status = getattr(monitor, "status", None)
+                channel = _chip_channel(status, bit) if status else 0
+                alerts.append("%s ch%d %s" % (
+                    link_letter(getattr(monitor, "link_id", "")),
+                    channel + 1, name))
+        return alerts
+
     def marquee_text(self):
+        # A lit chip outranks the event queue: 10.5 and 10.7 both happened
+        # with nobody watching the panel, and a routine state_change message
+        # scrolling past would bury the one line that mattered.
+        alerts = self._chip_alerts()
+        if alerts:
+            return "   ".join(alerts)
         if not self._messages:
             return "%s  %s" % (
                 " ".join(link_badge(m) for m in self.monitors),
@@ -423,7 +703,8 @@ class OledTicker:
         rssi, _ = self._platform()
         frame.text(header_line(
             self.monitors, getattr(self.wifi, "state", None), rssi,
-            getattr(self.client, "state", None), self.columns), 0, 0)
+            getattr(self.client, "state", None),
+            chip_masks=self._chip_active_mask, columns=self.columns), 0, 0)
         lines = self.body_lines()
         for row in range(min(self.body_rows, len(lines))):
             frame.text(lines[row], 0, (row + 1) * 8)
@@ -464,6 +745,7 @@ class OledTicker:
             raise
 
     def _service(self, now_ms):
+        self._update_chips(now_ms)
         if self._page_ms_mark is None:
             self._page_ms_mark = now_ms
         elif _ticks_diff(now_ms, self._page_ms_mark) >= self.page_ms:

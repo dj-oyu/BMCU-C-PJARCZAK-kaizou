@@ -20,7 +20,22 @@ STATUS_PAYLOAD_SIZE = 31
 # Pico have to be flashed in lockstep, and flashing a BMCU carries a real risk
 # of a board that looks bricked. Any other length is still invalid.
 STATUS_PAYLOAD_SIZE_LEGACY = 27
-STATUS_PAYLOAD_SIZES = (STATUS_PAYLOAD_SIZE_LEGACY, STATUS_PAYLOAD_SIZE)
+# 39 adds per-channel motor_pwm_avg[4] and motor_speed_avg[4] (int8 each) at
+# offsets 31..34 and 35..38. Accepted alongside 27 and 31 for the same reason
+# 27 stayed accepted when 31 was added: the Pico has to be able to decode a
+# STATUS this shape *before* any BMCU sends one, or the first upgraded board
+# on a link falls straight to unknown_or_invalid and every local
+# interpretation of it (the OLED chips included) goes dark.
+#
+# This offset/sentinel layout is a Pico-side reservation only -- no firmware
+# currently sends 39 bytes, and src/bmcu_link_protocol.h / docs/ do not yet
+# record this shape. If firmware grows STATUS to 39 bytes for a *different*
+# pair of fields, this decoder will silently misread them. Registering the
+# real layout in the firmware's own wire docs belongs to whichever commit
+# actually adds the fields on that side, not here.
+STATUS_PAYLOAD_SIZE_EXTENDED = 39
+STATUS_PAYLOAD_SIZES = (STATUS_PAYLOAD_SIZE_LEGACY, STATUS_PAYLOAD_SIZE,
+                        STATUS_PAYLOAD_SIZE_EXTENDED)
 
 HELLO = 0x01
 STATUS = 0x02
@@ -109,6 +124,17 @@ def decode_channel_flags(raw):
 def _i32(data, offset):
     value = _u32(data, offset)
     return value - 0x100000000 if value & 0x80000000 else value
+
+
+# 0x80 (int8 -128) is the firmware's "not measured" sentinel for
+# motor_pwm_avg/motor_speed_avg, not a true reading -- PWM=0 is a real,
+# meaningful value (an active H-bridge brake, per Motion_control.cpp), so it
+# cannot double as "no data" without erasing that distinction. Decoded to
+# None rather than 0 so a caller cannot mistake absence for a measured zero.
+def _i8_or_none(raw):
+    if raw == 0x80:
+        return None
+    return raw - 0x100 if raw & 0x80 else raw
 
 
 REJECT_CRC = 1
@@ -306,6 +332,14 @@ class BMCUMonitor:
         self.variant_flags = None
         self.build_hash = None
         self.status = None
+        # When self.status was last replaced by a decoded STATUS frame.
+        # Deliberately separate from last_valid_ms/is_stale(), which track
+        # whether the *link* is alive (any valid frame at all -- HELLO, EVENT,
+        # PONG...): a BMCU can keep answering PING while the printer simply
+        # stops polling it, in which case the link is not stale but `status`
+        # is a frozen snapshot all the same. Consumers that read `status`
+        # fields (the OLED alert chips) need this, not is_stale().
+        self.last_status_ms = None
         self.snapshot = None
         self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
@@ -506,6 +540,7 @@ class BMCUMonitor:
 
     def _invalidate_baseline(self, now_ms, reason):
         self.status = None
+        self.last_status_ms = None
         self.snapshot = None
         self.snapshot_at_ms = None
         self.channels = [None, None, None, None]
@@ -633,6 +668,7 @@ class BMCUMonitor:
             self._last_hw_tick32 = None
             self._hw_tick_epoch = 0
             self.status = None
+            self.last_status_ms = None
             self.snapshot = None
             self.channels = [None, None, None, None]
             self.printer_auth = None
@@ -676,6 +712,7 @@ class BMCUMonitor:
 
         if kind == STATUS and len(payload) in STATUS_PAYLOAD_SIZES:
             self.status = self._decode_status(payload)
+            self.last_status_ms = now_ms
             message.update({"type": "status", "data": self.status})
             self._extend_hw_tick(self.status["hw_tick32"], message)
             self._request_missing_baseline()
@@ -716,6 +753,20 @@ class BMCUMonitor:
                                        for index in range(4)]
         else:
             status["channel_flags"] = None
+        # Same discipline as channel_flags just above: a BMCU that has not
+        # been upgraded to send these arrays gets None, not zeros. Zero is a
+        # real, load-bearing reading for both fields (0 PWM is a brake held
+        # at speed, 0 mm/s is legitimately stopped), so inventing it for an
+        # older firmware would read as "motor confirmed stopped" when the
+        # truth is "this BMCU never said".
+        if len(data) >= STATUS_PAYLOAD_SIZE_EXTENDED:
+            status["motor_pwm_avg"] = [_i8_or_none(data[31 + index])
+                                       for index in range(4)]
+            status["motor_speed_avg"] = [_i8_or_none(data[35 + index])
+                                         for index in range(4)]
+        else:
+            status["motor_pwm_avg"] = None
+            status["motor_speed_avg"] = None
         return status
 
     @staticmethod

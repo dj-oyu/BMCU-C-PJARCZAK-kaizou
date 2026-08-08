@@ -237,6 +237,19 @@ class PicoMonitorTests(unittest.TestCase):
         # leave a board that looks bricked. So 27 is accepted.
         self.monitor._handle_frame(frame(link.STATUS, 15, bytes(27)), 200)
         self.assertIsNotNone(self.monitor.status)
+
+    def test_a_decoded_status_stamps_its_own_arrival_time(self):
+        # last_status_ms is deliberately separate from last_valid_ms/
+        # is_stale(): a BMCU can keep answering other frames (HELLO, EVENT,
+        # PONG) while the printer simply stops polling it for STATUS, in
+        # which case the link is not stale but `status` is a frozen
+        # snapshot. Consumers that read `status` fields (the OLED alert
+        # chips) need this timestamp, not is_stale().
+        self.assertIsNone(self.monitor.last_status_ms)
+        self.monitor._handle_frame(frame(link.STATUS, 15, bytes(27)), 200)
+        self.assertEqual(self.monitor.last_status_ms, 200)
+        self.monitor._handle_frame(frame(link.STATUS, 16, bytes(27)), 950)
+        self.assertEqual(self.monitor.last_status_ms, 950)
         self.assertEqual(self.messages[-1]["type"], "status")
 
     def test_a_status_without_the_flags_byte_reports_absent_not_clear(self):
@@ -250,6 +263,51 @@ class PicoMonitorTests(unittest.TestCase):
     def test_a_status_of_an_unknown_length_is_still_rejected(self):
         self.monitor._handle_frame(frame(link.STATUS, 16, bytes(29)), 210)
         self.assertEqual(self.messages[-1]["type"], "unknown_or_invalid")
+
+    def test_a_39_byte_status_decodes_instead_of_falling_to_unknown(self):
+        # A firmware that grows STATUS to carry per-channel motor averages
+        # has to be decodable by a Pico that has not been redeployed yet --
+        # otherwise the first upgraded BMCU on a link drops straight to
+        # unknown_or_invalid and every local interpretation of STATUS (the
+        # OLED chips included) goes dark for that link.
+        self.monitor._handle_frame(frame(link.STATUS, 17, bytes(39)), 220)
+        self.assertEqual(self.messages[-1]["type"], "status")
+        self.assertIsNotNone(self.monitor.status)
+
+    def test_motor_averages_are_absent_below_the_39_byte_status(self):
+        # Same discipline as channel_flags: a BMCU that has not grown these
+        # fields yet must not have zeros invented for it. Zero is a real
+        # reading for both arrays (0 PWM is an active brake per
+        # Motion_control.cpp, not coasting), so absent has to stay absent.
+        for size in (27, link.STATUS_PAYLOAD_SIZE):
+            decoded = link.BMCUMonitor._decode_status(bytes(size))
+            self.assertIsNone(decoded["motor_pwm_avg"], size)
+            self.assertIsNone(decoded["motor_speed_avg"], size)
+
+    def test_motor_averages_decode_as_signed_pwm_and_speed_per_channel(self):
+        payload = bytearray(39)
+        # motor_pwm_avg: -10, 0, 10, -128 (sentinel); offsets 31..34.
+        payload[31:35] = bytes((0xf6, 0x00, 0x0a, 0x80))
+        # motor_speed_avg: 5, -5, 0, -128 (sentinel); offsets 35..38.
+        payload[35:39] = bytes((0x05, 0xfb, 0x00, 0x80))
+        decoded = link.BMCUMonitor._decode_status(bytes(payload))
+        self.assertEqual(decoded["motor_pwm_avg"], [-10, 0, 10, None])
+        self.assertEqual(decoded["motor_speed_avg"], [5, -5, 0, None])
+
+    def test_the_0x80_sentinel_decodes_to_none_not_a_measured_zero(self):
+        # 0x80 (int8 -128) means "not measured". PWM=0 is a real reading -- an
+        # active H-bridge brake can hold several newtons at zero mean PWM
+        # (Motion_control.cpp) -- so a decoder that mapped the sentinel to 0
+        # would make a stalled motor and an unmeasured one indistinguishable.
+        payload = bytearray(39)
+        payload[31] = 0x80
+        payload[35] = 0x80
+        decoded = link.BMCUMonitor._decode_status(bytes(payload))
+        self.assertIsNone(decoded["motor_pwm_avg"][0])
+        self.assertIsNone(decoded["motor_speed_avg"][0])
+        # A true zero reading is still a zero, not swallowed by the same path.
+        self.assertEqual(decoded["motor_pwm_avg"][1], 0)
+        self.assertEqual(decoded["motor_speed_avg"][1], 0)
 
     def test_channel_record_repeats_the_flags_byte_in_its_high_bits(self):
         record_data = bytearray(16)
