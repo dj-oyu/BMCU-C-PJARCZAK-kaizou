@@ -607,20 +607,43 @@ digest, the 24-bit mask it needs on a 31-bit-small-int port, and the one case
 the digest does not help (during a load, `pull_pct` moves every second, so the
 body really does redraw at `OLED_REFRESH_MS` and costs ~2 KB each time).
 
-### 10.2 The link has no baseline, and every snapshot procedure depends on one
+### 10.2 No snapshot had assembled since 2026-08-07 — a bridge bug, twice misdiagnosed
 
-Measured 2026-08-08 afternoon, from the synthetic 0xF0 link record:
+**Resolved in `996eda5`, confirmed on hardware**: `state=online`,
+`channels=4`, `snapshot_age=21203`, and record type 14 present. Kept in full
+because the two wrong diagnoses are more instructive than the right one.
+
+What was measured, from the synthetic 0xF0 link record:
 
 ```
 state_code=3 (stale)   channels_present=0     snapshot_age_ms=65535 (never)
 boot_session=0         tick_hz=0              variant=0xffff  build=0x00000000
 ```
 
-`boot_session=0` is the diagnosis: **the Pico has never seen a HELLO**, because
-it rebooted into a BMCU that was already running. `link_state` only reaches
-`online` when a full snapshot completes (`bmcu_link.py:952`), and
-`GET_FULL_STATUS` is not being answered, so it retries three times and settles
-back to `stale` (`:545`).
+**First diagnosis, wrong:** `boot_session=0` means the Pico never saw a HELLO,
+so it must have rebooted into an already-running BMCU and simply missed the
+handshake. Plausible, fit every number on the page, and false.
+
+**Second diagnosis, also wrong:** after the printer was power-cycled the Pico
+*did* see a HELLO — `boot_session` went to 1 and `tick_hz`, `variant_flags` and
+`build_hash` all populated — and the snapshot still never completed. That was
+read as promoting the problem to the firmware: the BMCU must not be answering
+`GET_FULL_STATUS`. Also false. The BMCU had been answering all along.
+
+**The actual cause:** `_handle_snapshot` decoded the DM_KEY record and returned
+*before* adding it to the parts being assembled, so `len(parts)` could never
+reach `count`. The firmware appends that record to every snapshot
+unconditionally (`bmcu_link.cpp:643`) and the bridge always asks for every
+section, so no snapshot could ever complete. Introduced by `88b94c2`, the same
+commit that added the record — the feature had never once arrived through the
+path it was added to.
+
+**What settled it was asking whether the records were arriving at all.** They
+were: 1513 full-status records in twelve minutes, visible in Bambuddy (§10.6)
+while the bridge reported `snapshot_age=65535`. Both wrong diagnoses shared an
+assumption — that a missing result means a missing input — and neither checked
+it. The counter that would have shown it locally does not exist; the uplink's
+copy of the raw stream is what made it visible.
 
 **STATUS is unaffected and correct.** Decoded live off the wire that afternoon:
 `current_slot=2`, `inserted_mask=0b1111`, `online_mask=0b0101`,
@@ -629,15 +652,20 @@ back to `stale` (`:545`).
 channel being the one the printer selected, in `on_use`, with both switches
 closed. The panel rows matched it.
 
-What is unavailable until the BMCU reboots: **`FULL_RECORD_DM_KEY` (the
-key_mv/threshold record §7 calls the most useful record for anything
-switch-related), the motion-fault code, `motor_pwm`, and the firmware
-identity.** Test C and any `?refresh=1` procedure need those. A BMCU power
-cycle sends HELLO and restores them; it was not done because a print was
-running.
+What was unavailable for that whole day, and is now back: **`FULL_RECORD_DM_KEY`
+(the key_mv/threshold record §7 calls the most useful record for anything
+switch-related), the motion-fault code, `motor_pwm`, `raw_angle`, the AS5600
+validity, `polarity_valid`, and the firmware identity.** Test C and every
+`?refresh=1` procedure need those, so anything in §5 or §7 that reads a
+snapshot was dead from 2026-08-07 until `996eda5`. The ch2 diagnosis in §1 used
+those voltages and still worked, because the watcher scripts decode the wire
+directly and never touch the bridge's assembly — which is exactly why nobody
+noticed the bridge had stopped assembling anything.
 
-Also worth knowing: `stale` makes `soft_reset_guard_error` refuse soft resets,
-so the link being down fails safe rather than open.
+One consequence worth carrying: `stale` makes `soft_reset_guard_error` refuse
+soft resets, because the guard needs snapshot fields. So for that whole day the
+soft reset was unavailable too, which is why §10.8's first experiment could not
+be run. **It can be run now.**
 
 ### 10.3 CI was red for two stacked reasons, both in the job and not the code
 
@@ -846,9 +874,10 @@ Load a slot normally, let it rest, command the reset, and see what comes back.
 | boots unowned | the persistence bug is real, and the conditions for the recovery test exist right there |
 
 Either answer removes a guess that the whole persistence design currently rests
-on, and it does so **before** anything is flashed. The gate: the guard needs
-snapshot fields, so the baseline has to exist first — do this after the BMCU
-reboot that §10.9 already owes.
+on, and it does so **before** anything is flashed. The gate was that the guard
+needs snapshot fields and no snapshot would assemble; **that is fixed as of
+`996eda5` and the experiment is now runnable** — load a slot, let it settle,
+and reset.
 
 **Experiment 2 — can the dangerous state be reached on purpose?**
 The state that matters is *no owner while filament is still physically in the
@@ -888,10 +917,9 @@ already banned, bought to reach something ordinary operation reaches anyway.
    restore found nothing. **This is inferred, not measured**, and §10.8's first
    experiment is the cheap half of settling it; instrumented counters are the
    thorough half and ride the same flash as the fix.
-4. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
-   the snapshot completes — if it does not even after a HELLO, §10.2 becomes a
-   firmware question rather than a startup-order one. This also restores
-   DM_KEY, `motion_fault` and `motor_pwm` to the observation points in §7.
+4. ~~Reboot the BMCU and see whether the snapshot completes.~~ **Done, and it
+   was never the BMCU** — §10.2. The bridge was dropping one record from the
+   assembly; `996eda5` fixes it and the observation points in §7 are back.
 5. **Identify the long frames** (`0x0411`/`0x023C`/`0x0237`/`0x021A`, §3). They
    were already destroying the event ring; §10.5 gives them a second use, since
    a periodic printer status carrying job or temperature state is exactly what
