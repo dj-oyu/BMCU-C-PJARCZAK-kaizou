@@ -111,9 +111,11 @@ down, where the badges now go dark instead of latching on the last thing
 they saw. That is a known, accepted limitation -- correct behaviour would
 need the Pico to poll `get_status()` on its own schedule, which is a
 separate change; `last_status_ms` is also the plumbing that change would
-need. Idle machines have been measured going tens of minutes between STATUS
-frames today, so without either gate a chip could stay lit off a frozen
-last-known reading long after it stopped being true.
+need. `pull_pct` is not itself a dirty source -- the firmware re-sends STATUS
+on `set_motion`, motion transitions, the masks, a pressure sentinel-class
+change, LED and errors, never on pull alone -- so without either gate a chip
+could stay lit off a frozen last-known reading long after it stopped being
+true.
 
 Both badges can be lit at once, shown `L` before `S` (the more actively
 harmful condition first, see `oled_ticker.py`). While any badge is lit the

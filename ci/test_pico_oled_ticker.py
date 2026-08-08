@@ -660,9 +660,9 @@ class ChipDebounceTests(unittest.TestCase):
 
     def test_a_stale_link_never_lights_a_chip_no_matter_how_long_held(self):
         # A frozen last-known STATUS is not a current condition. Without this
-        # gate a machine that simply stopped talking (idle links have been
-        # measured 42 minutes between frames) would show a permanent, false
-        # alert off whatever it last reported.
+        # gate a board that stopped talking -- measured on the bench at 58
+        # minutes since its last frame, with the printer powered down -- would
+        # show a permanent, false alert off whatever it last reported.
         monitor = self.latch_monitor()
         monitor._stale = True
         ticker = self.ticker(monitor)

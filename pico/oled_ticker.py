@@ -137,15 +137,18 @@ CHIP_SUFFIXES = ("", "L", "S", "LS")
 # On a link the printer is actively polling, STATUS arrives at roughly
 # 12.5 Hz (the interval in src/pressure_event_policy.h), so CHIP_HOLD_MS
 # covers ~37 frames there and mainly exists to reject one noisy or
-# borderline decode. But an idle machine has been measured going quiet for
-# tens of minutes between STATUS frames -- the printer simply stops polling
-# -- so for STUCK specifically (which only fires while parked, i.e. exactly
-# when the link is likely to be this quiet) the wall-clock hold is doing the
-# real debouncing off *one* frame, not confirming across many. That is still
-# the right trade: a frame-count debounce would mean STUCK could never light
-# at all on a quiet link. LATCH only fires during ON_USE, when the printer is
-# actively printing and therefore polling at the rate above, so it gets the
-# full multi-frame confirmation this constant was originally sized for.
+# borderline decode. A printer that is powered polls even while idle -- the
+# idle heartbeat goes through set_motion like everything else, and main.cpp
+# says as much: "Idle frames arrive continuously while a printer is paused"
+# -- so that rate is the ordinary case for both chips, not just for LATCH.
+# The case that is genuinely quiet is a BMCU with no polling printer at all:
+# a bench rig, or a broken bus line. There the hold cannot confirm across
+# frames, because pull_pct is not a dirty source (STATUS is emitted on
+# set_motion, motion transitions, the masks, pressure *class* changes, LED
+# and errors -- never on pull alone), so the buffer can move without
+# producing a frame. A frame-count debounce would then mean STUCK could
+# never light at all, which is why the hold is wall-clock; the age gate
+# below is what keeps that from becoming a lie.
 CHIP_HOLD_MS = 3000
 
 # How old the *data*, not the link, is allowed to be before a chip is
@@ -467,10 +470,10 @@ class OledTicker:
         self._last_event = [None] * len(monitors)
         self._dirty = (1 << self.rows) - 1
         self._next_flush = 0
-        # One [since_desync, since_latch, since_stuck] tick per monitor,
+        # One [since_latch, since_stuck] tick per monitor,
         # `None` when that bit is not currently true. Preallocated here, not
         # grown per call: _update_chips only ever mutates existing slots.
-        self._chip_since_ms = [[None, None, None] for _ in monitors]
+        self._chip_since_ms = [[None] * CHIP_COUNT for _ in monitors]
         self._chip_active_mask = [0] * len(monitors)
 
     # -- content -----------------------------------------------------------
@@ -574,10 +577,10 @@ class OledTicker:
             since = self._chip_since_ms[index]
             # Two independent gates, both required. is_stale() answers "is
             # this link alive at all" (any valid frame -- HELLO, EVENT,
-            # PONG -- counts), not_stale/link_state a snapshot-retry
-            # exhaustion path leaves link_state stuck at "stale" while
-            # STATUS keeps arriving (seen on a real board), so link_state
-            # cannot substitute for it. But is_stale() alone is not enough
+            # PONG -- counts). link_state cannot substitute for it: a
+            # snapshot-retry exhaustion path leaves link_state stuck at
+            # "stale" while STATUS keeps arriving, and a real board has been
+            # seen in exactly that state. But is_stale() alone is not enough
             # either: a BMCU that keeps answering PING while the printer has
             # simply stopped polling it is not stale by that measure, and
             # `status` is still a frozen snapshot -- that needs the
