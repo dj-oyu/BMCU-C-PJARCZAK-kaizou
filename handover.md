@@ -29,6 +29,17 @@ motion-fault code and `motor_pwm`, which several procedures below depend on.
 The printer was mid-print at writing, so the BMCU reboot that would fix it was
 deliberately not performed.
 
+**Then the machine produced the merger desync in full (§10.5).** A power cycle
+with filament loaded left the BMCU unowned while the printer still believed slot
+3 was loaded; the printer cut the strand and abandoned it, and the buffer
+stuffed to 100 % twice before the operator pulled it out by hand. The acceptance
+matrix cannot recover from this on its own, and the same state admits a load of
+a *different* slot with no occupancy check — two strands into one tube. §10.7
+adds a second finding from the same print: the channel had been jam-latched with
+the motor off, telling the printer `0xF06F` the whole time. Neither of these is
+in §1–§9. **Read §10.5 before touching the merger latch or the acceptance
+matrix, and §10.6 before trusting any timeline query.**
+
 **State at writing:** branch `alpha` at `dd42015`, **pushed to origin, CI green**
 (the firmware work below is at `b4725ee`; `11b38df` adds the Pico panel and its
 tests, `1f9d41d` and `dd42015` repair CI). Host suite 288 tests. **GitHub
@@ -663,12 +674,157 @@ panel's steady-state allocation is nil. **Not confirmed.** The A/B that settles
 it is `OLED_ENABLED = False` for five minutes against five minutes with it on,
 with no HTTP requests during either window; it was deferred to after the print.
 
-### 10.5 Open, in order
+### 10.5 The merger desync, observed end to end for the first time
 
-1. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
+A printer power cycle with filament loaded left the BMCU unowned while the
+printer still believed slot 3 was loaded. The printer then cut the filament and
+abandoned it. This is the failure the memory note `bmcu-loaded-latch-and-runout`
+predicted in the abstract; here is the whole of it with timestamps.
+
+**Timeline, JST, from Bambuddy** (the Pico's own queue was empty because the
+uplink was online and had shipped it; see 10.7):
+
+| time | what |
+|---|---|
+| 19:40:02–19:47:09 | ch3 `on_use`, `pull_pct` 0, **`pressure = 0xF06F`** — see 10.8 |
+| 19:47:15–19:50:53 | **218 s hole. The Pico was down for a deploy of mine, and the printer power cycle happened inside the same window.** |
+| 19:50:53 | back: all `motion` idle, `pressure = 0xFFFF`, no `loaded` anywhere |
+| 20:02:31–38 | unload attempt: `pull_pct` ch3 33 → 44 → 50 → 24 → 47 → 67 → 71 |
+| 20:06:41, :42 | **`pull_pct` ch3 = 100, twice.** Buffer completely stuffed |
+| 20:06:52 | operator pulled the strand by hand; back to 47–51, `ks` 1 → 2 |
+
+`boot_session` went 0 → 1 within one Pico uptime, so the BMCU really did reboot
+and its HELLO was seen. After that reboot the merger was never owned again:
+`main.cpp:336-354` restores an owner when `Flash_AMS_state_read` returns one, and
+it plainly did not.
+
+**The code path, and why it cannot self-heal** (`bambu_bus_ams.cpp:240-249`):
+
+```c
+const bool allow_any  = (loaded == 0xFFu) || (loaded == ch);
+const bool allow_stop = (loaded == ch);
+accept = is_send_out
+       | (is_before_on_use && allow_any)   // acquires
+       | (is_on_use        && allow_any)   // acquires
+       | (is_stop_on_use   && allow_stop)  // needs ownership
+       | (is_before_pullb  && allow_stop); // needs ownership
+```
+
+The only paths that can *acquire* run at load time; every path that runs at
+unload time requires ownership already. A BMCU that lost its memory cannot be
+told to retract, and cannot regain ownership except by a full load. The reason
+`allow_stop` excludes `0xFF` is to stop one channel demoting another's
+ownership — but with `0xFF` there is no other owner, so the exclusion buys
+nothing and costs the recovery path. The minimal fix is
+`allow_stop = (loaded == ch) || (loaded == 0xFFu)`.
+
+**Why this is worse than "the unload does nothing."** The A1 cutter is driven
+mechanically by the toolhead pressing the cutter lever, and it cuts *before* the
+retract. It therefore fires whatever the AMS believes. Every unload during a
+desync severs the strand and then abandons it in the PTFE, with the reversed
+filament going into the buffer instead of onto the spool.
+
+**The hazard that has not happened yet.** With `loaded == 0xFF`, `allow_any` is
+true for *every* channel, so a load of a different slot is admitted with no
+check on physical occupancy, and `ams_state_preempt` is not even reached (it
+runs only when `loaded != 0xFF`). Two strands into one tube is available from
+this state. Merger occupancy cannot be sensed — there is no sensor past the
+online key, which is precisely what TAIL exists to model — so this is a memory
+problem, not a sensing one.
+
+Design direction agreed with the operator, not yet implemented: three states
+(`OWNED` / `EMPTY` / `UNKNOWN`) where **`EMPTY` is earned by watching a
+withdrawal reach `ks == none`, never assumed**; retracts permissive in all
+states; and an auto-retract that is triggered by *the printer's own load
+request for another channel* rather than by any inferred state, on the grounds
+that "put X in the tube" is also "I do not want anything else in there". The
+retract is an experiment, not a cleanup: if it cannot reach `ks == none`, the
+right answer is to refuse the load and say so, which is an option the firmware
+does not currently have.
+
+### 10.6 Where the history actually lives
+
+The Pico keeps almost nothing. `/api/history/status.bin` is an alias for
+`current.bin` (`binary_api.py:189`), the BMCU event ring holds ~2 s (§3), and
+`/api/events.bin` is empty whenever the uplink is up, because the durable queue
+drains on ACK. **The timeline is on Bambuddy**, which is where the table above
+came from:
+
+```
+http://rdk-x5.tail848eb5.ts.net:8000/api/v1/bmcu-monitors/pico-bmcu-bridge/timeline?from=…&to=…&limit=5000
+```
+
+No auth. Sibling endpoints: `/metrics`, `/logs`, the monitor list at
+`/api/v1/bmcu-monitors`. Records live in `bmcu_binary_records`; the local
+checkout is `C:\devs\bambulab\bambuddy`.
+
+Two cautions, both learned by getting them wrong. **The response is
+`downsampled: true`** — absence of a value there is not evidence of absence, and
+a "the value was 0 for two hours" reading taken from it was over-stated and had
+to be retracted. And **deploying to the Pico blinds the recorder**: the 218 s
+hole above sits exactly on the transition it would have explained. Do not deploy
+while something is being observed, or record the hole deliberately.
+
+Bambu Studio's own logs are AES-encrypted (`_enc.log`, `"enc_block_size": 16`),
+so that route is closed. The printer's SD logs over LAN-mode FTPS remain the
+only authority on what the printer itself believed.
+
+### 10.7 The channel was jam-latched for part of the print, and said so
+
+In the window ending 19:47:09, ch3 reported `motion = on_use`, `pull_pct = 0`,
+and **`pressure = 0xF06F`** — the jam sentinel, the value that makes the printer
+raise HMS (`Motion_control.cpp:25`). It was the only non-`0xFFFF` pressure in
+that window.
+
+That combination is `g_on_use_low_latch`: during ON_USE, a buffer below 40 %
+latches the motor off permanently, after which the extruder drags filament
+through the BMCU unassisted for as long as the print continues. A simulation of
+the A1 control law reproduces it by two routes — a hard snag, which latches on
+the way down and reports the jam sentinel, and a marginal snag, which trips the
+20 s `push_hi` latch instead and **reports nothing at all**. The second is the
+dangerous one: on the wire its only trace is `pull_pct` itself.
+
+Worth asking the operator whether the printer showed an HMS warning in that
+window; nobody was watching the panel yet.
+
+Consequences for any force display built on these signals:
+
+- `pull_pct` is a usable resistance proxy, but only during load/unload. During
+  printing, downstream path resistance is **invisible** — the extruder absorbs
+  it, and the simulation found 1 N, 4 N and 8 N bit-identical in every observable.
+- Raw PWM is a speedometer, not a resistance meter: the same drag at 2 vs
+  20 mm/s gives |PWM| 96 vs 763. An upstream (spool drag) gauge needs a
+  speed-normalised estimate, which needs two bytes STATUS does not carry.
+- **`PWM = 0` is an active brake**, not coast: `Motion_control.cpp:2274` sets
+  `set1 = set2 = 1000`. A window mean of zero does not mean no load.
+- Both gauges return garbage while low-latched, and they return it as a frozen
+  plausible number rather than an obvious fault. Any such display needs a state
+  gate, and the two states worth showing as chips —
+  `on_use && pull_pct < 40` sustained, and
+  `idle && pressure == 0xFFFF && pull_pct` far from centre — are computable from
+  fields already on the wire, catch both of today's failures, and are worth more
+  than the gauges.
+
+### 10.8 Open, in order
+
+1. **The desync fix (§10.5).** `allow_stop` is one line; the three-state latch
+   and the command-triggered retract are a design, currently with a subagent.
+   Needs a flash, so it waits for the printer.
+2. **Measure the persistence gate.** `persistence_save_run` (`main.cpp:263`)
+   defers every latch write until `bus_port_to_host.quiet_for_us(5000u)`. If a
+   printing machine never offers 5 ms of bus silence, the merger latch is never
+   written and a power cut loses it — which is the most likely reason §10.5's
+   restore found nothing. **This is inferred, not measured.** A counter for
+   "longest time dirty" would settle it.
+3. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
    the snapshot completes — if it does not even after a HELLO, §10.2 becomes a
-   firmware question rather than a startup-order one.
-2. Run the heap A/B in §10.4.
-3. The `.local` name resolved fine from both `curl` and `urllib` this session,
+   firmware question rather than a startup-order one. This also restores
+   DM_KEY, `motion_fault` and `motor_pwm` to the observation points in §7.
+4. **Identify the long frames** (`0x0411`/`0x023C`/`0x0237`/`0x021A`, §3). They
+   were already destroying the event ring; §10.5 gives them a second use, since
+   a periodic printer status carrying job or temperature state is exactly what
+   the auto-retract preconditions lack.
+5. Run the heap A/B in §10.4.
+6. The `.local` name resolved fine from both `curl` and `urllib` this session,
    which is not what §7's IPv6 warning predicts. One session is not enough to
    retract it; if it keeps working, drop the warning.
