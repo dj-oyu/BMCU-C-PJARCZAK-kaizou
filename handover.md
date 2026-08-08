@@ -805,26 +805,79 @@ Consequences for any force display built on these signals:
   fields already on the wire, catch both of today's failures, and are worth more
   than the gauges.
 
-### 10.8 Open, in order
+### 10.8 Two experiments that need running before any of this is designed further
 
-1. **The desync fix (§10.5).** `allow_stop` is one line; the three-state latch
-   and the command-triggered retract are a design, currently with a subagent.
+Both are cheap, both need the machine, and both decide something that is
+currently being guessed. Neither needs a firmware change.
+
+**Experiment 1 — does the merger latch survive a reset while loaded?**
+`bmcu_link.cpp:958` calls `NVIC_SystemReset()`, so `CONTROL_SOFT_RESET` from the
+Pico is a real MCU reset, and the guard deliberately permits it with filament
+loaded (`pico/bmcu_link.py:401`: controller_motion 7, `pressure_ctrl_idle`, is
+where a loaded channel rests). It is a cleaner instrument than a power cut
+because **only the BMCU forgets while the printer keeps believing** — which is
+the desync in its pure form.
+
+Load a slot normally, let it rest, command the reset, and see what comes back.
+
+| result | what it settles |
+|---|---|
+| ownership restored | persistence works at idle; §10.5's loss needed the *printing* bus, so the quiet gate is the suspect and the power-cut repro is not deterministic |
+| boots unowned | the persistence bug is real, and the conditions for the recovery test exist right there |
+
+Either answer removes a guess that the whole persistence design currently rests
+on, and it does so **before** anything is flashed. The gate: the guard needs
+snapshot fields, so the baseline has to exist first — do this after the BMCU
+reboot that §10.9 already owes.
+
+**Experiment 2 — can the dangerous state be reached on purpose?**
+The state that matters is *no owner while filament is still physically in the
+path*. Hold the filament by hand during an unload so the retract ends in
+`PULL_NO_PROGRESS`: a retract that ends by fault rather than by observing
+`ks == none` leaves the latch unowned with the strand still there. Tens of
+seconds, repeatable.
+
+This decides more than a test procedure. **If that state cannot be produced on
+purpose, the auto-retract probe has no reason to exist** — recovering from it is
+the probe's only job. If it can, the same procedure is the probe's acceptance
+test. Do not build the probe before running this.
+
+The corollary is why no debug hook is needed to reach it. Under the proposed
+three-state latch, unowned-and-unknown is not exotic: a commanded release lands
+there and is promoted to "empty" only on watching `ks` reach `none`, so **every
+ordinary unload passes through it**, and every board hits it once on upgrade,
+because an old firmware's "unloaded" record maps to unknown by design. A debug
+command that forces the state would be a footgun on a board where full erase is
+already banned, bought to reach something ordinary operation reaches anyway.
+
+### 10.9 Open, in order
+
+1. **Run the two experiments in §10.8 before designing further.** Neither needs
+   a flash, both need the machine, and each removes a guess the current design
+   rests on: whether the latch survives a reset while loaded, and whether the
+   unowned-but-occupied state can be produced on purpose. The second one decides
+   whether the auto-retract probe should be built at all.
+2. **The desync fix (§10.5).** `allow_stop` is one line; the three-state latch
+   and the command-triggered retract are a design (`docs/`, if it was moved out
+   of the scratchpad it was written in — check before assuming it survived).
    Needs a flash, so it waits for the printer.
-2. **Measure the persistence gate.** `persistence_save_run` (`main.cpp:263`)
+3. **Measure the persistence gate.** `persistence_save_run` (`main.cpp:263`)
    defers every latch write until `bus_port_to_host.quiet_for_us(5000u)`. If a
    printing machine never offers 5 ms of bus silence, the merger latch is never
    written and a power cut loses it — which is the most likely reason §10.5's
-   restore found nothing. **This is inferred, not measured.** A counter for
-   "longest time dirty" would settle it.
-3. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
+   restore found nothing. **This is inferred, not measured**, and §10.8's first
+   experiment is the cheap half of settling it; instrumented counters are the
+   thorough half and ride the same flash as the fix.
+4. Reboot the BMCU after the print, confirm `A~` then `A+`, and check whether
    the snapshot completes — if it does not even after a HELLO, §10.2 becomes a
    firmware question rather than a startup-order one. This also restores
    DM_KEY, `motion_fault` and `motor_pwm` to the observation points in §7.
-4. **Identify the long frames** (`0x0411`/`0x023C`/`0x0237`/`0x021A`, §3). They
+5. **Identify the long frames** (`0x0411`/`0x023C`/`0x0237`/`0x021A`, §3). They
    were already destroying the event ring; §10.5 gives them a second use, since
    a periodic printer status carrying job or temperature state is exactly what
-   the auto-retract preconditions lack.
-5. Run the heap A/B in §10.4.
-6. The `.local` name resolved fine from both `curl` and `urllib` this session,
+   the auto-retract preconditions lack. Receive-side analysis needs no flash, so
+   this can start at any time.
+6. Run the heap A/B in §10.4.
+7. The `.local` name resolved fine from both `curl` and `urllib` this session,
    which is not what §7's IPv6 warning predicts. One session is not enough to
    retract it; if it keeps working, drop the warning.
