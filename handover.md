@@ -732,6 +732,24 @@ this state. Merger occupancy cannot be sensed — there is no sensor past the
 online key, which is precisely what TAIL exists to model — so this is a memory
 problem, not a sensing one.
 
+**The desync cannot be detected from a STATUS frame, and it is worth knowing
+why before trying.** The obvious predicate — no channel reports `loaded` while
+some channel's motion is a retract — fails in both directions, for the same
+structural reason as the deadlock above. It fires on *every* ordinary unload,
+because `before_pull_back` calls `ams_state_set_unloaded(ch)` in the same call
+that sets the motion (`bambu_bus_ams.cpp:398`); `ams_merger_policy.h` says it
+plainly: "on every retract, runout or not, the merger is occupied-but-unowned".
+And it never fires on a real desync, because `if (!allow_stop) return true;`
+(`:384`) returns **before** the motion is written, so the wire stays idle — which
+is exactly what the timeline above shows, `motion` flat at `[0,0,0,0]` through
+the whole incident while `pull_pct` swung from 33 to 100. A panel alert built on
+that predicate was written, tested green, and thrown away; the tests had frozen
+the wrong model of when ownership is released. What the wire *can* show is the
+consequence: a parked buffer far from centre, which is the `STUCK` chip in
+§10.7. Detecting the cause needs either cross-frame evidence or a firmware event
+on the refused retract — the latter belongs with the `allow_stop` fix, since a
+refused retract is the primary evidence that the two sides disagree.
+
 Design direction agreed with the operator, not yet implemented: three states
 (`OWNED` / `EMPTY` / `UNKNOWN`) where **`EMPTY` is earned by watching a
 withdrawal reach `ks == none`, never assumed**; retracts permissive in all
