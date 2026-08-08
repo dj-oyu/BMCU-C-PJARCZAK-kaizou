@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 
@@ -406,6 +407,78 @@ class PicoMonitorTests(unittest.TestCase):
                                          snapshot_payload(7, 0, 2)), 250)
         self.assertEqual(len(self.monitor.snapshot), 2)
         self.assertEqual(self.monitor.link_state, "online")
+
+    def test_a_dm_key_record_does_not_block_snapshot_assembly(self):
+        # Regression for the bug that shipped alongside DM_KEY (88b94c2): the
+        # DM_KEY branch used to `return` right after decoding, before the
+        # record ever reached _snapshot_parts, so a snapshot carrying one
+        # never grew to len(parts) == count. capture_full_status
+        # (src/bmcu_link.cpp:643) always appends exactly one DM_KEY record to
+        # a full snapshot, so this broke every snapshot on every link, not an
+        # edge case.
+        self.hello()
+        self.monitor._handle_frame(frame(
+            link.FULL_STATUS_RECORD, 2,
+            snapshot_payload(9, 0, 2, record_type=link.FULL_RECORD_DM_KEY)), 200)
+        self.assertIsNone(self.monitor.snapshot)
+        self.monitor._handle_frame(frame(
+            link.FULL_STATUS_RECORD, 2, snapshot_payload(9, 1, 2)), 250)
+        self.assertEqual(len(self.monitor.snapshot), 2)
+        self.assertEqual(self.monitor.link_state, "online")
+
+    def test_dm_key_voltages_are_still_decoded_after_the_fix(self):
+        # The fix must not be "delete the decode along with the return" --
+        # the raw voltages are the whole reason the record exists (a switch
+        # short of the `outer` band reads identically to one that never
+        # moved without them).
+        record_data = bytearray(16)
+        record_data[0:8] = (1200).to_bytes(2, "little") + (1300).to_bytes(2, "little") + \
+            (1250).to_bytes(2, "little") + (1260).to_bytes(2, "little")
+        record_data[8:16] = (300).to_bytes(2, "little") + (310).to_bytes(2, "little") + \
+            (320).to_bytes(2, "little") + (330).to_bytes(2, "little")
+        payload = ((5).to_bytes(2, "little") +
+                  bytes((0, 1, link.FULL_RECORD_DM_KEY, 0)) +
+                  (10).to_bytes(4, "little") + bytes(record_data))
+        message = {}
+
+        self.monitor._handle_snapshot(payload, message, 100)
+
+        self.assertEqual(message["dm_key"]["key_mv"], [1200, 1300, 1250, 1260])
+        self.assertEqual(message["dm_key"]["none_thr_mv"], [300, 310, 320, 330])
+        # count=1, index=0: the only record in its own snapshot, so this also
+        # proves the decode and the assembly are not mutually exclusive.
+        self.assertEqual(len(self.monitor.snapshot), 1)
+
+    def test_every_full_status_record_type_assembles_a_snapshot(self):
+        # The general form of the DM_KEY bug: a record_type whose own `if`
+        # branch returns before the record reaches _snapshot_parts breaks
+        # assembly for every snapshot that carries it, and Pico always
+        # requests every section/channel ("0x0f 0x0f"), so every record type
+        # firmware can emit shows up in every snapshot. Enumerated from the
+        # firmware header rather than hand-copied, so a record type added
+        # there and never exercised here cannot silently reopen the same
+        # hole. Read from src/bmcu_link_protocol.h directly rather than
+        # docs/bmcu_link_enum_registry.json: that generated file was last
+        # regenerated at e24dc3b, before df4727a/88b94c2 added
+        # FULL_RECORD_DM_KEY, so it does not carry 14 -- using it here would
+        # recreate exactly the blind spot this test exists to close.
+        header = (ROOT / "src" / "bmcu_link_protocol.h").read_text(encoding="utf-8")
+        body = header.split("enum FullStatusRecordType", 1)[1]
+        body = body.split("{", 1)[1].split("}", 1)[0]
+        record_types = [int(value) for value in re.findall(r"=\s*(\d+)u", body)]
+
+        self.assertTrue(record_types)
+        self.assertIn(link.FULL_RECORD_DM_KEY, record_types)
+        for record_type in record_types:
+            monitor = link.BMCUMonitor(FakeUART(), link_id="bmcu-rt")
+            payload = snapshot_payload(200 + record_type, 0, 1,
+                                       record_type=record_type)
+            monitor._handle_frame(
+                frame(link.FULL_STATUS_RECORD, 2, payload), 200)
+
+            self.assertIsNotNone(monitor.snapshot, record_type)
+            self.assertEqual(len(monitor.snapshot), 1, record_type)
+            self.assertEqual(monitor.link_state, "online", record_type)
 
     def test_duplicate_snapshot_index_is_rejected(self):
         self.hello()

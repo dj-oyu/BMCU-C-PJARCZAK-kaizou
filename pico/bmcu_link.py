@@ -897,7 +897,12 @@ class BMCUMonitor:
                     "key_mv": [_u16(record_data, i * 2) for i in range(4)],
                     "none_thr_mv": [_u16(record_data, 8 + i * 2) for i in range(4)],
                 }})
-            return
+            # No early return: capture_full_status (src/bmcu_link.cpp) always
+            # appends one DM_KEY record to a full ("0x0f 0x0f") snapshot, so
+            # returning here skipped the assembly code below for every
+            # snapshot and count never reached len(parts) -- the snapshot
+            # deadline fired, forever, on every link. Every record_type below
+            # falls through the same way; none of them may return early.
         if record_type == FULL_RECORD_PRINTER_AUTH:
             message["printer_auth_data"] = {
                 "last_type": _u16(record_data, 0), "count_040d": _u16(record_data, 2),
