@@ -751,12 +751,14 @@ drains on ACK. **The timeline is on Bambuddy**, which is where the table above
 came from:
 
 ```
-http://rdk-x5.tail848eb5.ts.net:8000/api/v1/bmcu-monitors/pico-bmcu-bridge/timeline?from=…&to=…&limit=5000
+GET <bambuddy>/api/v1/bmcu-monitors/pico-bmcu-bridge/timeline?from=…&to=…&limit=5000
 ```
 
-No auth. Sibling endpoints: `/metrics`, `/logs`, the monitor list at
-`/api/v1/bmcu-monitors`. Records live in `bmcu_binary_records`; the local
-checkout is `C:\devs\bambulab\bambuddy`.
+No auth on this deployment. Sibling endpoints: `/metrics`, `/logs`, the monitor
+list at `/api/v1/bmcu-monitors`. Records live in `bmcu_binary_records`. **The
+host is operator-specific and deliberately not written here — this repository is
+public.** It is in the project memory note `pico-deploy-and-inspection-paths`
+alongside the bridge's own address.
 
 Two cautions, both learned by getting them wrong. **The response is
 `downsampled: true`** — absence of a value there is not evidence of absence, and
