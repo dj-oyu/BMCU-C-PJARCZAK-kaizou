@@ -14,6 +14,7 @@
 #include "empty_unload_policy.h"
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
+#include "unload_hold_policy.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -491,6 +492,15 @@ static uint32_t g_hold_t0_ticks = 0;
 
 // kiedy kanał OSTATNIO wyszedł z on_use (0 = nigdy, 1 = marker "był kiedykolwiek") (patch do wersji BMCU DM przy automatycznej zmianie filamentu gdy się skończy, żeby ekstruder nie trzymał filamentu)
 static uint32_t g_last_on_use_exit_ms[4] = {0u,0u,0u,0u};
+
+// Unload hold (upstream PR #155): after a printer unload the idle control does
+// not feed that channel until it is used again. See src/unload_hold_policy.h
+// for the fault, the gate and the release conditions. Build with
+// -DBMCU_UNLOAD_HOLD=0 to get the previous behaviour back.
+#ifndef BMCU_UNLOAD_HOLD
+#define BMCU_UNLOAD_HOLD 1
+#endif
+static unload_hold::State g_unload_hold[4] = {{0u, 0u}, {0u, 0u}, {0u, 0u}, {0u, 0u}};
 
 extern void RGB_update();
 
@@ -1343,9 +1353,24 @@ public:
 
         if ((mode & kMotionPressureIdle) != 0u)
         {
+            // Unload hold: no feeding at all -- no DM autoload, no idle buffer
+            // feed, no post-on_use push. The idle retract of a raised buffer
+            // still runs below.
+            if (BMCU_UNLOAD_HOLD &&
+                unload_hold::blocks_idle(g_unload_hold[CHx], MC_ONLINE_key_stu[CHx],
+                                         MC_PULL_stu[CHx]))
+            {
+                PID_speed.clear();
+                PID_pressure.clear();
+                pwm_zeroed = 1;
+                x_prev[CHx] = 0;
+                Motion_control_set_PWM(CHx, 0);
+                return;
+            }
         #if BMCU_DM_TWO_MICROSWITCH
                     // --- DM autoload (Stage1 + Stage2) ---
-                    if (filament_channel_inserted[CHx] && (dm_loaded[CHx] == 0u))
+                    if (filament_channel_inserted[CHx] && (dm_loaded[CHx] == 0u) &&
+                        !(BMCU_UNLOAD_HOLD && unload_hold::blocks_autoload(g_unload_hold[CHx])))
                     {
                         const uint8_t ks = MC_ONLINE_key_stu[CHx];
                         const int32_t cur_counts = g_filament_position_counts[CHx];
@@ -2464,6 +2489,11 @@ static constexpr int32_t BEFORE_PB_MAX_COUNTS  = distance_m_to_counts(2.0f);
 static constexpr uint32_t REDETECT_TIMEOUT_MS = 10000u;
 static uint32_t redetect_t0_ms[4] = {0u,0u,0u,0u};
 
+// signal_hold storage for the pull back's "no filament" exit; see
+// unload_hold::kPullBackEmptyConfirmMs. Cleared on every pull back exit so a
+// half-timed window never carries into the next unload.
+static uint32_t pull_back_empty_t0_ms[4] = {0u,0u,0u,0u};
+
 static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, uint8_t fault, uint32_t time_now)
 {
     auto &A = ams[motion_control_ams_num];
@@ -2475,6 +2505,7 @@ static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, ui
     motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
     filament_now_position[channel] = filament_idle;
     redetect_t0_ms[channel] = 0u;
+    pull_back_empty_t0_ms[channel] = 0u;
     g_pull_remain_counts[channel] = 0;
     g_pull_speed_set_q[channel] = -PULL_V_FAST_Q;
     g_pull_pwm_floor[channel] = PULL_PWM_MIN;
@@ -2491,6 +2522,49 @@ static __attribute__((noinline, cold)) void latch_pull_fault(uint8_t channel, ui
         bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
     }
     MC_STU_RGB_set_latch(channel, 0xFFu, 0x00u, 0x00u, time_now, 1u);
+}
+
+static void unload_hold_start(uint8_t ch)
+{
+    if (!BMCU_UNLOAD_HOLD) return;
+
+    unload_hold::start(g_unload_hold[ch]);
+#if BMCU_DM_TWO_MICROSWITCH
+    // Parked through both switches is loaded as far as the autoload is
+    // concerned. A Stage-2 re-armed while the printer used the channel
+    // (dm_loaded cleared by DM_LOADED_DROP_MS) would otherwise push the
+    // filament back towards the tool head the moment the hold ends.
+    if (MC_ONLINE_key_stu[ch] == 1u)
+    {
+        dm_loaded[ch]             = 1u;
+        dm_fail_latch[ch]         = 0u;
+        dm_auto_state[ch]         = DM_AUTO_IDLE;
+        dm_auto_try[ch]           = 0u;
+        dm_auto_t0_ms[ch]         = 0u;
+        dm_auto_remain_counts[ch] = 0;
+        dm_auto_last_counts[ch]   = 0;
+        dm_loaded_drop_t0_ms[ch]  = 0u;
+        dm_fail_clear_t0_ms[ch]   = 0u;
+    }
+#endif
+}
+
+static void unload_hold_update(uint32_t now_ms)
+{
+    if (!BMCU_UNLOAD_HOLD) return;
+
+    const auto &A = ams[motion_control_ams_num];
+    const uint8_t n = A.now_filament_num;
+
+    for (uint8_t ch = 0; ch < kChCount; ch++)
+    {
+        unload_hold::Inputs in;
+        in.inserted        = filament_channel_inserted[ch];
+        in.printer_driving = (n == ch) && (A.filament[ch].motion != _filament_motion::idle);
+        in.auto_unload     = auto_unload_active[ch] != 0u;
+        in.key_empty       = MC_ONLINE_key_stu[ch] == 0u;
+        unload_hold::update(g_unload_hold[ch], in, now_ms);
+    }
 }
 
 // Returns the set of channels this sequencer is driving, one bit per channel.
@@ -2519,8 +2593,16 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 static_cast<uint32_t>(distance_m_to_counts(0.050f));
             constexpr uint32_t PULL_NO_PROGRESS_TIMEOUT_MS = 3000u;
 
+            // One empty reading must not end the pull back early; see
+            // unload_hold::kPullBackEmptyConfirmMs. Evaluated on every pass so
+            // a reading with filament restarts the window.
+            const bool empty_confirmed = signal_hold::held_for(
+                pull_back_empty_t0_ms[i], MC_ONLINE_key_stu[i] == 0,
+                time_now, unload_hold::kPullBackEmptyConfirmMs);
+
             if (target_counts <= 0 || progress_counts >= target_counts)
             {
+                pull_back_empty_t0_ms[i] = 0u;
                 g_pull_remain_counts[i] = 0;
                 g_pull_speed_set_q[i] = -PULL_V_FAST_Q;
                 g_pull_pwm_floor[i] = PULL_PWM_MIN;
@@ -2529,8 +2611,9 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                     distance_m_to_counts(motion_control_pull_back_distance);
                 filament_now_position[i] = filament_redetect;
             }
-            else if (MC_ONLINE_key_stu[i] == 0)
+            else if (empty_confirmed)
             {
+                pull_back_empty_t0_ms[i] = 0u;
                 g_pull_remain_counts[i] = 0;
                 g_pull_speed_set_q[i] = -PULL_V_FAST_Q;
                 g_pull_pwm_floor[i] = PULL_PWM_MIN;
@@ -2605,6 +2688,10 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                     A.filament[i].motion = _filament_motion::idle;
                     bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
                 }
+
+                // The printer unload completed: hold this channel until it is
+                // used again.
+                unload_hold_start(i);
             }
             else if (redetect_t0_ms[i] != 0u &&
                      (time_now - redetect_t0_ms[i]) >= REDETECT_TIMEOUT_MS)
@@ -2923,6 +3010,8 @@ static inline void stu_apply_baseline(int error, uint32_t now_ms)
 
 static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
 {
+    unload_hold_update(time_now);
+
 #if BMCU_DM_TWO_MICROSWITCH
     for (uint8_t ch = 0; ch < kChCount; ch++)
     {
