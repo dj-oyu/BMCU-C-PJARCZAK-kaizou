@@ -11,6 +11,7 @@
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
 #include "on_use_jam_policy.h"
+#include "empty_unload_policy.h"
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 
@@ -2862,6 +2863,17 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
             filament_now_position[num] = filament_idle;
             MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_pressure_ctrl_idle, 100, time_now);
             MC_STU_RGB_set_latch(num, 0x00u, 0x00u, 0x00u, time_now, 0u);
+
+            // A retract commanded on a channel that is already empty can never
+            // move anything; finish it the way a successful one finishes so
+            // the printer stops waiting for it. See empty_unload_policy.h.
+            if (BMCU_EMPTY_UNLOAD_COMPLETE &&
+                empty_unload::completes_at_once(motion, MC_ONLINE_key_stu[num]))
+            {
+                A.filament_use_flag = 0x00;
+                A.filament[num].motion = _filament_motion::idle;
+                bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+            }
         }
     }
 }
