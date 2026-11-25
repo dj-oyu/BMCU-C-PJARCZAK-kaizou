@@ -314,7 +314,16 @@ bool bus_uart1_reset_transport_quiescent()
     if ((DMA1->INTFR & (DMA1_FLAG_TE4 | DMA1_FLAG_TE5)) != 0u) return false;
     if ((USART1->STATR & (USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE)) != 0u)
         return false;
-    if ((USART1->STATR & USART_STATR_TC) == 0u) return false;
+    // Not USART_STATR_TC. USART1_IRQHandler clears TC on every completed
+    // printer reply (USART_ClearITPendingBit(USART1, USART_IT_TC) writes the
+    // TC bit of STATR to zero), so at rest after the first reply TC reads 0
+    // forever and this predicate could never pass. That silently disabled
+    // every flash persistence write (filament info and the merger state were
+    // lost on each power cycle) and the BMCU-side soft-reset gate.
+    // "Transmission complete" is still required: bus_port_to_host.idle only
+    // becomes true in that same TC interrupt (or the TX abort path), and
+    // quiet_for_us() checks idle before calling this; TX DMA disabled is
+    // checked just above.
     if ((GPIOA->OUTDR & GPIO_Pin_12) != 0u) return false;
     return true;
 }

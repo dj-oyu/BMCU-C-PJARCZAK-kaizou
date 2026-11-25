@@ -10,6 +10,7 @@
 #include "bmcu_link_protocol.h"
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
+#include "on_use_jam_policy.h"
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 
@@ -261,6 +262,7 @@ static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
 static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
 static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06F
 static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};
+static uint32_t g_on_use_low_since_ms[4] = {0u, 0u, 0u, 0u}; // on_use_jam_policy.h
 
 static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(
     uint8_t ch, uint8_t r, uint8_t g, uint8_t b, uint32_t now_ms, uint8_t blink)
@@ -2190,10 +2192,15 @@ public:
             if (MC_ONLINE_key_stu[CHx] == 0u)
             {
                 g_on_use_hi_pwm_us[CHx] = 0u;
+                on_use_jam::reset(g_on_use_low_since_ms[CHx]);
             }
             else
             {
-                if (MC_PULL_pct_q[CHx] < 4000)
+                // A single low sample used to latch here. The extruder's first
+                // grip on a fresh load is such a sample; see on_use_jam_policy.h.
+                if (on_use_jam::low_reading_latches(g_on_use_low_since_ms[CHx],
+                                                    MC_PULL_pct_q[CHx], now_ms,
+                                                    BMCU_ON_USE_JAM_HOLD_MS))
                 {
                     g_on_use_low_latch[CHx] = 1u;
                     g_on_use_jam_latch[CHx] = 1u;
@@ -2248,6 +2255,7 @@ public:
         else
         {
             g_on_use_hi_pwm_us[CHx] = 0u;
+            on_use_jam::reset(g_on_use_low_since_ms[CHx]);
         }
 
         const int pwm_out = pwm_out0;
