@@ -3,6 +3,7 @@
 #include "pressure_event_policy.h"
 #include "bmcu_soft_reset_policy.h"
 #include "bmcu_ams_service_watch.h"
+#include "printer_motion_watch.h"
 #include "_bus_hardware.h"
 #include "bambu_bus_ams.h"
 
@@ -1492,6 +1493,20 @@ void bmcu_link_merger_tail_preempted(uint8_t claiming_ch)
 {
     emit_ams_diag_counter(DIAG_COUNTER_MERGER_TAIL_PREEMPTED, claiming_ch,
                           time_ticks32());
+}
+
+void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel,
+                                  uint8_t statu_flag, uint8_t motion_flag)
+{
+#if BMCU_LOG_PRINTER_MOTION
+    static printer_motion_watch::State watch = {};
+    const uint32_t packed =
+        printer_motion_watch::pack(kind, ams_num, channel, statu_flag, motion_flag);
+    if (printer_motion_watch::note(watch, kind, ams_num, packed))
+        emit_ams_diag_counter(DIAG_COUNTER_PRINTER_MOTION_CMD, packed, time_ticks32());
+#else
+    (void)kind; (void)ams_num; (void)channel; (void)statu_flag; (void)motion_flag;
+#endif
 }
 
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
