@@ -19,7 +19,8 @@ class FirmwareBoot(unittest.TestCase):
     def setUpClass(cls):
         from sim.run import run
         with open(IMAGE, "rb") as f:
-            cls.m, cls.pico, cls.printer, cls.wall = run(f.read(), 8.0)
+            # A bare board: no feeder modules plugged in, every sensor input at 0 V.
+            cls.m, cls.pico, cls.printer, cls.wall = run(f.read(), 8.0, scenario={"connected": [False] * 4})
 
     def test_runs_without_cpu_fault(self):
         self.assertIsNone(self.m.fault)

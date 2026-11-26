@@ -143,6 +143,7 @@ class Machine:
         self.systick = None
         self.skipped_cycles = 0
         self.xw_count = 0
+        self._xw_cache: dict = {}
 
         self.unmodelled: dict[int, int] = {}
         self._unmodelled_regs: dict[int, int] = {}
@@ -156,13 +157,28 @@ class Machine:
         p.attach(self)
         self.periph.append(p)
         self.periph.sort(key=lambda q: q.base)
+        self._find_cache = {}
         return p
 
     def _find(self, addr: int):
+        # Cached per 256-byte page when one answer holds for the whole page.
+        key = addr >> 8
+        try:
+            return self._find_cache[key]
+        except (KeyError, AttributeError):
+            pass
+        hit = None
         for p in self.periph:
             if p.base <= addr < p.base + p.size:
-                return p
-        return None
+                hit = p
+                break
+        lo, hi = key << 8, (key + 1) << 8
+        if (hit is not None and hit.base <= lo and hi <= hit.base + hit.size) or (
+                hit is None and not any(p.base < hi and lo < p.base + p.size for p in self.periph)):
+            if not hasattr(self, "_find_cache"):
+                self._find_cache = {}
+            self._find_cache[key] = hit
+        return hit
 
     def _map_buses(self) -> None:
         # Unicorn maps MMIO in 4 KiB pages, finer than the chip's 1 KiB blocks,
@@ -292,56 +308,59 @@ class Machine:
         uc.reg_write(R.UC_RISCV_REG_PC, addr + 4)
 
     def _on_xw(self, uc, addr, size, _data):
-        if size == 2 and self._xw(int.from_bytes(uc.mem_read(addr, 2), "little")):
+        d = self._xw_cache.get(addr)
+        if d is None:
+            d = self._xw_decode(int.from_bytes(uc.mem_read(addr, 2), "little")) if size == 2 else False
+            self._xw_cache[addr] = d
+        if d:
+            self._xw_exec(d)
             self.xw_count += 1
             uc.reg_write(R.UC_RISCV_REG_PC, addr + 2)
 
     def _xw(self, h: int) -> bool:
+        """Decode and execute one XW instruction; False if h is not one."""
+        d = self._xw_decode(h)
+        if d:
+            self._xw_exec(d)
+        return bool(d)
+
+    def _xw_exec(self, d) -> None:
+        base, data, imm, width, store = d
+        uc = self.uc
+        addr = (uc.reg_read(base) + imm) & 0xFFFF_FFFF
+        if store:
+            self._store(addr, width, uc.reg_read(data))
+        else:
+            uc.reg_write(data, self._load(addr, width))
+
+    @staticmethod
+    def _xw_decode(h: int):
         """QingKe XW (Xwchc) compressed byte/halfword loads and stores.
 
         Encodings from LLVM's RISCVInstrInfoXwch.td (the vendor extension as
-        upstreamed by the toolchain, independent of this firmware).
+        upstreamed by the toolchain, independent of this firmware).  Returns
+        (base reg, data reg, imm, width, is_store) or False.
         """
-        uc = self.uc
         op, f3 = h & 3, h >> 13
 
         def creg(v):
             return R.UC_RISCV_REG_X0 + 8 + (v & 7)
-
-        def x(r):
-            return uc.reg_read(r)
         rdp, rs1p = creg(h >> 2), creg(h >> 7)
         if op == 0 and f3 in (1, 5):                       # qk.c.lbu / qk.c.sb
             imm = (h >> 12 & 1) | (h >> 5 & 3) << 1 | (h >> 10 & 3) << 3
-            addr = (x(rs1p) + imm) & 0xFFFF_FFFF
-            if f3 == 1:
-                uc.reg_write(rdp, self._load(addr, 1))
-            else:
-                self._store(addr, 1, x(rdp))
-            return True
+            return (rs1p, rdp, imm, 1, f3 == 5)
         if op == 2 and f3 in (1, 5):                       # qk.c.lhu / qk.c.sh
             imm = (h >> 5 & 3) << 1 | (h >> 10 & 7) << 3
-            addr = (x(rs1p) + imm) & 0xFFFF_FFFF
-            if f3 == 1:
-                uc.reg_write(rdp, self._load(addr, 2))
-            else:
-                self._store(addr, 2, x(rdp))
-            return True
+            return (rs1p, rdp, imm, 2, f3 == 5)
         if op == 0 and h >> 11 == 0b10000:                  # sp-relative forms
             f2 = h >> 5 & 3
-            sp = x(R.UC_RISCV_REG_X2)
             if f2 & 1:
                 imm = (h >> 8 & 7) << 1 | (h >> 7 & 1) << 4
                 width = 2
             else:
                 imm = h >> 7 & 0xF
                 width = 1
-            addr = (sp + imm) & 0xFFFF_FFFF
-            if f2 & 2:
-                self._store(addr, width, x(rdp))
-            else:
-                uc.reg_write(rdp, self._load(addr, width))
-            return True
+            return (R.UC_RISCV_REG_X2, rdp, imm, width, bool(f2 & 2))
         return False
 
     def _load(self, addr: int, width: int) -> int:

@@ -472,6 +472,42 @@ class DMA(Peripheral):
         del psize
         return out
 
+    def bulk_write(self, ch: int, values) -> None:
+        """Peripheral-to-memory transfers of many items in one go.
+
+        Same flags and wrap-around as calling transfer() per item, but writes
+        each contiguous run of the buffer with one memory access.
+        """
+        values = list(values)
+        c = self.cfgr[ch]
+        if not self.enabled(ch) or c & 0x10 or not c & 0x80:
+            for v in values:
+                self.transfer(ch, v)
+            return
+        msize = self._size(c >> 10 & 3)
+        mask = (1 << (8 * msize)) - 1
+        sh = 4 * (ch - 1)
+        uc = self.m.uc
+        k = 0
+        while k < len(values) and self.enabled(ch):
+            run = min(len(values) - k, self.cntr[ch])
+            data = b"".join((v & mask).to_bytes(msize, "little") for v in values[k:k + run])
+            uc.mem_write(self.maddr[ch] + self.pos[ch] * msize, data)
+            before = self.cntr[ch]
+            half = self.reload[ch] // 2
+            self.pos[ch] += run
+            self.cntr[ch] -= run
+            k += run
+            if before > half >= self.cntr[ch] and half > 0:
+                self.intfr |= (1 | 4) << sh
+            if self.cntr[ch] == 0:
+                self.intfr |= (1 | 2) << sh
+                if c & 0x20:
+                    self.cntr[ch] = self.reload[ch]
+                    self.pos[ch] = 0
+                else:
+                    break
+
     def read(self, off, width):
         if off == 0x00:
             return self.intfr
@@ -732,10 +768,9 @@ class ADC(Peripheral):
         if dma_on and self.m.dma.cfgr[1] & 0x20:
             keep = min(total, self.m.dma.reload[1] + total % max(1, self.m.dma.reload[1]))
         start = total - keep
-        for k in range(start, total):
-            w = words[k % len(words)]
-            if dma_on:
-                self.m.dma.transfer(1, w)
+        if dma_on:
+            n = len(words)
+            self.m.dma.bulk_write(1, (words[k % n] for k in range(start, total)))
         if dma_on and start:
             self.m.dma.intfr |= 0x7         # wrapped at least once: HT+TC seen
         self.r[0x4C] = words[-1]

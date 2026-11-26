@@ -44,7 +44,9 @@ python -m sim.run firmware.bin --seconds 8 --trace trace.jsonl   # --ams 1 for A
 BMCU_SIM_IMAGE=firmware.bin python -m unittest discover -s sim/tests -t . -v
 ```
 
-An 8-second boot takes about 8–15 s of wall time. Busy-waits on SysTick are
+A bare-board 8-second boot takes about 8–15 s of wall time; with feeder
+modules and encoders attached the firmware bit-bangs four AS5600 buses
+continuously and the simulator runs at roughly 1/6 of real time. Busy-waits on SysTick are
 fast-forwarded (never past the next scheduled peripheral event); everything
 else executes instruction by instruction at 1 instruction = 1 HCLK cycle.
 
@@ -52,6 +54,48 @@ The trace (JSON Lines) has one record per Pico message (exactly as
 `BMCUMonitor` emits it), printer frame sent or received (CRC-checked), flash
 erase/program, and RS-485 violation, plus an end-of-run summary listing any
 registers the firmware touched that have no model yet.
+
+## Sensor world and scenarios
+
+`sim/world.py` stands in for what is plugged into the board, so a failure seen
+on the printer can be replayed:
+
+- **Pull (buffer) sensors** on ADC PA6/4/2/0: voltage from the buffer slider
+  position, which feeding into a held strand compresses and the extruder
+  pulling stretches.  An unplugged module reads 0 V.
+- **Key (microswitch) sensors** on ADC PA7/5/3/1: one of four voltage levels
+  for none / outer only / inner only / both, from where the filament front
+  and tail are.
+- **AS5600 encoders**: an I2C slave per feeder on the bit-banged pins
+  (SCL PB15/14/13/12, SDA PD0/PC15/PC14/PC13) answering raw angle, angle,
+  status, AGC and magnitude.  The angle follows the drive gear.
+- **Motors**: signed duty from the H-bridge PWM (TIM4/TIM3/TIM2), a
+  first-order speed response and a dead band; the gear only moves filament
+  whose front has reached it.
+- **The user's hand**: `insert` puts the front just past the inner switch and
+  keeps pushing toward the gear for `user_push_s`.  Whether the firmware spins
+  the gear while the hand is still there decides whether it catches.
+
+A scenario (JSON, format in `sim/scenario.py`) schedules what happens and when:
+insert, remove, runout, jam, extruder pull, printer frames, a calibration
+gesture, and `override` to force any one reading (key or pull voltage, raw
+angle, magnet status, an encoder going offline, a stalled motor).
+
+```sh
+# first-boot calibration once, keep the flash
+python -m sim.run fw.bin --scenario sim/scenarios/calibrate.json --nvm-out cal.bin
+# replay from the calibrated state
+python -m sim.run fw.bin --scenario sim/scenarios/jam_ch0.json --nvm-in cal.bin --trace jam.jsonl
+```
+
+`--nvm-in` takes only the bytes past the image, so the same dump works with a
+newer build, the way a reflash keeps NVM on the device.  The trace gains a
+`world` record every 100 ms (front/tail position, speed, buffer, angle,
+drive, voltages, active overrides).
+
+**Every number in `Params` is an assumption** (switch and gear positions,
+voltages, motor speed, buffer travel, path length) until fitted to Pico
+recordings.  The checks built on them use loose bounds for that reason.
 
 ## What the first stage checks
 
@@ -65,20 +109,30 @@ registers the firmware touched that have no model yet.
 - the BMCU transmits only while it drives RS-485 DE, and the printer never has
   to talk over it.
 
+`sim/tests/test_firmware_sensors.py` runs the first-boot calibration with the
+gesture, checks that it is written to flash, then boots again from that flash,
+inserts filament in channel 0 and checks that only channel 0 is driven, the
+filament moves, the channel goes online on the monitor link and every encoder
+is polled without a NACK.
+
+`sim/tests/test_world.py` checks the world models alone: the AS5600 slave
+against a datasheet-sequence I2C master, switch voltages along the path, the
+gear catching only while the hand pushes, encoder counts per millimetre,
+jams, buffer compression, and bulk DMA against per-item DMA.
+
 `sim/tests/test_models.py` checks the models themselves against outside known
 answers (Bambu-Bus header CRC, `binascii.crc_hqx`, the STM32 CRC unit value,
 XW encodings built from the LLVM layout).
 
 ## Known gaps (not modelled yet)
 
-- **Analogue world.** Every ADC input reads 0 V, so no channel is inserted and
-  pressure reads 0xFFFF. The next stage drives the pull and key sensors from a
-  model fitted to Pico recordings.
-- **AS5600 encoders.** The soft-I2C bus has no device on it (all NACK).
-- **Motors.** PWM duty is readable from the TIM models but drives nothing.
-- **Flash contents.** The simulated flash starts erased past the image, so the
-  firmware runs its first-boot calibration (about 5 s) every time. A real
-  device's NVM page can be loaded instead once one is dumped.
+- **Fitted parameters.** The sensor world runs on assumed values (see
+  above).  Fitting them to BMB1 recordings is the next step.
+- **Flash contents.** Without `--nvm-in` the firmware starts from erased NVM
+  and runs its first-boot calibration.  A dump from a real device has not
+  been loaded yet.
+- **Other inputs.** LEDs, the RS-485 bus's electrical side and the printer's
+  own behaviour beyond the frames a scenario sends are not modelled.
 - **Interrupt priority.** Preemption follows PFIC priority, but the exact
   QingKe nesting rules (preemption bits per group) are simplified.
 - **Privilege.** `mret` is executed by the model and always stays in machine

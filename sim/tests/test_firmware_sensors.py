@@ -1,0 +1,71 @@
+"""The firmware against the sensor world: first-boot calibration, then a load.
+
+Set BMCU_SIM_IMAGE as for test_firmware_boot.  The checks are about what can
+be seen from outside -- flash writes, the monitor link, the motor drive and
+where the filament ends up -- not about firmware internals.  The world's
+parameters are assumptions until fitted to Pico recordings, so the bounds are
+loose on purpose: they catch "never calibrates", "does not react to
+insertion", "drives the wrong motor", not millimetre differences.
+"""
+from __future__ import annotations
+
+import os
+import unittest
+
+from sim.clock import HCLK_HZ
+
+IMAGE = os.environ.get("BMCU_SIM_IMAGE")
+
+CALIBRATE = {"seconds": 14, "events": [{"t": 3.0, "do": "calibration_gesture", "until": 14}]}
+LOAD = {"seconds": 6, "events": [{"t": 1.0, "do": "insert", "ch": 0}]}
+
+
+@unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
+class CalibrateThenLoad(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from sim.run import nvm_start, run
+        with open(IMAGE, "rb") as f:
+            cls.image = f.read()
+        cls.nvm_off = nvm_start(cls.image)
+        cls.cal = run(cls.image, 0, scenario=CALIBRATE)
+        cls.nvm = bytes(cls.cal[0].flash.raw)
+        cls.load = run(cls.image, 0, scenario=LOAD, nvm=cls.nvm)
+        cls.world = cls.load[0].world
+
+    def test_calibration_is_written_to_flash(self):
+        m = self.cal[0]
+        self.assertIsNone(m.fault)
+        programs = [(t, off) for t, op, off, n in m.flashctl.log if op == "program" and off >= self.nvm_off]
+        self.assertTrue(programs, "calibration never stored")
+        self.assertTrue(all(3.0 < t / HCLK_HZ < 14.0 for t, _ in programs))
+
+    def test_calibrated_boot_reports_modules_and_reacts_to_insertion(self):
+        m, pico = self.load[0], self.load[1]
+        self.assertIsNone(m.fault)
+        status = [msg["data"] for msg in pico.messages if msg.get("type") == "status"]
+        self.assertTrue(status)
+        self.assertEqual(status[-1]["inserted_mask"], 0b1111)    # four modules plugged in
+        self.assertTrue(status[-1]["online_mask"] & 1, "inserted channel never went online")
+        self.assertNotEqual(status[-1]["channel_flags"][0]["ks"], 0)
+
+    def test_only_the_inserted_channel_is_driven_and_the_filament_moves(self):
+        w = self.world
+        self.assertGreater(w.channels[0].tip_mm, 30.0)
+        for ch in (1, 2, 3):
+            self.assertIsNone(w.channels[ch].tip_mm)
+        # The first ~0.5 s is left out: right after boot the firmware commands
+        # every motor forward for a few tens of milliseconds (seen with c3f1f67,
+        # not yet checked on a device), which this test is not about.
+        snaps = [s for t, s in w.snapshots if t > 0.5 * HCLK_HZ]
+        self.assertTrue(any(s[0]["drive"] > 0.1 for s in snaps))
+        self.assertFalse(any(abs(s[ch]["drive"]) > 0.0 for s in snaps for ch in (1, 2, 3)))
+
+    def test_every_encoder_is_polled(self):
+        for bus in self.world.buses:
+            self.assertGreater(bus.transactions, 0, f"ch{bus.ch}")
+            self.assertEqual(bus.nacks, 0, f"ch{bus.ch}")
+
+
+if __name__ == "__main__":
+    unittest.main()
