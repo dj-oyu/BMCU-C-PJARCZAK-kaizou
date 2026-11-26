@@ -55,3 +55,12 @@ void ams_state_preempt(uint8_t claiming_ch);
 void ams_state_set_tail(void);
 uint8_t ams_state_get_loaded(void);
 bool ams_state_is_tail(void);
+
+// Which channels' strands may still be past the merger. See
+// src/downstream_strand_policy.h for when each edge is taken; these keep the
+// flash copy in step and report a send that starts while another channel is
+// still marked downstream. Unlike the merger owner, this is never released at
+// command time -- only when the strand is known to have come back.
+void ams_downstream_mark_sent(uint8_t filament_ch);
+void ams_downstream_mark_returned(uint8_t filament_ch);
+uint8_t ams_downstream_mask(void);

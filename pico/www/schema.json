@@ -116,7 +116,8 @@
    "1": "ams_service_gap_ms",
    "2": "ams_would_reoffer",
    "3": "merger_tail_held",
-   "4": "merger_tail_preempted"
+   "4": "merger_tail_preempted",
+   "5": "downstream_occupied"
   },
   "diagnostic_tags": {
    "1": "uptime_ms",
@@ -402,7 +403,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 11,
+ "revision": 12,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -1108,8 +1109,8 @@
       },
       {
        "mask": 1,
-       "name": "reserved",
-       "note": "sent as zero, ignore on receive",
+       "name": "downstream",
+       "note": "this channel's strand may still be past the merger: it entered send and has not since been seen back upstream (a finished retract, or an auto-unload that emptied the key). Not ownership, which is released at command time before the strand moves: idle with both switches closed reads PARKED (tip at the merger entrance) when clear and possibly ORPHAN (tip left in the tool head) when set. Flash-backed. More than one channel set at once is the collision it exists to show. Was reserved before firmware revision 12; a decoder that ignores it reads every other bit unchanged.",
        "shift": 7
       }
      ],

@@ -247,6 +247,23 @@ static constexpr uint32_t STA_TAG = 0xA5u;
 // channels and every motion command but send_out would be refused until a
 // fresh load cleared it. A resumed job continues with on_use, not send_out.
 static constexpr uint32_t STA_TAIL_TAG = 0xA6u;
+// Downstream-strand mask (src/downstream_strand_policy.h): bit ch set means
+// channel ch's strand may still be past the merger. Same slot ring and the same
+// sequence counter as the merger records, its own tag, and w0's low byte holds
+// the 4-bit mask where the merger records hold the channel.
+//
+// A separate tag keeps the merger record exactly as it was -- the merger
+// answer is still the newest A5/A6 record, chosen the same way, so this cannot
+// change what a reboot restores for the merger. The two only share the ring
+// position: the next write goes after the newest record of either kind, so
+// neither kind lands on a slot the other has used.
+//
+// Downgrade: firmware without this tag skips A7 records and positions its next
+// write after its own newest A5/A6 record. That slot may hold an A7 record, in
+// which case its program fails and it erases that page before retrying -- the
+// same path it already takes on a full page. What is lost is the downstream
+// mask, which that firmware does not read.
+static constexpr uint32_t STA_DOWN_TAG = 0xA7u;
 static constexpr uint32_t STA_PAGE_FIRST = 6u;
 static constexpr uint32_t STA_PAGE_COUNT = 10u;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
@@ -258,6 +275,8 @@ static uint16_t g_sta_slot = 0u;
 static uint8_t g_sta_have_saved = 0u;
 static uint8_t g_sta_saved_loaded = 0xFFu;
 static uint8_t g_sta_saved_tail = 0u;
+static uint8_t g_sta_have_down = 0u;
+static uint8_t g_sta_saved_down = 0u;
 
 static void flash_runtime_cache_clear(void)
 {
@@ -270,6 +289,8 @@ static void flash_runtime_cache_clear(void)
     g_sta_have_saved = 0u;
     g_sta_saved_loaded = 0xFFu;
     g_sta_saved_tail = 0u;
+    g_sta_have_down = 0u;
+    g_sta_saved_down = 0u;
 }
 
 bool Flash_NVM_full_clear(void)
@@ -362,15 +383,24 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx)
     return true;
 }
 
-bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail)
+bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail, uint8_t* downstream_mask)
 {
     if (!loaded_ch) return false;
 
     uint8_t best_ch = 0xFFu;
     uint8_t best_tail = 0u;
     uint16_t best_seq = 0u;
-    uint32_t best_slot = 0u;
     uint8_t have = 0u;
+
+    // Newest downstream-mask record, chosen independently of the merger.
+    uint8_t down_mask = 0u;
+    uint16_t down_seq = 0u;
+    uint8_t have_down = 0u;
+
+    // Newest record of any kind: positions the next write.
+    uint16_t last_seq = 0u;
+    uint32_t last_slot = 0u;
+    uint8_t have_any = 0u;
 
     for (uint32_t slot = 0u; slot < STA_TOTAL_SLOTS; slot++)
     {
@@ -380,11 +410,31 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail)
 
         if (flash_word_is_blank(w0) && flash_word_is_blank(w1)) continue;
         const uint32_t tag = w0 >> 24;
-        if (tag != STA_TAG && tag != STA_TAIL_TAG) continue;
+        if (tag != STA_TAG && tag != STA_TAIL_TAG && tag != STA_DOWN_TAG) continue;
         if ((w0 ^ w1) != MAGIC_STA) continue;
 
         const uint16_t seq = (uint16_t)((w0 >> 8) & 0xFFFFu);
-        const uint8_t ch = (uint8_t)(w0 & 0xFFu);
+        const uint8_t low = (uint8_t)(w0 & 0xFFu);
+
+        if (!have_any || (int16_t)(seq - last_seq) >= 0)
+        {
+            have_any = 1u;
+            last_seq = seq;
+            last_slot = slot;
+        }
+
+        if (tag == STA_DOWN_TAG)
+        {
+            if (!have_down || (int16_t)(seq - down_seq) > 0)
+            {
+                have_down = 1u;
+                down_seq = seq;
+                down_mask = (uint8_t)(low & 0x0Fu);
+            }
+            continue;
+        }
+
+        const uint8_t ch = low;
         const uint8_t is_tail = (tag == STA_TAIL_TAG) ? 1u : 0u;
 
         // Strictly newer wins. Two records can legitimately share a seq only
@@ -410,43 +460,37 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail)
             best_seq = seq;
             best_ch = ch;
             best_tail = is_tail;
-            best_slot = slot;
         }
     }
 
-    if (have)
+    if (have_any)
     {
-        g_sta_seq = (uint16_t)(best_seq + 1u);
-        g_sta_slot = (uint16_t)((best_slot + 1u) % STA_TOTAL_SLOTS);
-        g_sta_have_saved = 1u;
-        g_sta_saved_loaded = best_ch;
-        g_sta_saved_tail = best_tail;
+        g_sta_seq = (uint16_t)(last_seq + 1u);
+        g_sta_slot = (uint16_t)((last_slot + 1u) % STA_TOTAL_SLOTS);
     }
     else
     {
         g_sta_seq = 0u;
         g_sta_slot = 0u;
-        g_sta_have_saved = 0u;
-        g_sta_saved_loaded = 0xFFu;
-        g_sta_saved_tail = 0u;
     }
+
+    g_sta_have_saved = have;
+    g_sta_saved_loaded = have ? best_ch : 0xFFu;
+    g_sta_saved_tail = have ? best_tail : 0u;
+    g_sta_have_down = have_down;
+    g_sta_saved_down = have_down ? down_mask : 0u;
 
     *loaded_ch = best_ch;
     if (tail) *tail = (best_tail != 0u);
+    if (downstream_mask) *downstream_mask = down_mask;
     return true;
 }
 
-bool Flash_AMS_state_write(uint8_t loaded_ch, bool tail)
+// One record into the shared ring at the shared position.
+static bool sta_ring_write(uint32_t tag, uint8_t low)
 {
-    const uint8_t tail_u8 = tail ? 1u : 0u;
-
-    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch &&
-        g_sta_saved_tail == tail_u8)
-        return true;
-
     const uint16_t seq = g_sta_seq;
-    const uint32_t tag = tail ? STA_TAIL_TAG : STA_TAG;
-    const uint32_t w0 = (tag << 24) | ((uint32_t)seq << 8) | (uint32_t)loaded_ch;
+    const uint32_t w0 = (tag << 24) | ((uint32_t)seq << 8) | (uint32_t)low;
     const uint32_t w1 = w0 ^ MAGIC_STA;
     const uint32_t slot = (uint32_t)g_sta_slot;
     const uint32_t addr = sta_slot_addr(slot);
@@ -461,10 +505,38 @@ bool Flash_AMS_state_write(uint8_t loaded_ch, bool tail)
 
     g_sta_seq = (uint16_t)(seq + 1u);
     g_sta_slot = (uint16_t)((slot + 1u) % STA_TOTAL_SLOTS);
+    return true;
+}
+
+bool Flash_AMS_state_write(uint8_t loaded_ch, bool tail)
+{
+    const uint8_t tail_u8 = tail ? 1u : 0u;
+
+    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch &&
+        g_sta_saved_tail == tail_u8)
+        return true;
+
+    if (!sta_ring_write(tail ? STA_TAIL_TAG : STA_TAG, loaded_ch)) return false;
+
     g_sta_have_saved = 1u;
     g_sta_saved_loaded = loaded_ch;
     g_sta_saved_tail = tail_u8;
 
+    return true;
+}
+
+bool Flash_AMS_downstream_write(uint8_t mask)
+{
+    mask = (uint8_t)(mask & 0x0Fu);
+
+    // No record reads back as zero, so a zero mask needs no first write.
+    if (g_sta_have_down ? (g_sta_saved_down == mask) : (mask == 0u))
+        return true;
+
+    if (!sta_ring_write(STA_DOWN_TAG, mask)) return false;
+
+    g_sta_have_down = 1u;
+    g_sta_saved_down = mask;
     return true;
 }
 

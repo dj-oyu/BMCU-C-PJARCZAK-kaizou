@@ -501,6 +501,14 @@ static uint32_t g_last_on_use_exit_ms[4] = {0u,0u,0u,0u};
 #endif
 static unload_hold::State g_unload_hold[4] = {{0u, 0u}, {0u, 0u}, {0u, 0u}, {0u, 0u}};
 
+// Downstream-strand witness: which channels may still have filament past the
+// merger. See src/downstream_strand_policy.h. Observe-only -- the bit is
+// recorded, persisted and reported, and nothing gates on it. Build with
+// -DBMCU_DOWNSTREAM_STRAND=0 to never set it; the flag then always reads 0.
+#ifndef BMCU_DOWNSTREAM_STRAND
+#define BMCU_DOWNSTREAM_STRAND 1
+#endif
+
 extern void RGB_update();
 
 static inline bool all_no_filament()
@@ -1070,6 +1078,10 @@ public:
         pwm_zeroed = 0;
 
         if (_motion == filament_motion_enum::filament_motion_send) {
+            // The one motion that drives a strand from the merger entrance
+            // towards the head; an edge, since an unchanged motion returned
+            // above.
+            if (BMCU_DOWNSTREAM_STRAND) ams_downstream_mark_sent(CHx);
             send_start_ms = time_now;
             send_stop_latch = false;
             send_len_abort = 0;
@@ -2691,6 +2703,9 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 // The printer unload completed: hold this channel until it is
                 // used again.
                 unload_hold_start(i);
+                // The key found the tip again, so the strand is back upstream
+                // of the merger.
+                ams_downstream_mark_returned(i);
             }
             else if (redetect_t0_ms[i] != 0u &&
                      (time_now - redetect_t0_ms[i]) >= REDETECT_TIMEOUT_MS)
@@ -3216,6 +3231,9 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                     }
                     else if (empty_held)
                     {
+                        // Pulled out of the loader: nothing of it is left at
+                        // or past the merger.
+                        ams_downstream_mark_returned(i);
                         auto_unload_active[i]       = 0u;
                         auto_unload_active_t0_ms[i] = 0u;
                         auto_unload_empty_t0_ms[i]  = 0u;
@@ -3536,6 +3554,8 @@ uint8_t Motion_control_get_channel_flags(uint8_t channel)
     const bool owns = (ams_state_get_loaded() == channel);
     flags.bits.loaded = owns ? 1u : 0u;
     flags.bits.tail = (owns && ams_state_is_tail()) ? 1u : 0u;
+    flags.bits.downstream =
+        (BMCU_DOWNSTREAM_STRAND && (ams_downstream_mask() & (1u << channel)) != 0u) ? 1u : 0u;
     return flags.raw;
 }
 

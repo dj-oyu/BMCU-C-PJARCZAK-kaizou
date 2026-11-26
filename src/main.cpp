@@ -11,6 +11,7 @@
 #include "Debug_log.h"
 #include "bmcu_link.h"
 #include "ams_merger_policy.h"
+#include "downstream_strand_policy.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -71,6 +72,8 @@ void RGB_update()
 static uint8_t g_fil_dirty = 0;
 static ams_merger::State g_merger = { ams_merger::kNoChannel, 0u };
 static uint8_t g_state_dirty = 0;
+static downstream_strand::State g_downstream = { 0u };
+static uint8_t g_down_dirty = 0;
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -226,6 +229,43 @@ bool ams_state_is_tail(void)
     return ams_merger::is_tail(g_merger);
 }
 
+// Called where a channel enters send. Another channel still marked downstream
+// is the collision the bit exists to witness: report it, then record this one
+// regardless -- this commit observes, it does not gate.
+void ams_downstream_mark_sent(uint8_t filament_ch)
+{
+    const uint8_t others = downstream_strand::others(g_downstream, filament_ch);
+    if (others != 0u) bmcu_link_downstream_occupied(filament_ch, others);
+
+    if (downstream_strand::mark_sent(g_downstream, filament_ch))
+    {
+        g_down_dirty = 1u;
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+    }
+}
+
+void ams_downstream_mark_returned(uint8_t filament_ch)
+{
+    if (downstream_strand::mark_returned(g_downstream, filament_ch))
+    {
+        g_down_dirty = 1u;
+        bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+    }
+}
+
+uint8_t ams_downstream_mask(void)
+{
+    return g_downstream.mask;
+}
+
+static void ams_downstream_save_run()
+{
+    if (!g_down_dirty) return;
+
+    if (Flash_AMS_downstream_write(g_downstream.mask))
+        g_down_dirty = 0u;
+}
+
 static void ams_state_save_run()
 {
     if (!g_state_dirty) return;
@@ -259,7 +299,7 @@ void ams_datas_save_run()
 
 static void persistence_save_run()
 {
-    if (!g_state_dirty && !g_fil_dirty) return;
+    if (!g_state_dirty && !g_down_dirty && !g_fil_dirty) return;
     if (!bus_port_to_host.quiet_for_us(5000u)) return;
 
     static uint32_t last_save_tick = 0u;
@@ -267,7 +307,10 @@ static void persistence_save_run()
     const uint32_t min_gap = time_hw_tpms * 10u;
     if (last_save_tick != 0u && static_cast<uint32_t>(now - last_save_tick) < min_gap) return;
 
+    // One flash write per call, merger first: it is what a reboot restores
+    // motion from. The downstream mask is next, then filament metadata.
     if (g_state_dirty) ams_state_save_run();
+    else if (g_down_dirty) ams_downstream_save_run();
     else ams_datas_save_run();
     last_save_tick = time_ticks32();
 }
@@ -333,8 +376,10 @@ int main(void)
     {
         uint8_t stored = 0xFFu;
         bool stored_tail = false;
-        if (Flash_AMS_state_read(&stored, &stored_tail))
+        uint8_t stored_down = 0u;
+        if (Flash_AMS_state_read(&stored, &stored_tail, &stored_down))
         {
+            downstream_strand::restore(g_downstream, stored_down);
             ams_merger::restore(g_merger, stored, stored_tail);
             const uint8_t ch = g_merger.owner;
 
