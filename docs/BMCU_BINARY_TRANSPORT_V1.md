@@ -1,6 +1,8 @@
 # BMCU Binary Transport v1
 
-Status: reviewed implementation contract  
+Status: reviewed implementation contract. Delivery, session and control are
+superseded by [BMCU_MONITOR_STREAM_V2.md](BMCU_MONITOR_STREAM_V2.md); the
+header and record formats here remain in force.  
 Wire identifier: `BMB1`  
 Document revision: 1
 
