@@ -17,6 +17,7 @@
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 #include "unload_hold_policy.h"
+#include "outlet_guard_policy.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -584,6 +585,45 @@ static inline strand_zone::State& zone_state(uint8_t ch)
     __asm__("" : "+r"(p));
     return *p;
 }
+
+// ===== open-outlet guard (outlet_guard_policy.h) =====
+#ifndef BMCU_OUTLET_GUARD
+#define BMCU_OUTLET_GUARD 1
+#endif
+// Consumption ceiling. A1 mini hotends top out near 25-28 mm3/s, about
+// 11 mm/s of 1.75 mm filament; printing measured 1.1 mm/s (AMS-B ch3,
+// 2026-11-27, PWM ~600).
+#ifndef BMCU_OUTLET_CONSUME_MM_S
+#define BMCU_OUTLET_CONSUME_MM_S 12.0f
+#endif
+// Buffer stroke plus margin: what a coupled strand can take faster than the
+// extruder before the buffer presses back.
+#ifndef BMCU_OUTLET_USE_MM
+#define BMCU_OUTLET_USE_MM 40.0f
+#endif
+#ifndef BMCU_OUTLET_SEND_MARGIN_MM
+#define BMCU_OUTLET_SEND_MARGIN_MM 150.0f
+#endif
+static constexpr outlet_guard::Config kOutletConfig = {
+    // A send starts with the strand at or past the key switch, so the
+    // switch-to-head distance bounds the free stretch.
+    distance_m_to_counts((BMCU_KEY_TO_HEAD_MM + BMCU_OUTLET_SEND_MARGIN_MM) / 1000.0f),
+    distance_m_to_counts(BMCU_OUTLET_USE_MM / 1000.0f),
+    static_cast<uint32_t>(BMCU_OUTLET_CONSUME_MM_S * kAS5600_COUNTS_PER_M / 1000.0f + 0.5f),
+    5500,   // pressed: well clear of the 50-52 % a free or printing strand reads
+    4700,   // pulled
+    on_use_jam::kLowPctQ,
+    3000u,
+};
+static outlet_guard::State g_outlet[4];
+
+static inline bool outlet_blocks_push(uint8_t ch)
+{
+    return BMCU_OUTLET_GUARD && outlet_guard::blocks_push(g_outlet[ch]);
+}
+
+static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t dt_us,
+                          uint32_t now_ms);
 
 // One AS5600 sample of channel `ch`. `fwd_delta` is forward travel in counts.
 static void zone_sample(uint8_t ch, int32_t fwd_delta, bool measured, bool driving_fwd,
@@ -2441,8 +2481,16 @@ public:
 
         if ((mode & kMotionPressureOnUse) != 0u && !g_on_use_low_latch[CHx])
         {
-            if (MC_ONLINE_key_stu[CHx] == 0u)
+            if (MC_ONLINE_key_stu[CHx] == 0u ||
+                (BMCU_OUTLET_GUARD &&
+                 (outlet_guard::blocks_push(g_outlet[CHx]) ||
+                  outlet_guard::jam_disarmed(g_outlet[CHx], kOutletConfig,
+                                             MC_PULL_pct_q[CHx], now_ms))))
             {
+                // Key empty; or the outlet guard holds the motor (the 20 s
+                // high-PWM timer would latch LOW on a push that is braked),
+                // or has just resumed on tension, which is a stretched buffer
+                // and not a jam.
                 g_on_use_hi_pwm_us[CHx] = 0u;
                 on_use_jam::reset(g_on_use_low_since_ms[CHx]);
             }
@@ -2518,6 +2566,21 @@ public:
 };
 
 _MOTOR_CONTROL MOTOR_CONTROL[4] = {_MOTOR_CONTROL(0), _MOTOR_CONTROL(1), _MOTOR_CONTROL(2), _MOTOR_CONTROL(3)};
+
+static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t dt_us,
+                          uint32_t now_ms)
+{
+    if (!BMCU_OUTLET_GUARD) return;
+    const auto& motor = MOTOR_CONTROL[ch];
+    const uint8_t mode =
+        motor.motion == filament_motion_enum::filament_motion_send ? outlet_guard::MODE_SEND :
+        motor.motion == filament_motion_enum::filament_motion_pull ? outlet_guard::MODE_PULL :
+                                                                     outlet_guard::MODE_USE;
+    const bool pushing = motor.motor_polarity_valid && g_motor_pwm[ch] != 0 &&
+                         motor.to_logical_pwm(g_motor_pwm[ch]) < 0;
+    outlet_guard::sample(g_outlet[ch], kOutletConfig, mode, measured, fwd_delta, dt_us,
+                         MC_PULL_pct_q[ch], pushing, MC_ONLINE_key_stu[ch] != 0u, now_ms);
+}
 int32_t _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
 void Motion_control_set_PWM(uint8_t CHx, int PWM)
@@ -2525,6 +2588,11 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
     if (CHx >= kChCount) return;
     if (PWM > PWM_lim) PWM = PWM_lim;
     if (PWM < -PWM_lim) PWM = -PWM_lim;
+    // Open outlet: no push on this channel, whoever asks for it (run(), DM
+    // autoload, the idle feed). Retracts pass. Logical push is negative.
+    if (PWM != 0 && outlet_blocks_push(CHx) &&
+        MOTOR_CONTROL[CHx].to_logical_pwm(PWM) < 0)
+        PWM = 0;
     g_motor_pwm[CHx] = static_cast<int16_t>(PWM);
 
     uint16_t set1 = 0, set2 = 0;
@@ -2635,6 +2703,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
                         g_motor_pwm[i] != 0 &&
                             MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pull,
                         zone_now_ms);
+            outlet_sample(i, false, 0, dt_us, zone_now_ms);
             continue;
         }
 
@@ -2660,6 +2729,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         // Raw counts grow on a retract (send negates them for its progress),
         // so forward travel is -diff.
         zone_sample(i, -diff, true, false, zone_now_ms);
+        outlet_sample(i, true, -diff, dt_us, zone_now_ms);
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=

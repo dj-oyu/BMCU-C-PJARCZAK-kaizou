@@ -84,6 +84,13 @@ class Channel:
     # the strand cannot move toward the printer (motor or extruder), while a
     # retract still winds it back.  The 2026-11-27 AMS-A ch3 "runout".
     anchored: bool = False
+    # The PTFE tube is off the filament hub: past the hub, a push goes out of
+    # the gap instead of compressing the buffer, and the extruder takes up the
+    # spilled slack before it pulls on the strand again.  Once the slack is
+    # gone the tube is drawn back onto the hub (outlet_open clears itself).
+    outlet_open: bool = False
+    spill_mm: float = 0.0
+    spilled: bool = False                  # slack has come out since the detach
     as5600_present: bool = True
     magnet_ok: bool = True
     overrides: dict = field(default_factory=dict)   # name -> value (forced reading)
@@ -332,7 +339,31 @@ class World:
         if c.anchored and dx > 0:
             dx = 0.0                                  # the spool gives nothing
             c.speed_mm_s = 0.0
-        if at_head or c.tip_mm + dx > p.head_mm:
+        if c.outlet_open and (at_head or c.tip_mm + dx > p.head_mm):
+            room = max(0.0, p.head_mm - c.tip_mm)
+            advance = max(0.0, min(dx, room)) if dx > 0 else 0.0
+            c.tip_mm += advance
+            if dx > 0 and dx > advance:
+                c.spill_mm += dx - advance              # out of the gap
+                if c.spill_mm > 5.0:
+                    c.spilled = True                    # a loop, not one tick's push
+            take = min(consume, c.spill_mm)
+            c.spill_mm -= take
+            consume -= take
+            if dx < 0:
+                back = min(-dx, c.spill_mm)             # a retract winds the loop in first
+                c.spill_mm -= back
+                c.tip_mm += dx + back
+            c.buffer_mm *= 0.9                          # nothing pushes back
+            if consume > 0.0:
+                # No slack to take: the extruder pulls on the strand. Once
+                # slack has come out and been taken up, that pull draws the
+                # tube back onto the hub.
+                c.buffer_mm = max(-p.buffer_travel_mm, c.buffer_mm - consume)
+                if c.spilled:
+                    c.outlet_open = False
+                    c.spilled = False
+        elif at_head or c.tip_mm + dx > p.head_mm:
             # The strand is held at the extruder: feeding compresses the
             # buffer, the extruder pulling stretches it.
             room = p.head_mm - c.tip_mm
@@ -398,6 +429,7 @@ class World:
         return [{"ch": c.index, "tip_mm": None if c.tip_mm is None else round(c.tip_mm, 2),
                  "tail_mm": None if c.tail_mm is None else round(c.tail_mm, 2),
                  "speed_mm_s": round(c.speed_mm_s, 2), "buffer_mm": round(c.buffer_mm, 2),
+                 "outlet_open": c.outlet_open, "spill_mm": round(c.spill_mm, 2),
                  "angle": int(c.angle), "drive": round(self.drive(c.index), 3),
                  "pull_v": round(self.pull_volts(c.index), 3), "key_v": round(self.key_volts(c.index), 3),
                  "overrides": dict(c.overrides)} for c in self.channels]

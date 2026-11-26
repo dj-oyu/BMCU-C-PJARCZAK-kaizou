@@ -191,5 +191,66 @@ class AnchoredSpoolJam(unittest.TestCase):
         self.assertTrue(any(d > 0.1 for d in drive), "send_out never drove the motor")
 
 
+# Tube off the filament hub mid-print (docs/FEED_RESISTANCE_DESIGN.md §2).
+# The BMCU keeps feeding and the push goes out of the gap; the guard has to
+# stop it, wait while the extruder takes up the spilled slack, and resume once
+# the tube is drawn back on and the extruder pulls on the strand again --
+# without the resume reading as a jam. Before the detach it is a normal print
+# at 4 mm/s, which must not trip.
+OPEN_OUTLET = {"seconds": 36, "events": [
+    {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
+    {"t": 0.3, "do": "extruder", "mm_s": 4.0},
+    {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 7f", "every": 0.25, "until": 1.5},   # before_on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 36.0},  # on_use
+    {"t": 8.0, "do": "set", "ch": 3, "outlet_open": True},
+]}
+
+
+@unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
+class OpenOutlet(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from sim.run import run
+        with open(IMAGE, "rb") as f:
+            image = f.read()
+        nvm = bytes(run(image, 0, scenario=CALIBRATE)[0].flash.raw)
+        cls.m, cls.pico = run(image, 0, scenario=OPEN_OUTLET, nvm=nvm)[:2]
+        cls.status = [(msg["sim_ms"] / 1000, msg["data"]) for msg in cls.pico.messages
+                      if msg.get("type") == "status"]
+        cls.world = [(t / HCLK_HZ, s[3]) for t, s in cls.m.world.snapshots]
+        cls.reseat_t = next((t for t, c in cls.world if t > 8.0 and not c["outlet_open"]), None)
+
+    def test_printing_feeds_without_tripping(self):
+        self.assertIsNone(self.m.fault)
+        drive = [c["drive"] for t, c in self.world if 4.0 < t < 8.0]
+        self.assertTrue(any(d > 0.1 for d in drive), "the print was not fed before the detach")
+        bufs = [c["buffer_mm"] for t, c in self.world if 4.0 < t < 8.0]
+        self.assertGreater(min(bufs), -6.0, "the buffer was stretched: feeding stopped")
+
+    def test_the_spill_is_bounded(self):
+        spill = max(c["spill_mm"] for t, c in self.world)
+        self.assertGreater(spill, 5.0, "the scenario never spilled")
+        self.assertLess(spill, 80.0, "the guard let the open outlet pour")
+
+    def test_no_push_while_the_outlet_is_open(self):
+        peak_t = max(self.world, key=lambda tc: tc[1]["spill_mm"])[0]
+        end = self.reseat_t if self.reseat_t is not None else 36.0
+        drive = [c["drive"] for t, c in self.world if peak_t + 0.5 < t < end]
+        self.assertTrue(drive)
+        self.assertFalse(any(d > 0.05 for d in drive), "pushed into the open outlet")
+
+    def test_resumes_once_the_tube_is_back(self):
+        self.assertIsNotNone(self.reseat_t, "the extruder never took up the slack")
+        drive = [c["drive"] for t, c in self.world if self.reseat_t < t < 36.0]
+        self.assertTrue(any(d > 0.1 for d in drive), "feeding never resumed")
+        bufs = [c["buffer_mm"] for t, c in self.world if 33.0 < t < 36.0]
+        self.assertGreater(min(bufs), -6.0, "the resumed print is starved")
+
+    def test_the_resume_is_not_a_jam(self):
+        flags = [d["channel_flags"][3] for t, d in self.status if t > 1.5]
+        self.assertFalse(any(f["jam_latch"] or f["low_latch"] for f in flags),
+                         "the guard's stop or its resume latched LOW/JAM")
+
+
 if __name__ == "__main__":
     unittest.main()
