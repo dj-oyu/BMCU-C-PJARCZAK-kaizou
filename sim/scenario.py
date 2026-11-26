@@ -20,7 +20,8 @@ A scenario is JSON::
         {"t": 12, "do": "jam", "ch": 0, "at_mm": 300},
         {"t": 14, "do": "runout", "ch": 0},
         {"t": 16, "do": "remove", "ch": 0},
-        {"t": 16, "do": "set", "ch": 2, "as5600_present": false}
+        {"t": 16, "do": "set", "ch": 2, "as5600_present": false},
+        {"t": 2.0, "do": "full_status", "every": 0.5, "until": 6}
       ]
     }
 
@@ -38,7 +39,7 @@ def _at(m, t_s, fn):
     m.at(int(t_s * HCLK_HZ), fn)
 
 
-def schedule(m, world, printer, events):
+def schedule(m, world, printer, events, pico=None):
     for ev in events:
         ev = dict(ev)
         t = float(ev.pop("t"))
@@ -66,6 +67,16 @@ def schedule(m, world, printer, events):
             k = 0
             while t + k * ev["every"] < ev["until"]:
                 _at(m, t + k * ev["every"], lambda f=frame: printer.send(f))
+                k += 1
+        elif do == "full_status":
+            # The Pico asks for a full snapshot (CHANNEL records carry PWM,
+            # encoder delta and controller phase), as Bambuddy does.
+            if pico is None:
+                raise ValueError("full_status needs the monitor link")
+            every = ev.get("every")
+            k = 0
+            while k == 0 or (every and t + k * every < ev["until"]):
+                _at(m, t + k * (every or 0), lambda: pico.monitor.get_full_status())
                 k += 1
         elif do == "calibration_gesture":
             calibration_gesture(m, world, t, float(ev.get("until", t + 40)))

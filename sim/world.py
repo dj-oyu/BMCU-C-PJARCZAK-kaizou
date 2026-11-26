@@ -49,10 +49,15 @@ class Params:
     pull_swing_v: float = 1.10             # buffer fully compressed / stretched
     buffer_travel_mm: float = 12.0         # spring travel of the buffer slider
     pull_polarity: int = 1                 # +1: compression raises the voltage
-    key_v_none: float = 0.25
-    key_v_external: float = 1.55           # outer (spool-side) switch only
-    key_v_internal: float = 1.20           # inner switch only
-    key_v_both: float = 2.00
+    # Key levels: none and both are fitted to Pico DM_KEY snapshot records
+    # (2026-11-25/26, AMS-A: 8-13 mV with no filament, 1845-1868 mV loaded).
+    # The single-switch levels were never caught by a snapshot; the outer-only
+    # one only has to land in the band that reports ks=2, which the recorded
+    # dm_teardown events confirm exists.
+    key_v_none: float = 0.01
+    key_v_external: float = 1.55           # outer (spool-side) switch only -- assumed
+    key_v_internal: float = 1.20           # inner switch only -- assumed
+    key_v_both: float = 1.85
     s1_mm: float = -40.0                   # outer switch, upstream of the drive gear
     s2_mm: float = -10.0                   # inner switch, just before the gear
     gear_mm: float = 0.0                   # filament must reach here to be driven

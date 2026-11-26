@@ -93,7 +93,25 @@ newer build, the way a reflash keeps NVM on the device.  The trace gains a
 `world` record every 100 ms (front/tail position, speed, buffer, angle,
 drive, voltages, active overrides).
 
-**Every number in `Params` is an assumption** (switch and gear positions,
+## Recordings
+
+`python -m sim.bmb1_extract export.db --from ... --to ... --out w.jsonl` cuts a
+window out of a Bambuddy BMB1 export (the `bmcu_binary_*` tables) and decodes
+every stored frame with the Pico's own decoder: STATUS, EVENT and full-status
+snapshot records (CHANNEL: PWM, encoder delta, controller phase; DM_KEY: key
+voltages and learned thresholds).
+
+`sim/recordings/2026-11-25_ams_a_short_insert.jsonl` is such a window: on
+AMS-A, ch0 went online and the auto-load gave up twice with
+`dm_teardown(dm_auto_state=2, cause=3, ks=2, held_ms=5000)`.  The simulator
+reproduces that record field for field from "filament pushed past the outer
+switch only, then let go", and `test_firmware_sensors` checks it.
+
+Fitted from the 2026-11-24..26 AMS-A export: key voltage with no filament
+(8-13 mV) and with both switches pressed (1845-1868 mV).  Autoload PWM 900
+in the recording matches what the simulated firmware commands.
+
+**Every other number in `Params` is an assumption** (switch and gear positions,
 voltages, motor speed, buffer travel, path length) until fitted to Pico
 recordings.  The checks built on them use loose bounds for that reason.
 

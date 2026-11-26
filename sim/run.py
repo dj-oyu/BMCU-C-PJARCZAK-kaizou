@@ -77,7 +77,7 @@ def run(image: bytes, seconds: float, script=None, ams: int = 0, scenario: dict 
     printer = PrinterStandIn(m, script)
     params = Params(**scenario.get("params", {}))
     world = World(m, params, connected=tuple(scenario.get("connected", (True, True, True, True))))
-    schedule(m, world, printer, scenario.get("events", []))
+    schedule(m, world, printer, scenario.get("events", []), pico)
     world.snapshots = []
     if world_every_s:
         def snap():

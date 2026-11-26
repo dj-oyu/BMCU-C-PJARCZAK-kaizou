@@ -9,8 +9,10 @@ insertion", "drives the wrong motor", not millimetre differences.
 """
 from __future__ import annotations
 
+import json
 import os
 import unittest
+from pathlib import Path
 
 from sim.clock import HCLK_HZ
 
@@ -18,6 +20,9 @@ IMAGE = os.environ.get("BMCU_SIM_IMAGE")
 
 CALIBRATE = {"seconds": 14, "events": [{"t": 3.0, "do": "calibration_gesture", "until": 14}]}
 LOAD = {"seconds": 6, "events": [{"t": 1.0, "do": "insert", "ch": 0}]}
+# Filament pushed only past the outer switch and let go (no push toward the gear).
+SHORT_INSERT = {"seconds": 7.5, "events": [{"t": 1.0, "do": "insert", "ch": 0, "tip_mm": -35, "push_s": 0}]}
+RECORDING = Path(__file__).resolve().parent.parent / "recordings" / "2026-11-25_ams_a_short_insert.jsonl"
 
 
 @unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
@@ -32,6 +37,7 @@ class CalibrateThenLoad(unittest.TestCase):
         cls.nvm = bytes(cls.cal[0].flash.raw)
         cls.load = run(cls.image, 0, scenario=LOAD, nvm=cls.nvm)
         cls.world = cls.load[0].world
+        cls.short = run(cls.image, 0, scenario=SHORT_INSERT, nvm=cls.nvm)
 
     def test_calibration_is_written_to_flash(self):
         m = self.cal[0]
@@ -65,6 +71,20 @@ class CalibrateThenLoad(unittest.TestCase):
         for bus in self.world.buses:
             self.assertGreater(bus.transactions, 0, f"ch{bus.ch}")
             self.assertEqual(bus.nacks, 0, f"ch{bus.ch}")
+
+
+    def test_short_insertion_times_out_like_the_recording(self):
+        # Pico recording, AMS-A, 2026-11-25 10:03:56-10:04:20: ch0 went online,
+        # then the auto-load gave up with exactly this record, twice.
+        recorded = [json.loads(line).get("event", {}) for line in RECORDING.read_text().splitlines()]
+        recorded = [e for e in recorded if e.get("event_name") == "dm_teardown" and e["dm_auto_state"] == 2]
+        self.assertEqual(len(recorded), 2)
+        got = [msg["data"] for msg in self.short[1].messages
+               if msg.get("type") == "event" and msg["data"].get("event_name") == "dm_teardown"]
+        self.assertTrue(got, "no dm_teardown")
+        for key in ("slot", "dm_auto_state", "cause", "ks"):
+            self.assertEqual(got[0][key], recorded[0][key], key)
+        self.assertAlmostEqual(got[0]["held_ms"], recorded[0]["held_ms"], delta=50)
 
 
 if __name__ == "__main__":
