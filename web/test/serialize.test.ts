@@ -37,7 +37,7 @@ describe('request serialisation', () => {
       api.current(),
       api.diagnostics(),
       api.transportStatus(),
-      api.deviceKeyStatus(),
+      api.transportStatus(),
       api.logs(0n, 24),
     ])
     expect(tracker.calls()).toBe(5)
@@ -55,6 +55,6 @@ describe('request serialisation', () => {
       }),
     )
     await expect(api.transportStatus()).rejects.toThrow('connection refused')
-    await expect(api.deviceKeyStatus()).resolves.toBeInstanceOf(Map)
+    await expect(api.transportStatus()).resolves.toBeInstanceOf(Map)
   })
 })

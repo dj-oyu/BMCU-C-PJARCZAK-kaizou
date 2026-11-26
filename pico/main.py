@@ -12,14 +12,13 @@ from machine import UART, Pin
 
 import bmcu_binary as binary
 import bmcu_binary_constants as C
-from bambuddy_binary_tcp import BMB1TCPClient
-from binary_api import BinaryAPI
+from binary_api import LINK_STATE_CODES, BinaryAPI
 from boot_session import next_boot_id
 from bmcu_binary_outbox import BMB1Outbox
-from bmcu_journal import BMJ1Journal, JournalReplayCursor
 from bmcu_link import BMCUMonitor, drain_monitors
-from device_key_store import DeviceKeyAPI, DeviceKeyStore
+from bmcu_stream_udp import BMS2UDPClient
 from device_metrics import DeviceMetrics, rp2_temperature_milli_c
+from local_reset import LocalReset
 from runtime_log import PicoRuntimeLog
 from transport_settings import TransportSettingsAPI, TransportSettingsStore
 from uart_dma_rx import (DEFAULT_RING_BYTES as DMA_DEFAULT_RING_BYTES,
@@ -77,23 +76,12 @@ link_configs = getattr(config, "BMCU_LINKS", None) or ({
     "id": "bmcu-a", "uart": getattr(config, "UART_ID", 0),
     "tx": getattr(config, "UART_TX_PIN", 0), "rx": getattr(config, "UART_RX_PIN", 1),
 },)
-journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
+# v2 stream (docs/BMCU_MONITOR_STREAM_V2.md): no flash journal and no replay.
+# History lives at the receiver; the outbox only bridges a Wi-Fi outage.
 outbox = BMB1Outbox(
     boot_id, len(link_configs),
     getattr(config, "BMCU_BINARY_QUEUE_SLOTS", 128))
-replay_cursor = JournalReplayCursor(journal_path)
-outbox.historical_ranges = replay_cursor.available_ranges
-outbox.replay_pager = lambda: replay_cursor.page_into(outbox, 16)
-outbox.replay_pager()
-journal = BMJ1Journal(
-    journal_path, boot_id, monotonic_us.now(),
-    getattr(config, "BMCU_BINARY_JOURNAL_STAGING_SLOTS", 4),
-    max_segments=getattr(config, "BMCU_BINARY_JOURNAL_MAX_SEGMENTS", 8),
-    commit_bytes=getattr(config, "BMCU_BINARY_JOURNAL_COMMIT_BYTES", 8192))
-# One commit covers everything written since the last one, so this is the knob
-# that decides how often the loop stalls for ~45 ms in flash.
-JOURNAL_COMMIT_MS = int(getattr(config, "BMCU_BINARY_JOURNAL_COMMIT_MS", 10000))
-outbox.journal = journal
+journal = None
 
 
 def log_sink(record_type, flags, link_index, received_at_us, payload,
@@ -176,33 +164,30 @@ def binary_control(link_index, command, arguments):
     return b"accepted"
 
 
-key_store = DeviceKeyStore(getattr(config, "BMCU_BINARY_DEVICE_KEY", ""))
 transport_store = TransportSettingsStore(
     getattr(config, "BMCU_BINARY_HOST", ""),
     getattr(config, "BMCU_BINARY_PORT", 8799))
-for load_error in (key_store.load_error, transport_store.load_error):
-    if load_error:
-        runtime_log.warning("settings", load_error)
-client = BMB1TCPClient(
+if transport_store.load_error:
+    runtime_log.warning("settings", transport_store.load_error)
+
+
+def link_state_codes():
+    return tuple(LINK_STATE_CODES.get(monitor.link_state, 0)
+                 for monitor in monitors)
+
+
+client = BMS2UDPClient(
     outbox, transport_store.host, transport_store.port,
     getattr(config, "BMCU_BINARY_DEVICE_ID", bridge_id).encode(),
-    key_store.key if key_store.configured else bytes(32),
     getattr(config, "PICO_FIRMWARE_VERSION", "alpha.3").encode(),
     tuple((index, item["id"].encode())
           for index, item in enumerate(link_configs)),
-    clock_ms=time.ticks_ms, control_handler=binary_control,
-    clock_us=monotonic_us.now,
-    send_metric=metrics.observe_transport_send,
+    link_states=link_state_codes,
+    uptime_ms=lambda: monotonic_us.now() // 1000,
+    clock_ms=time.ticks_ms,
+    heartbeat_ms=getattr(config, "BMCU_STREAM_HEARTBEAT_MS", 5000),
+    datagrams_per_loop=getattr(config, "BMCU_STREAM_DATAGRAMS_PER_LOOP", 4),
     ticks_diff=time.ticks_diff, ticks_add=time.ticks_add)
-
-
-def apply_device_key(key):
-    client.set_device_key(key, time.ticks_ms())
-
-
-key_api = DeviceKeyAPI(
-    key_store, apply_device_key,
-    on_update=lambda: runtime_log.info("settings", "device key updated"))
 
 
 def apply_transport_endpoint(host, port):
@@ -215,9 +200,24 @@ transport_api = TransportSettingsAPI(
         "settings", "transport endpoint updated"))
 
 
+# Filled in once the panel is up (below): no panel, no local reset.
+oled = None
+
+
+def panel_ready():
+    return oled is not None and oled.panel_ready()
+
+
+local_reset = LocalReset(
+    lambda link_index: binary_control(link_index, C.CONTROL_SOFT_RESET, b""),
+    tuple(item["id"] for item in link_configs), panel_ready, time.ticks_ms,
+    ticks_diff=time.ticks_diff,
+    on_event=lambda message: runtime_log.info("control", message))
+
+
 def settings_api(method, path, headers, body):
-    return key_api.handle(method, path, headers, body) or \
-        transport_api.handle(method, path, headers, body)
+    return transport_api.handle(method, path, headers, body) or \
+        local_reset.handle(method, path, headers, body)
 
 
 def wifi_event(message):
@@ -278,7 +278,6 @@ web.start()
 # The panel is optional hardware on I2C1 (GPIO6/7 by default). A missing or
 # miswired display must cost one warning and nothing else: the bridge's job is
 # the UART link, and the ticker is a read-only view of it.
-oled = None
 try:
     import oled_ticker
 
@@ -286,7 +285,8 @@ try:
         config, monitors, wifi=wifi, client=client, metrics=metrics,
         outbox=outbox, journal=journal,
         platform_stats=lambda: (cached_wifi_rssi, cached_temperature_milli_c),
-        exception_count=lambda: runtime_log.exception_count)
+        exception_count=lambda: runtime_log.exception_count,
+        overlay_provider=local_reset.overlay_lines)
 except Exception as error:  # noqa: BLE001 - no display is not a boot failure
     runtime_log.warning("oled", "display unavailable: %s" % error)
 
@@ -294,8 +294,6 @@ next_uart_index = 0
 last_loop_us = monotonic_us.now()
 last_diagnostic_ms = None
 last_gc_ms = None
-last_flush_ms = None
-last_commit_ms = None
 
 
 def record_exception(component, error):
@@ -307,7 +305,6 @@ def record_exception(component, error):
 
 def service_once(now_ms):
     global next_uart_index, last_loop_us, last_diagnostic_ms, last_gc_ms
-    global last_flush_ms, last_commit_ms
     current_us = monotonic_us.now()
     metrics.observe_loop_gap(max(0, current_us - last_loop_us))
     last_loop_us = current_us
@@ -321,34 +318,13 @@ def service_once(now_ms):
         wifi.poll(now_ms)
     except Exception as error:
         record_exception("wifi.poll", error)
-    if key_store.configured and transport_store.configured:
-        try:
-            client.poll(now_ms, wifi.state == "online")
-        except Exception as error:
-            record_exception("bambuddy.binary", error)
+    try:
+        client.poll(now_ms, wifi.state == "online")
+    except Exception as error:
+        record_exception("bambuddy.stream", error)
+    # A miswired or floating RX pin keeps uart.any() true forever; the GC
+    # below has a deadline that fires regardless of how busy the UARTs look.
     uart_idle = not any(monitor.uart.any() for monitor in monitors)
-    # A miswired or floating RX pin keeps uart.any() true forever, which used
-    # to starve the journal flush and the GC below for the whole uptime. Both
-    # now have a deadline that fires regardless of how busy the UARTs look.
-    if uart_idle or last_flush_ms is None or ticks_diff(
-            now_ms, last_flush_ms) >= 1000:
-        try:
-            journal.flush_one(monotonic_us.now())
-        except Exception as error:
-            journal.failure_count += 1
-            record_exception("journal.flush", error)
-        last_flush_ms = now_ms
-    # Writing a record costs ~1.6 ms; committing it costs ~45 ms with
-    # interrupts disabled. One commit covers every record written since the
-    # last one, so it runs on its own, much slower schedule.
-    if last_commit_ms is None or ticks_diff(
-            now_ms, last_commit_ms) >= JOURNAL_COMMIT_MS:
-        try:
-            journal.commit()
-        except Exception as error:
-            journal.failure_count += 1
-            record_exception("journal.commit", error)
-        last_commit_ms = now_ms
     # One non-blocking HTTP accept/read/write step per loop. Gating this on
     # every UART being empty starves the UI when two BMCUs stream continuously.
     try:

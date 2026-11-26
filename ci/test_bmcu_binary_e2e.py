@@ -1,360 +1,279 @@
-"""Host-side end-to-end tests for the Pico BMB1 transport.
+"""Host-side end-to-end tests for the Pico BMS2 stream (v2).
 
-The peer deliberately behaves like the Bambuddy session boundary: it
-authenticates HELLO, commits durable messages before ACKing them, advances a
-single per-boot watermark (including exact DROP markers), and signs CONTROL
-with the negotiated session key.  Socket reads and writes are fragmented so
-these tests exercise the production incremental parsers and send state.
+The receiver here is written from docs/BMCU_MONITOR_STREAM_V2.md section 4 and
+5.2 with struct alone, not with the Pico codec, so that a format bug cannot hide
+by being wrong the same way on both ends. The socket is in memory and can be
+told to refuse sends, which is how the retry and error paths are reached.
 """
 
 import os
+import struct
 import sys
-import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PICO = os.path.join(ROOT, "pico")
 sys.path.insert(0, PICO)
 
-import bambuddy_binary_tcp as tcp
-import bmcu_binary as binary
 import bmcu_binary_constants as C
-import bmcu_journal as journal
+import bmcu_stream_udp as stream
 from bmcu_binary_outbox import BMB1Outbox
 
+HEADER = struct.Struct(">4sBBHIQQB3s")
 
-class FragmentedSocket:
-    """Nonblocking in-memory socket with independently bounded I/O."""
 
-    def __init__(self, receive_limit=5, send_limit=7):
-        self.to_client = bytearray()
-        self.from_client = bytearray()
-        self.receive_limit = receive_limit
-        self.send_limit = send_limit
+class FakeUDPSocket:
+    def __init__(self):
+        self.datagrams = []
+        self.refuse = []      # errno to raise on the next sendto calls
         self.closed = False
 
-    def recv_into(self, target):
-        if not self.to_client:
-            raise OSError(11)
-        count = min(len(target), len(self.to_client), self.receive_limit)
-        target[:count] = self.to_client[:count]
-        del self.to_client[:count]
-        return count
-
-    def send(self, data):
-        count = min(len(data), self.send_limit)
-        self.from_client.extend(data[:count])
-        return count
+    def sendto(self, data, address):
+        if self.refuse:
+            raise OSError(self.refuse.pop(0))
+        self.datagrams.append((bytes(data), address))
+        return len(data)
 
     def close(self):
         self.closed = True
 
 
-class BambuddyPeer:
-    """Small protocol oracle at the commit/ACK boundary."""
-
-    def __init__(self, sock, key, boot, challenge=bytes(range(32))):
-        self.sock = sock
-        self.key = key
-        self.boot = boot
-        self.challenge = challenge
-        self.parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE * 4))
-        self.session_key = None
-        self.hello = None
-        self.committed = {}
-        self.watermark = {}
-        self.losses = {}
-        self.control_results = []
-        self.ack_enabled = True
-        self.received_counts = {}
-        self._queue(C.SERVER_CHALLENGE, challenge, boot=0)
-
-    def _frame(self, typ, payload, sequence=0, boot=None,
-               link=C.GLOBAL_SCOPE):
-        storage = bytearray(C.MAX_MESSAGE_SIZE)
-        size = binary.write_message(
-            storage, 0, typ, 0, sequence,
-            self.boot if boot is None else boot, link, payload)
-        return bytes(storage[:size])
-
-    def _queue(self, typ, payload, sequence=0, boot=None,
-               link=C.GLOBAL_SCOPE):
-        self.sock.to_client.extend(
-            self._frame(typ, payload, sequence, boot, link))
-
-    def pump(self):
-        if self.sock.from_client:
-            data = bytes(self.sock.from_client)
-            self.sock.from_client.clear()
-            self.parser.feed(data)
-        handled = 0
-        while True:
-            message = self.parser.next_message()
-            if message is None:
-                return handled
-            handled += 1
-            self._handle(message)
-
-    def _handle(self, message):
-        if message.message_type == C.HELLO:
-            device, firmware, links, ranges, supplied = \
-                binary.parse_hello(message)
-            transcript = bytearray(512)
-            size = tcp.hello_transcript(
-                bytes(device), bytes(firmware),
-                tuple((index, bytes(link)) for index, link in links),
-                ranges, transcript)
-            expected = tcp.hmac_sha256(
-                self.key, b"BMB1-AUTH", self.challenge,
-                self.boot.to_bytes(8, "big"), memoryview(transcript)[:size])
-            if not tcp.BMB1TCPClient._same(expected, supplied):
-                raise AssertionError("HELLO HMAC mismatch")
-            self.hello = (bytes(device), bytes(firmware), links, ranges)
-            self.session_key = tcp.hmac_sha256(
-                self.key, b"BMB1-SESSION", self.challenge,
-                self.boot.to_bytes(8, "big"))
-            accepted = (
-                self.watermark.get(self.boot, 0).to_bytes(8, "big") +
-                (1000).to_bytes(4, "big") + (15000).to_bytes(4, "big"))
-            self._queue(C.HELLO_ACCEPTED, accepted)
-            return
-        if message.message_type == C.CONTROL_RESULT:
-            result = binary.parse_control_result(message)
-            unsigned_length = len(message.payload) - 32
-            expected = tcp.hmac_sha256(
-                self.session_key, message.header,
-                message.payload[:unsigned_length])
-            if message.transport_sequence != 0 or not tcp.BMB1TCPClient._same(
-                    expected, result[3]):
-                raise AssertionError("invalid CONTROL_RESULT")
-            self.control_results.append(result)
-            return
-        if not message.transport_sequence:
-            return
-        key = (message.pico_boot_id, message.transport_sequence)
-        self.received_counts[key] = self.received_counts.get(key, 0) + 1
-        # Idempotent DB commit equivalent.
-        self.committed.setdefault(key, bytes(message.payload))
-        if message.message_type == C.TRANSPORT_DROP:
-            _, first, last, _, _ = binary.parse_transport_drop(message)
-            self.losses.setdefault(message.pico_boot_id, []).append((first, last))
-        self._advance(message.pico_boot_id)
-        if self.ack_enabled:
-            self.ack(message.pico_boot_id)
-
-    def _advance(self, boot):
-        watermark = self.watermark.get(boot, 0)
-        while True:
-            candidate = watermark + 1
-            if (boot, candidate) in self.committed:
-                watermark = candidate
-                continue
-            covering = next((
-                last for first, last in self.losses.get(boot, ())
-                if first <= candidate <= last
-            ), None)
-            if covering is None:
-                break
-            watermark = covering
-        self.watermark[boot] = watermark
-
-    def ack(self, boot):
-        payload = (
-            boot.to_bytes(8, "big") + bytes((C.GLOBAL_SCOPE, 0)) + b"\0\0" +
-            self.watermark.get(boot, 0).to_bytes(8, "big"))
-        self._queue(C.ACK, payload, boot=boot)
-
-    def send_soft_reset(self, command_sequence=1, issued_at_us=0,
-                        ttl_ms=5000, link=0):
-        unsigned = (
-            command_sequence.to_bytes(8, "big") +
-            issued_at_us.to_bytes(8, "big") +
-            ttl_ms.to_bytes(4, "big") +
-            bytes((C.CONTROL_SOFT_RESET, 0)))
-        header = bytearray(C.HEADER_SIZE)
-        binary.write_header(
-            header, 0, C.CONTROL, 0, len(unsigned) + 32, 0, self.boot, link)
-        mac = tcp.hmac_sha256(self.session_key, header, unsigned)
-        self.sock.to_client.extend(
-            self._frame(C.CONTROL, unsigned + mac, boot=self.boot, link=link))
+def parse_datagram(data):
+    """Spec section 4, independently of bmcu_stream_udp."""
+    assert len(data) <= 1200, len(data)
+    magic, version, _flags, id_length = struct.unpack_from(">4sBBB", data, 0)
+    assert magic == b"BMS2" and version == 1
+    device_id = data[7:7 + id_length]
+    count = data[7 + id_length]
+    pos = 8 + id_length
+    records = []
+    for _ in range(count):
+        (rmagic, rversion, rtype, flags, length, sequence, boot, link,
+         _reserved) = HEADER.unpack_from(data, pos)
+        assert rmagic == b"BMB1" and rversion == 1
+        payload = data[pos + 32:pos + 32 + length]
+        assert len(payload) == length
+        records.append({"type": rtype, "flags": flags, "sequence": sequence,
+                        "boot": boot, "link": link, "payload": payload})
+        pos += 32 + length
+    assert pos == len(data), "trailing bytes"
+    return device_id, records
 
 
-def drive(client, peer, start=0, limit=10000, done=None):
-    """Run both cooperative endpoints until ``done`` or a fixed bound."""
-    for now in range(start, start + limit):
-        if hasattr(client, "_e2e_now"):
-            client._e2e_now[0] = now
-        client.poll(now)
-        peer.pump()
-        if done is not None and done():
-            return now
-    raise AssertionError("transport did not converge")
+def parse_heartbeat(payload):
+    """Spec section 5.2."""
+    interval, uptime, next_sequence = struct.unpack_from(">IQQ", payload, 0)
+    firmware_length = payload[20]
+    firmware = payload[21:21 + firmware_length]
+    pos = 21 + firmware_length
+    links = []
+    for _ in range(payload[pos]):
+        index, id_length = payload[pos + 1], payload[pos + 2]
+        link_id = payload[pos + 3:pos + 3 + id_length]
+        state = payload[pos + 3 + id_length]
+        links.append((index, link_id, state))
+        pos += 3 + id_length
+    assert pos + 1 == len(payload), "trailing heartbeat bytes"
+    return {"interval_ms": interval, "uptime_ms": uptime,
+            "next_sequence": next_sequence, "firmware": firmware,
+            "links": links}
 
 
-class BinaryTransportEndToEndTests(unittest.TestCase):
-    KEY = bytes(range(32))
+def link_state_payload(state):
+    return b"\0" * 8 + bytes((state, 0, 0, 0))
+
+
+class StreamEndToEndTests(unittest.TestCase):
     BOOT = 0x1020304050607080
 
-    def make_pair(self, outbox=None, reset_handler=None):
-        sock = FragmentedSocket()
-        outbox = outbox or BMB1Outbox(self.BOOT, durable_slots=8)
-        now = [0]
-        client = tcp.BMB1TCPClient(
-            outbox, "host", 1234, b"pico-e2e", self.KEY, b"test",
-            ((0, b"bmcu-a"),), clock_ms=lambda: now[0],
-            control_handler=reset_handler)
-        client._e2e_now = now
-        peer = BambuddyPeer(sock, self.KEY, self.BOOT)
-        client.attach_connected_socket(sock)
-        return client, peer, outbox, now
+    def make(self, outbox=None, heartbeat_ms=5000, per_loop=4, states=None):
+        sock = FakeUDPSocket()
+        outbox = outbox or BMB1Outbox(self.BOOT, durable_slots=16)
+        client = stream.BMS2UDPClient(
+            outbox, "receiver", 8799, b"pico-e2e", b"test",
+            ((0, b"bmcu-a"), (1, b"bmcu-b")),
+            link_states=lambda: states or (C.LINK_ONLINE, C.LINK_STALE),
+            uptime_ms=lambda: 4242, socket_factory=lambda: sock,
+            resolver=lambda host, port: (host, port),
+            heartbeat_ms=heartbeat_ms, datagrams_per_loop=per_loop)
+        return client, sock, outbox
 
-    def test_authenticated_raw_delivery_commit_then_ack_with_partial_io(self):
-        client, peer, outbox, now = self.make_pair()
-        drive(client, peer, done=lambda: client.state == tcp.ONLINE)
-        self.assertEqual(peer.hello[0], b"pico-e2e")
-        # A valid alpha3 event frame, retained byte-for-byte in BMB1.
+    def records(self, sock, skip_heartbeats=True):
+        result = []
+        for data, _ in sock.datagrams:
+            device_id, records = parse_datagram(data)
+            self.assertEqual(device_id, b"pico-e2e")
+            for record in records:
+                if skip_heartbeats and record["type"] == C.HEARTBEAT:
+                    continue
+                result.append(record)
+        return result
+
+    def test_first_datagram_is_a_heartbeat_on_its_own(self):
+        client, sock, outbox = self.make()
+        outbox.enqueue_payload(C.LINK_STATE, C.FLAG_CRITICAL, 0, 1,
+                               link_state_payload(C.LINK_ONLINE))
+        client.poll(0)
+        _, first = parse_datagram(sock.datagrams[0][0])
+        self.assertEqual(len(first), 1)
+        record = first[0]
+        self.assertEqual(record["type"], C.HEARTBEAT)
+        self.assertEqual(record["sequence"], 0)
+        self.assertEqual(record["link"], 0xFF)
+        self.assertEqual(record["boot"], self.BOOT)
+        beat = parse_heartbeat(record["payload"])
+        self.assertEqual(beat["interval_ms"], 5000)
+        self.assertEqual(beat["uptime_ms"], 4242)
+        self.assertEqual(beat["firmware"], b"test")
+        self.assertEqual(beat["links"], [(0, b"bmcu-a", C.LINK_ONLINE),
+                                         (1, b"bmcu-b", C.LINK_STALE)])
+        # Taken before the record went out, so it names the record's sequence.
+        self.assertEqual(beat["next_sequence"], 2)
+        self.assertEqual(client.state, stream.ONLINE)
+
+    def test_raw_frame_is_forwarded_byte_for_byte_and_released(self):
+        client, sock, outbox = self.make()
         wire = b"\x3d\xc3\x03\x07\x10\x00" + bytes(16)
-        crc = binary._crc16(wire) if hasattr(binary, "_crc16") else None
-        # The transport treats raw data as opaque; CRC validation occurred at
-        # the BMCU monitor boundary before this callback.
-        del crc
-        sequence = outbox.enqueue_raw(
-            0, 123456, wire, {"kind": 3, "sequence": 7})
-        peer.ack_enabled = False
-        end = drive(
-            client, peer, start=100,
-            done=lambda: (self.BOOT, sequence) in peer.committed)
-        self.assertEqual(outbox.queue_depth, 1)
-        # Commit alone is not delivery: only the subsequent ACK releases RAM.
-        peer.ack_enabled = True
-        peer.ack(self.BOOT)
-        now[0] = end + 1
-        drive(client, peer, start=end + 1,
-              done=lambda: outbox.queue_depth == 0)
-        payload = peer.committed[(self.BOOT, sequence)]
-        self.assertEqual(bytes(payload[10:]), wire)
+        sequence = outbox.enqueue_raw(0, 123456, wire,
+                                      {"kind": 3, "sequence": 7})
+        client.poll(0)
+        records = self.records(sock)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["type"], C.BMCU_FRAME)
+        self.assertEqual(records[0]["sequence"], sequence)
+        payload = records[0]["payload"]
+        self.assertEqual(struct.unpack_from(">QH", payload, 0),
+                         (123456, len(wire)))
+        self.assertEqual(payload[10:], wire)
+        self.assertEqual(outbox.queue_depth, 0)
+        self.assertEqual(client.records_sent, 1)
 
-    def test_delayed_ack_keeps_exactly_one_inflight(self):
-        client, peer, outbox, _ = self.make_pair()
-        drive(client, peer, done=lambda: client.state == tcp.ONLINE)
-        outbox.enqueue_link_state(0, 1, C.LINK_ONLINE, 0)
-        outbox.enqueue_link_state(0, 2, C.LINK_OFFLINE, 1)
-        peer.ack_enabled = False
-        drive(client, peer, start=100, limit=20,
-              done=lambda: (self.BOOT, 1) in peer.committed)
-        deadline = client.inflight_sent_ms + client.ack_timeout_ms
-        for now in range(120, deadline):
-            client.poll(now)
-            peer.pump()
-        self.assertEqual(peer.received_counts[(self.BOOT, 1)], 1)
-        self.assertNotIn((self.BOOT, 2), peer.committed)
-        # At timeout only the same head is retransmitted, never a growing
-        # in-flight window.
-        for now in range(deadline, deadline + 20):
-            client.poll(now)
-            peer.pump()
-            if peer.received_counts[(self.BOOT, 1)] == 2:
-                break
-        self.assertEqual(peer.received_counts[(self.BOOT, 1)], 2)
-        self.assertNotIn((self.BOOT, 2), peer.committed)
+    def test_backlog_packs_into_bounded_datagrams_in_sequence(self):
+        outbox = BMB1Outbox(self.BOOT, durable_slots=128)
+        client, sock, _ = self.make(outbox, per_loop=64)
+        wire = b"\x3d\xc3\x03\x07\x10\x00" + bytes(40)
+        for n in range(100):
+            outbox.enqueue_raw(0, n, wire, {"kind": 3, "sequence": n})
+        client.poll(0)
+        sizes = [len(data) for data, _ in sock.datagrams]
+        self.assertTrue(all(size <= 1200 for size in sizes), sizes)
+        records = self.records(sock)
+        self.assertEqual([r["sequence"] for r in records],
+                         list(range(1, 101)))
+        self.assertGreater(len(sock.datagrams), 2)
+        self.assertEqual(outbox.queue_depth, 0)
 
-    def test_restart_replays_more_than_128_journal_records(self):
-        old_boot = 77
-        with tempfile.TemporaryDirectory() as directory:
-            managed = journal.BMJ1Journal(
-                directory, old_boot, 1000, staging_slots=2)
-            payload = (1).to_bytes(8, "big") + (1).to_bytes(2, "big") + b"x"
-            for sequence in range(1, 161):
-                managed.stage(
-                    C.BMCU_FRAME, C.FLAG_CRITICAL, 0, sequence,
-                    sequence, payload)
-                managed.flush_one()
-            managed.file.close()
+    def test_refused_send_retries_the_same_datagram_without_loss(self):
+        client, sock, outbox = self.make()
+        client.poll(0)                       # heartbeat out
+        for n in range(3):
+            outbox.enqueue_payload(C.LINK_STATE, C.FLAG_CRITICAL, 0, n,
+                                   link_state_payload(C.LINK_ONLINE))
+        sock.refuse = [11]                   # EAGAIN once
+        client.poll(1)
+        self.assertEqual(self.records(sock), [])
+        # Already out of the outbox, held by the client instead.
+        self.assertEqual(outbox.queue_depth, 0)
+        self.assertIsNotNone(client.pending)
+        client.poll(2)
+        self.assertEqual([r["sequence"] for r in self.records(sock)],
+                         [1, 2, 3])
+        self.assertIsNone(client.pending)
 
-            cursor = journal.JournalReplayCursor(directory)
-            outbox = BMB1Outbox(
-                self.BOOT, durable_slots=4, large_slots=1)
-            outbox.historical_ranges = cursor.available_ranges
-            outbox.replay_pager = lambda: cursor.page_into(outbox, 4)
-            client, peer, _, _ = self.make_pair(outbox)
-            drive(client, peer, done=lambda: client.state == tcp.ONLINE)
-            drive(
-                client, peer, start=100, limit=20000,
-                done=lambda: peer.watermark.get(old_boot) == 160)
-            self.assertEqual(
-                sorted(sequence for boot, sequence in peer.committed
-                       if boot == old_boot),
-                list(range(1, 161)))
-            self.assertLessEqual(outbox.queue_depth, 4)
+    def test_hard_send_error_backs_off_and_keeps_the_datagram(self):
+        client, sock, outbox = self.make()
+        client.poll(0)
+        outbox.enqueue_payload(C.LINK_STATE, C.FLAG_CRITICAL, 0, 1,
+                               link_state_payload(C.LINK_ONLINE))
+        sock.refuse = [113]                  # EHOSTUNREACH
+        client.poll(10)
+        self.assertEqual(client.state, stream.SEND_ERROR)
+        self.assertEqual(client.send_errors, 1)
+        client.poll(10 + stream.ERROR_BACKOFF_MS - 1)
+        self.assertEqual(self.records(sock), [])
+        client.poll(10 + stream.ERROR_BACKOFF_MS)
+        self.assertEqual([r["sequence"] for r in self.records(sock)], [1])
+        self.assertEqual(client.state, stream.ONLINE)
+
+    def test_heartbeat_interval_and_wifi_return(self):
+        client, sock, _ = self.make(heartbeat_ms=5000)
+        client.poll(0)
+        client.poll(4999)
+        beats = lambda: sum(1 for data, _ in sock.datagrams
+                            if parse_datagram(data)[1][0]["type"] ==
+                            C.HEARTBEAT)
+        self.assertEqual(beats(), 1)
+        client.poll(5000)
+        self.assertEqual(beats(), 2)
+        client.poll(5100, wifi_online=False)
+        self.assertEqual(client.state, stream.WIFI_WAIT)
+        client.poll(5200, wifi_online=True)
+        self.assertEqual(beats(), 3, "a heartbeat is owed when Wi-Fi returns")
+
+    def test_outage_overflow_arrives_as_one_exact_drop_marker(self):
+        outbox = BMB1Outbox(self.BOOT, durable_slots=8)
+        client, sock, _ = self.make(outbox, per_loop=16)
+        for n in range(20):                  # Wi-Fi down: nothing drains
+            outbox.enqueue_payload(C.LINK_STATE, C.FLAG_CRITICAL, 0, n,
+                                   link_state_payload(C.LINK_ONLINE))
+            client.poll(n, wifi_online=False)
+        client.poll(100)
+        client.poll(101)
+        records = self.records(sock)
+        sequences = [r["sequence"] for r in records]
+        self.assertEqual(sequences[:7], list(range(1, 8)))
+        drops = [r for r in records if r["type"] == C.TRANSPORT_DROP]
+        self.assertEqual(len(drops), 1)
+        first, last, count = struct.unpack_from(">QQI", drops[0]["payload"],
+                                                8)
+        self.assertEqual((drops[0]["sequence"], first, last, count),
+                         (8, 8, 20, 13))
+        # The receiver sees no gap: 1..7, then the marker owning 8..20.
+        self.assertEqual(outbox.next_sequence, 21)
+
+    def test_no_endpoint_is_disabled_and_sends_nothing(self):
+        outbox = BMB1Outbox(self.BOOT, durable_slots=4)
+        sock = FakeUDPSocket()
+        client = stream.BMS2UDPClient(
+            outbox, "", 0, b"pico-e2e", b"test", ((0, b"bmcu-a"),),
+            socket_factory=lambda: sock, resolver=lambda h, p: (h, p))
+        client.poll(0)
+        self.assertEqual(client.state, stream.DISABLED)
+        self.assertEqual(sock.datagrams, [])
+
+    def test_endpoint_update_resends_identity(self):
+        client, sock, _ = self.make()
+        client.poll(0)
+        client.set_endpoint("other", 9000)
+        client.poll(1)
+        self.assertEqual(sock.datagrams[-1][1], ("other", 9000))
+        self.assertEqual(parse_datagram(sock.datagrams[-1][0])[1][0]["type"],
+                         C.HEARTBEAT)
 
     def test_rejection_causes_are_counted_apart(self):
         # Every rejection becomes the same RAM_QUEUE_FULL drop marker, which
-        # says a record was lost and nothing about why. A saturated durable
-        # ring and a record too large for any size class are different
-        # problems with different fixes.
+        # says a record was lost and nothing about why.
         outbox = BMB1Outbox(self.BOOT, durable_slots=1)
-        self.assertEqual(outbox.reject_durable_full_count, 0)
         for sequence in range(1, 5):
             outbox.enqueue_payload(
                 C.LINK_STATE, C.FLAG_CRITICAL, 0, sequence,
-                b"\0" * 8 + bytes((C.LINK_ONLINE, 0, 0, 0)))
+                link_state_payload(C.LINK_ONLINE))
         self.assertGreater(outbox.reject_durable_full_count, 0)
         self.assertEqual(outbox.reject_oversize_count, 0)
         self.assertEqual(outbox.reject_large_full_count, 0)
 
     def test_durable_depth_high_water_is_tracked_apart_from_queue_depth(self):
-        # queue_depth sums four rings of different sizes, so it cannot say
-        # which one filled -- and durable is the only one whose saturation
-        # drops records.
         outbox = BMB1Outbox(self.BOOT, durable_slots=4)
         for sequence in range(1, 4):
             outbox.enqueue_payload(
                 C.LINK_STATE, C.FLAG_CRITICAL, 0, sequence,
-                b"\0" * 8 + bytes((C.LINK_ONLINE, 0, 0, 0)))
+                link_state_payload(C.LINK_ONLINE))
         outbox.queue_depth
         peak = outbox.durable_depth_max
         self.assertGreater(peak, 0)
         outbox.durable.release_through(outbox.next_sequence)
         outbox.queue_depth
         self.assertEqual(outbox.durable_depth_max, peak)
-
-    def test_exact_drop_marker_advances_watermark(self):
-        client, peer, outbox, _ = self.make_pair()
-        drive(client, peer, done=lambda: client.state == tcp.ONLINE)
-        # One slot forces the second event to become the exact sequence-2
-        # replacement marker after sequence 1 is ACKed.
-        constrained = BMB1Outbox(self.BOOT, durable_slots=1)
-        client.outbox = constrained
-        constrained.enqueue_payload(
-            C.LINK_STATE, C.FLAG_CRITICAL, 0, 1,
-            b"\0" * 8 + bytes((C.LINK_ONLINE, 0, 0, 0)))
-        constrained.enqueue_payload(
-            C.LINK_STATE, C.FLAG_CRITICAL, 0, 2,
-            b"\0" * 8 + bytes((C.LINK_OFFLINE, 1, 0, 0)))
-        drive(client, peer, start=100, limit=5000,
-              done=lambda: (
-                  peer.watermark.get(self.BOOT) == 2 and
-                  constrained.queue_depth == 0))
-        drop_key = (self.BOOT, 2)
-        self.assertIn(drop_key, peer.committed)
-        self.assertEqual(peer.losses[self.BOOT], [(2, 2)])
-        self.assertEqual(constrained.queue_depth, 0)
-
-    def test_soft_reset_result_is_session_signed_and_sequence_zero(self):
-        called = []
-
-        def reset(link, command, arguments):
-            called.append((link, command, bytes(arguments)))
-            return b"reset accepted"
-
-        client, peer, _, _ = self.make_pair(reset_handler=reset)
-        drive(client, peer, done=lambda: client.state == tcp.ONLINE)
-        peer.send_soft_reset()
-        drive(client, peer, start=100,
-              done=lambda: bool(peer.control_results))
-        self.assertEqual(called, [(0, C.CONTROL_SOFT_RESET, b"")])
-        self.assertEqual(peer.control_results[0][0:3],
-                         (1, C.RESULT_OK, b"reset accepted"))
 
 
 if __name__ == "__main__":

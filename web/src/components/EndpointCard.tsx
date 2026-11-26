@@ -50,7 +50,7 @@ export function EndpointCard() {
     try {
       await api.saveTransport(trimmed, parsed)
       setNote({
-        text: `Saved. BMB1 is reconnecting to ${trimmed}:${parsed}.`,
+        text: `Saved. Streaming to ${trimmed}:${parsed}.`,
         tone: 'ok',
       })
       await load()
@@ -69,7 +69,7 @@ export function EndpointCard() {
       <div class="key-top">
         <div>
           <h3>Bambuddy endpoint</h3>
-          <div class="muted">Configure the BMB1 TCP destination used by this Pico.</div>
+          <div class="muted">Where this Pico streams its records (UDP, no acknowledgement).</div>
         </div>
         <span class={`badge ${configured ? 'ok' : 'bad'}`}>{state}</span>
       </div>
@@ -87,14 +87,14 @@ export function EndpointCard() {
           />
         </div>
         <div>
-          <label for="bambuddy-port">TCP port</label>
+          <label for="bambuddy-port">UDP port</label>
           <input
             id="bambuddy-port"
             type="number"
             min={1}
             max={65535}
             inputMode="numeric"
-            placeholder="8766"
+            placeholder="8799"
             value={port}
             onInput={(event) => setPort(event.currentTarget.value)}
           />

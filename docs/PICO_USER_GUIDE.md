@@ -151,15 +151,20 @@ USBシリアルが認識されない個体(下記トラブルシューティン�
 
 ## 7. Bambuddy連携
 
-接続は `BMB1` 永続バイナリTCPです。WebSocketではありません。`ws://` URLを
-設定する箇所はもうないので、古い手順を見かけたら無視してください。
+接続はUDPの一方向ストリーム（BMS2、`docs/BMCU_MONITOR_STREAM_V2.md`）です。
+ACKも認証もなく、Bambuddyからは何も返ってきません。Picoは5秒ごとにHEARTBEATを
+送り、Bambuddyはそれで死活を判断します。
 
 設定するのはホストとポートで、`pico/config.py` の `BMCU_BINARY_HOST` と
 `BMCU_BINARY_PORT`(既定 8799)が起動時のブートストラップ値になります。
 稼働後は `http://<hostname>.local/` の設定画面から差し替えられます
-(内部的には `/api/transport` と `/api/device-key`)。
+(内部的には `/api/transport`)。デバイスキーは廃止しました。
 
-2基とも1本のTCPセッションに多重化され、`link_index` で区別されて送信されます。
+2基とも同じストリームに載り、`link_index` で区別されて送信されます。
+
+BMCUのソフトリセットはPicoのWeb画面からだけ行えます。リセットを要求すると
+OLEDに4桁のコードが60秒間表示され、それを画面に入力すると実行されます。
+Bambuddyからはリセットできません。
 
 > 2026-07時点で記録していたBambuddy側の「表示がブリッジ単位で混ざる」制限は
 > **解消済み**です。サーバ側も状態を `(device_id, link_index)` で保持し、

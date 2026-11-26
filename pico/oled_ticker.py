@@ -63,7 +63,7 @@ except ImportError:
     import time
 import gc
 
-import bambuddy_binary_tcp as tcp
+import bmcu_stream_udp as stream
 
 # _filament_motion in src/ams.h: idle, send_out, on_use, before_pull_back,
 # pull_back, before_on_use, stop_on_use.
@@ -76,10 +76,9 @@ MOTION_CHARS = ".SU<Pb="
 # sources rather than trusting this list to be maintained.
 LINK_WORDS = {"online": "ok", "resyncing": "sync", "stale": "old",
               "incompatible": "bad", "offline": "off", "unknown": "--"}
-UPLINK_WORDS = {tcp.ONLINE: "ok", tcp.DISABLED: "off", tcp.WIFI_WAIT: "wifi",
-                tcp.BACKOFF: "wait", tcp.CONNECTING: "conn",
-                tcp.CHALLENGE_WAIT: "auth", tcp.HELLO_SEND: "auth",
-                tcp.ACCEPT_WAIT: "auth"}
+UPLINK_WORDS = {stream.ONLINE: "ok", stream.DISABLED: "off",
+                stream.WIFI_WAIT: "wifi", stream.RESOLVING: "dns",
+                stream.SEND_ERROR: "err"}
 # One word per channel, padded to five so rows line up without a per-row
 # ljust(). Indexed by motion (_filament_motion in src/ams.h): idle, send_out,
 # on_use, before_pull_back, pull_back, before_on_use, stop_on_use. Idle is
@@ -540,7 +539,8 @@ def health_lines(uptime_s=0, metrics=None, outbox=None, client=None,
     lines = [
         address,
         radio,
-        "bmb1 %s rc%d" % (getattr(client, "state", None) or "-",
+        "udp %s rc%d" % (UPLINK_WORDS.get(getattr(client, "state", None),
+                                          "-"),
                           getattr(client, "reconnect_count", 0)),
         "up %s%s" % (_uptime_text(uptime_s),
                      (" %dC" % (temperature_milli_c // 1000))
@@ -772,6 +772,7 @@ def draw_flow(frame, monitors, tick):
 
 
 LINK_LETTERS = ("A", "B")
+OVERLAY_CHECK_MS = 200
 
 
 class OledTicker:
@@ -782,8 +783,14 @@ class OledTicker:
                  page_ms=5000, overview_ms=10000, flow_ms=10000,
                  flow_frame_ms=200, refresh_ms=1000, marquee_ms=120,
                  marquee_step=4, error_backoff_ms=5000,
-                 exception_count=None):
+                 exception_count=None, overlay_provider=None):
         self.display = display
+        # (now_ms) -> tuple of rows or None. While it returns rows the panel
+        # shows them and nothing else: local_reset.py puts its confirmation
+        # code here, and the code must not scroll away mid-read.
+        self.overlay_provider = overlay_provider
+        self._overlay = None
+        self._overlay_check_ms = None
         self.monitors = monitors
         self.wifi = wifi
         self.client = client
@@ -1221,7 +1228,50 @@ class OledTicker:
             self._dirty = (1 << self.rows) - 1
             raise
 
+    def panel_ready(self):
+        """True while the panel answers: no write has failed since the last
+        backoff window. local_reset.py refuses to create a code otherwise."""
+        return self._retry_ms is None
+
+    def _draw_overlay(self, lines):
+        frame = self.display.frame
+        frame.fill_rect(0, 0, self.display.width, self.rows * 8, 0)
+        for row in range(min(self.rows, len(lines))):
+            frame.text(lines[row][:self.columns], 0, row * 8)
+        self._dirty = (1 << self.rows) - 1
+
+    def _service_overlay(self, now_ms):
+        """True while an overlay owns the panel."""
+        if self.overlay_provider is None:
+            return False
+        # Asked five times a second, not once per loop: while a code is up the
+        # provider builds its rows as fresh strings, and at loop rate that
+        # would be thousands of short-lived objects a second.
+        if self._overlay_check_ms is not None and _ticks_diff(
+                now_ms, self._overlay_check_ms) < OVERLAY_CHECK_MS:
+            if self._overlay is not None:
+                self._flush_one_page()
+            return self._overlay is not None
+        self._overlay_check_ms = now_ms
+        lines = self.overlay_provider(now_ms)
+        if lines is None:
+            if self._overlay is not None:
+                # Back to the rotation: force a full redraw of the page and
+                # the marquee row the overlay painted over.
+                self._overlay = None
+                self._digest = None
+                self._content_ms = None
+                self._draw_marquee()
+            return False
+        if lines != self._overlay:
+            self._overlay = lines
+            self._draw_overlay(lines)
+        self._flush_one_page()
+        return True
+
     def _service(self, now_ms):
+        if self._service_overlay(now_ms):
+            return
         self._update_chips(now_ms)
         if self._page_ms_mark is None:
             self._page_ms_mark = now_ms

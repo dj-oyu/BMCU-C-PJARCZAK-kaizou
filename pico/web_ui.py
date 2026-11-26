@@ -231,8 +231,8 @@ class WebUI:
             return
         body = bytes(self.request_view[body_start:body_start + length]) \
             if length else b""
-        if (path.startswith(b"/api/device-key") or
-                path.startswith(b"/api/transport")) and self.settings_provider:
+        if (path.startswith(b"/api/transport") or
+                path.startswith(b"/api/control/")) and self.settings_provider:
             result = self.settings_provider(
                 method.decode(), path.decode(), headers, body)
             self.response = self._http_response(*result) if result else \

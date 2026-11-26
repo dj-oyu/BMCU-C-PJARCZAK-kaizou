@@ -33,8 +33,8 @@ describe('key=value status endpoints', () => {
   })
 
   it('keeps values containing an equals sign intact', async () => {
-    respondWith('fingerprint=3f9a=c1d0\n')
-    expect((await api.deviceKeyStatus()).get('fingerprint')).toBe('3f9a=c1d0')
+    respondWith('host=a=b\n')
+    expect((await api.transportStatus()).get('host')).toBe('a=b')
   })
 
   it('raises on a non-OK response instead of reporting empty fields', async () => {

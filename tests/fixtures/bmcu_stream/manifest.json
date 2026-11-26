@@ -1,0 +1,70 @@
+{
+  "expect": {
+    "heartbeat.bin": {
+      "device_id": "pico-bmcu-bridge",
+      "records": [
+        {
+          "heartbeat": {
+            "firmware": "alpha.3",
+            "heartbeat_interval_ms": 5000,
+            "links": [
+              {
+                "link_id": "bmcu-a",
+                "link_index": 0,
+                "link_state": 2
+              },
+              {
+                "link_id": "bmcu-b",
+                "link_index": 1,
+                "link_state": 3
+              }
+            ],
+            "next_transport_sequence": 4,
+            "uptime_ms": 123456789
+          },
+          "link_index": 255,
+          "message_type": 66,
+          "pico_boot_id": 72623859790382856,
+          "transport_sequence": 0
+        }
+      ]
+    },
+    "records.bin": {
+      "device_id": "pico-bmcu-bridge",
+      "records": [
+        {
+          "link_index": 1,
+          "message_type": 17,
+          "pico_boot_id": 72623859790382856,
+          "transport_sequence": 1
+        },
+        {
+          "bmcu_wire_hex": "a55a8303070010000000000000000000000000000000001234",
+          "link_index": 0,
+          "message_type": 16,
+          "pico_boot_id": 72623859790382856,
+          "received_at_us": 2000,
+          "transport_sequence": 2
+        },
+        {
+          "link_index": 255,
+          "message_type": 19,
+          "pico_boot_id": 72623859790382856,
+          "transport_sequence": 3
+        }
+      ]
+    }
+  },
+  "files": {
+    "heartbeat.bin": {
+      "bytes": 103,
+      "sha256": "a566aac3c496fc9708ed4749f836359e9d4027410022aedc2a7127eb3a44b371"
+    },
+    "records.bin": {
+      "bytes": 179,
+      "sha256": "b6fb28f9a5780553c5ccc45e0984498079b629e9cc45c4d405ef136582d9a659"
+    }
+  },
+  "format": "bmcu-stream-fixtures-v1",
+  "spec": "docs/BMCU_MONITOR_STREAM_V2.md"
+}

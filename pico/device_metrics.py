@@ -156,6 +156,16 @@ class DeviceMetrics:
              outbox.reject_ring_error_count if outbox else 0),
             (C.DIAG_DURABLE_DEPTH_MAX,
              outbox.durable_depth_max if outbox else 0),
+            (C.DIAG_UDP_DATAGRAMS_SENT,
+             getattr(client, "datagrams_sent", 0) if client else 0),
+            (C.DIAG_UDP_RECORDS_SENT,
+             getattr(client, "records_sent", 0) if client else 0),
+            (C.DIAG_UDP_SEND_ERRORS,
+             getattr(client, "send_errors", 0) if client else 0),
+            (C.DIAG_UDP_BYTES_SENT,
+             getattr(client, "bytes_sent", 0) if client else 0),
+            (C.DIAG_HEARTBEATS_SENT,
+             getattr(client, "heartbeats_sent", 0) if client else 0),
         ):
             offset = self._u64(offset, tag, value)
         if temperature_milli_c is not None:

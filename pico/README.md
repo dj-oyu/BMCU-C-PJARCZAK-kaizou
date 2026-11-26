@@ -1,9 +1,11 @@
 # Pico BMCU Monitor
 
-The Pico firmware bridges up to two BMCU UART links to Bambuddy using the BMB1
-persistent binary TCP protocol. Production telemetry, ACK, CONTROL,
-diagnostics, runtime logs, crash recovery, and the local diagnostic UI are
-binary. There is no JSON WebSocket or HTTPS NDJSON compatibility mode.
+The Pico firmware bridges up to two BMCU UART links to Bambuddy as an
+unacknowledged UDP stream of BMB1 records (BMS2,
+[docs/BMCU_MONITOR_STREAM_V2.md](../docs/BMCU_MONITOR_STREAM_V2.md)). The Pico is
+a faithful bridge: it forwards every record unaltered and leaves all
+processing to the receiver. Nothing comes back from Bambuddy; liveness is a
+HEARTBEAT every 5 s. The local diagnostic UI is binary too.
 
 ## Configuration
 
@@ -14,9 +16,7 @@ Copy `config_example.py` to `config.py` and configure:
 - `UART_RXBUF` for per-link receive headroom (4096 bytes by default);
 - `BMCU_BINARY_HOST` and `BMCU_BINARY_PORT`;
 - `BMCU_BINARY_DEVICE_ID`;
-- `BMCU_BINARY_DEVICE_KEY`, an optional bootstrap 256-bit key encoded as 64 hex
-  characters (the local UI can provision or replace it);
-- journal and queue sizes when the defaults are unsuitable.
+- the queue size and stream pacing when the defaults are unsuitable.
 
 Wi-Fi credentials remain in separately provisioned `secrets.py`.
 
@@ -24,11 +24,12 @@ Wi-Fi credentials remain in separately provisioned `secrets.py`.
 
 Validated UART frames enter fixed byte storage before semantic display
 decoding. STATUS is coalesced until it receives a global transport sequence;
-EVENT, fault, link, loss, CONTROL result, warning log, and crash records are
-protected. BMJ1 segments retain important records across restart.
+EVENT, fault, link, loss, warning log, and crash records are protected. A
+record leaves the RAM queue once the UDP socket accepts its datagram; there is
+no flash journal and no replay, so history lives at the receiver.
 
-The cooperative order is UART drain, local state, TCP receive/send, bounded
-journal flush, bounded local HTTP, then safe-point maintenance. Garbage
+The cooperative order is UART drain, local state, UDP send, bounded local
+HTTP, then safe-point maintenance. Garbage
 collection is scheduled and measured; it is never invoked by an HTTP request.
 
 ## Local UI
@@ -43,15 +44,19 @@ The root page is static and fetches binary snapshots/deltas:
 
 JavaScript performs BMB1 and TLV decoding with `DataView`.
 
-The **Connection settings** section manages the Bambuddy BMB1 host and TCP port
-alongside device authentication. Host and port changes are persisted and cause
-an immediate reconnect without rebooting. The device-key card can generate a
-cryptographically random 256-bit key, copy it once for Bambuddy, accept an
-existing 64-hex-character key, and persist it without rebooting. The saved key
-is write-only: the read API exposes only configured state and a 48-bit SHA-256
-fingerprint. Mutations require a non-simple content type and action header so a
-cross-origin form cannot silently replace settings. The UI is intended only
-for a trusted LAN.
+The **Connection settings** section sets the stream's host and UDP port.
+Changes are persisted and take effect without rebooting.
+
+The **Soft reset** card is the only control action, and it is local: Bambuddy
+cannot reset a BMCU. Asking for a reset shows a 4-digit code on the OLED panel
+for 60 s; typing it into the card sends the reset through the usual
+soft-reset guards. Three wrong codes invalidate it, and without a working panel
+no code can be created at all. The code is never sent to the browser: reading
+it off the panel is the proof of being at the machine.
+
+Mutations require a non-simple content type and action header so a
+cross-origin form cannot reach them. The UI is intended only for a trusted
+LAN.
 
 ## OLED status ticker
 

@@ -59,7 +59,13 @@ function mockPico(): Plugin {
             return send(logsAfter(binary('logs.bin'), BigInt(after)))
           }
           if (url === '/api/transport/status') return sendText(text('transport_status.txt'))
-          if (url === '/api/device-key/status') return sendText(text('device_key_status.txt'))
+          // The mock has no panel: any 4 digits reset, so the flow can be
+          // clicked through on a laptop.
+          if (url === '/api/control/reset-request') {
+            response.statusCode = 202
+            return sendJson({ expires_in_s: 60, attempts: 3 })
+          }
+          if (url === '/api/control/reset') return sendJson({ result: 'accepted (mock)' })
           if (request.method === 'POST') return sendText('ok\n')
         } catch (error) {
           response.statusCode = 500
@@ -69,6 +75,11 @@ function mockPico(): Plugin {
         response.statusCode = 404
         response.end('Not found\n')
         return
+
+        function sendJson(value: unknown) {
+          response.setHeader('Content-Type', 'application/json')
+          response.end(JSON.stringify(value))
+        }
 
         function send(body: Buffer) {
           response.setHeader('Content-Type', BINARY_TYPE)

@@ -210,9 +210,7 @@ def main():
     (OUTPUT / "snapshot.bin").write_bytes(b"".join(api.snapshot_records()))
 
     (OUTPUT / "transport_status.txt").write_text(
-        "configured=1\nhost=bambuddy.local\nport=8766\n", encoding="utf-8", newline="\n")
-    (OUTPUT / "device_key_status.txt").write_text(
-        "configured=1\nfingerprint=3f9a c1d0 77e2 4b18\n", encoding="utf-8", newline="\n")
+        "configured=1\nhost=bambuddy.local\nport=8799\n", encoding="utf-8", newline="\n")
 
     for name in sorted(os.listdir(OUTPUT)):
         print("wrote", (OUTPUT / name).relative_to(ROOT))

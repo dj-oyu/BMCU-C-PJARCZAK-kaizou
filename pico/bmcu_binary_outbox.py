@@ -165,9 +165,26 @@ class BMB1Outbox:
                 self.journal_failure_count += 1
         return sequence
 
+    def drop_marker_free_slots(self):
+        """Free durable slots a pending loss marker waits for.
+
+        A marker written the moment one slot frees takes that slot, the next
+        record finds the ring full again, and a new loss starts. Under steady
+        overload the ring then alternates marker / record, each marker covering
+        a run of two or three. Measured 2026-11-26 with two BMCUs on the bus:
+        87 of 142 queued records were markers, so most of the drain rate went
+        to reporting loss rather than to the records themselves. Waiting for a
+        quarter of the ring lets one marker cover the whole overload run and
+        leaves the freed slots to real records. Rings under eight slots keep
+        the old "one free slot" rule.
+        """
+        return max(1, self.durable.capacity // 4)
+
     def materialize_drop(self):
-        if not self.forced_drop_count or len(self.durable) == \
-                self.durable.capacity:
+        if not self.forced_drop_count:
+            return False
+        if (self.durable.capacity - len(self.durable) <
+                self.drop_marker_free_slots()):
             return False
         sequence = self.forced_drop_first
         size = binary.write_transport_drop(

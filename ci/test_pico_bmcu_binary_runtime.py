@@ -11,7 +11,6 @@ added = PICO not in sys.path
 if added:
     sys.path.insert(0, PICO)
 
-import bambuddy_binary_tcp as tcp
 import bmcu_binary as binary
 import bmcu_binary_constants as C
 import bmcu_journal as journal
@@ -144,6 +143,41 @@ class RawAndSchedulingTests(unittest.TestCase):
         self.assertEqual(outbox.enqueue_raw(0, 1003, event, link.EVENT), 4)
         self.assertEqual(outbox.acknowledge(99, 4), 1)
         self.assertIsNone(outbox.peek())
+
+    def test_drop_marker_waits_for_a_quarter_of_the_ring(self):
+        outbox = BMB1Outbox(99, durable_slots=16)
+        event = link.encode_frame(link.EVENT, 1, bytes(16))
+        # One slot is held back for the marker, so 15 records fit.
+        for n in range(15):
+            self.assertEqual(
+                outbox.enqueue_raw(0, 1000 + n, event, link.EVENT), n + 1)
+        self.assertEqual(outbox.enqueue_raw(0, 2000, event, link.EVENT), 0)
+
+        # Steady overload: each ACK frees one slot and a record arrives.
+        # A marker written at once would take every freed slot in turn.
+        # The ring starts with its reserved slot free, so two ACKs leave 3.
+        for acked in (1, 2):
+            outbox.acknowledge(99, acked)
+            outbox.peek()
+            self.assertEqual(outbox.enqueue_raw(
+                0, 2000 + acked, event, link.EVENT), 0)
+        self.assertEqual(outbox.forced_drop_count, 3)
+
+        # Four free slots (16 // 4): one marker covers the whole run.
+        outbox.acknowledge(99, 3)
+        outbox.peek()
+        markers = []
+        for sequence, message, _, _ in outbox.durable.iter_records():
+            parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
+            parser.feed(message)
+            decoded = parser.next_message()
+            if decoded.message_type == C.TRANSPORT_DROP:
+                markers.append(binary.parse_transport_drop(decoded)[1:4])
+        self.assertEqual(markers, [(16, 18, 3)])
+        self.assertEqual(outbox.forced_drop_count, 0)
+
+        # The slots behind the marker go to records again.
+        self.assertEqual(outbox.enqueue_raw(0, 3000, event, link.EVENT), 19)
 
     def test_drop_marker_has_a_reserved_slot_during_replay_saturation(self):
         outbox = BMB1Outbox(99, durable_slots=2)
@@ -443,271 +477,6 @@ class JournalTests(unittest.TestCase):
                 (4, C.BMCU_FRAME),
             ])
             self.assertEqual(drop_range, (2, 3, 2))
-
-
-class FakeSocket:
-    def __init__(self, receive=b"", send_limit=13):
-        self.receive = bytearray(receive)
-        self.sent = bytearray()
-        self.send_limit = send_limit
-
-    def recv_into(self, target):
-        if not self.receive:
-            raise OSError(11)
-        count = min(len(target), len(self.receive))
-        target[:count] = self.receive[:count]
-        del self.receive[:count]
-        return count
-
-    def send(self, data):
-        count = min(len(data), self.send_limit)
-        self.sent.extend(data[:count])
-        return count
-
-    def close(self):
-        pass
-
-
-class ReadIntoSocket:
-    def __init__(self, receive=b""):
-        self.receive = bytearray(receive)
-        self.sent = bytearray()
-
-    def readinto(self, target):
-        if not self.receive:
-            raise OSError(11)
-        count = min(len(target), len(self.receive))
-        target[:count] = self.receive[:count]
-        del self.receive[:count]
-        return count
-
-    def send(self, data):
-        self.sent.extend(data)
-        return len(data)
-
-
-class WouldBlockReadIntoSocket(ReadIntoSocket):
-    def readinto(self, _target):
-        return None
-
-
-class TCPClientTests(unittest.TestCase):
-    def frame(self, message_type, payload, boot=0, link_index=C.GLOBAL_SCOPE):
-        out = bytearray(C.MAX_MESSAGE_SIZE)
-        size = binary.write_message(
-            out, 0, message_type, 0, 0, boot, link_index, payload)
-        return bytes(out[:size])
-
-    def test_auth_partial_send_online_delivery_and_ack(self):
-        boot = 0x0102030405060708
-        challenge = self.frame(C.SERVER_CHALLENGE, bytes(range(32)), 0, 0)
-        accepted = self.frame(
-            C.HELLO_ACCEPTED,
-            (0).to_bytes(8, "big") + (5000).to_bytes(4, "big") +
-            (15000).to_bytes(4, "big"), boot)
-        fake = FakeSocket(challenge, send_limit=7)
-        outbox = BMB1Outbox(boot, durable_slots=4)
-        client = tcp.BMB1TCPClient(
-            outbox, "host", 1234, b"device", bytes(range(32)), b"1.0",
-            ((0, b"a"),))
-        client.attach_connected_socket(fake)
-        for now in range(100):
-            client.poll(now)
-            if client.state == tcp.ACCEPT_WAIT and not fake.receive:
-                fake.receive.extend(accepted)
-            if client.state == tcp.ONLINE:
-                break
-        self.assertEqual(client.state, tcp.ONLINE)
-        event = link.encode_frame(link.EVENT, 1, bytes(16))
-        outbox.enqueue_raw(0, 1000, event,
-                           {"kind": link.EVENT, "sequence": 1})
-        before = len(fake.sent)
-        for now in range(100, 130):
-            client.poll(now)
-        self.assertGreater(len(fake.sent), before)
-        ack_payload = (
-            boot.to_bytes(8, "big") + bytes((C.GLOBAL_SCOPE, 0)) + b"\0\0" +
-            (1).to_bytes(8, "big"))
-        fake.receive.extend(self.frame(C.ACK, ack_payload, boot))
-        client.poll(131)
-        self.assertEqual(outbox.queue_depth, 0)
-
-    def test_micropython_readinto_receives_server_challenge(self):
-        boot = 0x1122334455667788
-        challenge = self.frame(C.SERVER_CHALLENGE, bytes(range(32)))
-        fake = ReadIntoSocket(challenge)
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(boot, durable_slots=4), "host", 1234, b"device",
-            bytes(range(32)), b"1.0", ((0, b"bmcu-a"),))
-        client.attach_connected_socket(fake)
-
-        client.poll(1)
-
-        self.assertEqual(client.state, tcp.ACCEPT_WAIT)
-        self.assertTrue(fake.sent)
-
-    def test_micropython_readinto_none_means_would_block(self):
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "host", 1234, b"device", b"k" * 32,
-            b"1.0", ((0, b"bmcu-a"),))
-        client.attach_connected_socket(WouldBlockReadIntoSocket())
-
-        client.poll(1)
-
-        self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
-        self.assertIsNone(client.last_error)
-
-    def test_control_uses_session_relative_ttl(self):
-        now = [20]
-        boot = 99
-        outbox = BMB1Outbox(boot, durable_slots=4)
-        client = tcp.BMB1TCPClient(
-            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),),
-            clock_ms=lambda: now[0], control_handler=lambda *_: b"ok")
-        client.state = tcp.ONLINE
-        client.session_epoch_ms = 0
-        client.session_key = b"s" * 32
-        unsigned = (
-            (1).to_bytes(8, "big") + (1000).to_bytes(8, "big") +
-            (5).to_bytes(4, "big") + bytes((C.CONTROL_SOFT_RESET, 0))
-        )
-        header = bytearray(C.HEADER_SIZE)
-        binary.write_header(header, 0, C.CONTROL, 0,
-                            len(unsigned) + 32, 0, boot, 0)
-        mac = tcp.hmac_sha256(client.session_key, header, unsigned)
-        raw = self.frame(C.CONTROL, unsigned + mac, boot, 0)
-        parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
-        parser.feed(raw)
-        client._handle_message(parser.next_message())
-        result_parser = binary.StreamParser(bytearray(C.MAX_MESSAGE_SIZE))
-        result_parser.feed(memoryview(
-            client.control_buffer)[:client.control_pending_length])
-        result = binary.parse_control_result(result_parser.next_message())
-        self.assertEqual(result[1], C.RESULT_EXPIRED)
-        self.assertEqual(outbox.queue_depth, 0)
-
-    def test_delivery_waits_for_ack_before_retransmitting(self):
-        now = [0]
-        boot = 99
-        fake = FakeSocket(send_limit=C.MAX_MESSAGE_SIZE)
-        outbox = BMB1Outbox(boot, durable_slots=4)
-        outbox.enqueue_link_state(0, 1, C.LINK_ONLINE, 0)
-        client = tcp.BMB1TCPClient(
-            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),),
-            clock_ms=lambda: now[0])
-        client.sock = fake
-        client.state = tcp.ONLINE
-        client.ack_timeout_ms = 10
-        client.poll(0)
-        first_length = len(fake.sent)
-        self.assertGreater(first_length, 0)
-        for value in range(1, 10):
-            now[0] = value
-            client.poll(value)
-        self.assertEqual(len(fake.sent), first_length)
-        now[0] = 10
-        client.poll(10)
-        self.assertEqual(len(fake.sent), first_length * 2)
-
-    def test_handshake_timeout_is_wrap_safe(self):
-        modulus = 16384
-
-        def ticks_add(value, delta):
-            return (value + delta) % modulus
-
-        def ticks_diff(left, right):
-            return ((left - right + modulus // 2) % modulus) - modulus // 2
-
-        now = [16000]
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
-            ((0, b"a"),), clock_ms=lambda: now[0],
-            ticks_add=ticks_add, ticks_diff=ticks_diff)
-        client.attach_connected_socket(FakeSocket())
-        now[0] = ticks_add(16000, 4999)
-        client.poll(now[0])
-        self.assertEqual(client.state, tcp.CHALLENGE_WAIT)
-        now[0] = ticks_add(16000, 5000)
-        client.poll(now[0])
-        self.assertEqual(client.state, tcp.BACKOFF)
-
-    def test_device_key_update_reconnects_without_reboot(self):
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
-            ((0, b"a"),))
-        client.sock = FakeSocket()
-        client.state = tcp.ONLINE
-
-        client.set_device_key(b"n" * 32, 123)
-
-        self.assertEqual(client.device_key, b"n" * 32)
-        self.assertEqual(client.state, tcp.BACKOFF)
-        self.assertEqual(client.last_error, "device key updated")
-        with self.assertRaises(ValueError):
-            client.set_device_key(b"short", 124)
-
-    def test_endpoint_update_reconnects_without_reboot(self):
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "old.local", 1000, b"d", b"k" * 32, b"1",
-            ((0, b"a"),))
-        client.sock = FakeSocket()
-        client.state = tcp.ONLINE
-
-        client.set_endpoint("bambuddy.local", 8766, 123)
-
-        self.assertEqual(client.host, "bambuddy.local")
-        self.assertEqual(client.port, 8766)
-        self.assertEqual(client.state, tcp.BACKOFF)
-        self.assertEqual(client.last_error, "transport endpoint updated")
-        with self.assertRaises(ValueError):
-            client.set_endpoint("", 0, 124)
-
-    def test_short_server_ping_does_not_escape_as_struct_error(self):
-        # struct.error is outside poll()'s except clause, so a truncated PING
-        # used to surface as an uncounted runtime exception in main.py.
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
-        client.sock = FakeSocket()
-        client.state = tcp.ONLINE
-        message = binary.Message(
-            C.PING, 0, 3, 0, 99, C.GLOBAL_SCOPE, b"", b"\0\0\0")
-
-        client._handle_message(message)
-
-        self.assertEqual(client.state, tcp.ONLINE)
-
-    def test_online_send_failure_closes_instead_of_raising(self):
-        class BrokenSendSocket(ReadIntoSocket):
-            def readinto(self, _target):
-                return None
-
-            def send(self, _data):
-                raise OSError(104)
-
-        boot = 99
-        outbox = BMB1Outbox(boot, durable_slots=4)
-        client = tcp.BMB1TCPClient(
-            outbox, "host", 1, b"d", b"k" * 32, b"1", ((0, b"a"),))
-        client.sock = BrokenSendSocket()
-        client.state = tcp.ONLINE
-        client.last_rx_ms = 0
-        outbox.enqueue_raw(0, 1000, link.encode_frame(link.EVENT, 1, bytes(16)),
-                           {"kind": link.EVENT, "sequence": 1})
-
-        client.poll(1)
-
-        self.assertEqual(client.state, tcp.BACKOFF)
-
-    def test_disconnect_discards_session_bound_control_result(self):
-        client = tcp.BMB1TCPClient(
-            BMB1Outbox(99), "host", 1, b"d", b"k" * 32, b"1",
-            ((0, b"a"),))
-        client.sock = FakeSocket()
-        client.state = tcp.ONLINE
-        client.control_pending_length = 42
-        client._close(1, "test")
-        self.assertEqual(client.control_pending_length, 0)
-        self.assertEqual(client.state, tcp.BACKOFF)
 
 
 if __name__ == "__main__":

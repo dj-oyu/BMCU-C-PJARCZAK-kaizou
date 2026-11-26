@@ -68,6 +68,39 @@ async function post(
   })
 }
 
+/** What the local control endpoints answer: a status and a JSON body. */
+export interface ControlReply {
+  status: number
+  body: {
+    error?: string
+    result?: string
+    expires_in_s?: number
+    attempts?: number
+    attempts_left?: number
+  }
+}
+
+async function control(
+  path: string,
+  action: string,
+  value: Record<string, unknown>,
+): Promise<ControlReply> {
+  return serialize(async () => {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-BMCU-Control-Action': action },
+      body: JSON.stringify(value),
+    })
+    let body: ControlReply['body'] = {}
+    try {
+      body = (await response.json()) as ControlReply['body']
+    } catch {
+      // A 403/405 from the guard is plain text; the status says enough.
+    }
+    return { status: response.status, body }
+  })
+}
+
 /** Raw bytes rather than BMB1 messages: snapshot.bin is its own local format. */
 async function fetchBytes(path: string): Promise<ArrayBuffer> {
   return serialize(async () => {
@@ -84,9 +117,10 @@ export const api = {
   logs: (after: bigint, limit: number) =>
     fetchBinary(`/api/logs.bin?after=${after.toString()}&limit=${limit}`),
   transportStatus: () => fetchFields('/api/transport/status'),
-  deviceKeyStatus: () => fetchFields('/api/device-key/status'),
   saveTransport: (host: string, port: number) =>
     post('/api/transport', ['X-BMCU-Settings-Action', 'update'], `${host}\n${port}`),
-  saveDeviceKey: (key: string) =>
-    post('/api/device-key', ['X-BMCU-Key-Action', 'update'], key),
+  requestReset: (link: number) =>
+    control('/api/control/reset-request', 'request', { link }),
+  confirmReset: (link: number, code: string) =>
+    control('/api/control/reset', 'reset', { link, code }),
 }

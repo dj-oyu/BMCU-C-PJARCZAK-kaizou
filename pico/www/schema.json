@@ -185,7 +185,12 @@
    "87": "reject_oversize_count",
    "88": "reject_ring_error_count",
    "89": "durable_depth_max",
-   "9": "loop_busy_us"
+   "9": "loop_busy_us",
+   "90": "udp_datagrams_sent",
+   "91": "udp_records_sent",
+   "92": "udp_send_errors",
+   "93": "udp_bytes_sent",
+   "94": "heartbeats_sent"
   },
   "dm_teardown_cause": {
    "1": "ks_deviated",
@@ -200,7 +205,9 @@
    "2": "journal_full",
    "3": "journal_corrupt",
    "4": "record_too_large",
-   "5": "retention_eviction"
+   "5": "retention_eviction",
+   "6": "network_gap",
+   "7": "receiver_overflow"
   },
   "flags": {
    "1": "replay",
@@ -292,7 +299,8 @@
    "48": "control",
    "49": "control_result",
    "64": "ping",
-   "65": "pong"
+   "65": "pong",
+   "66": "heartbeat"
   },
   "outcome": {
    "0": "accepted",

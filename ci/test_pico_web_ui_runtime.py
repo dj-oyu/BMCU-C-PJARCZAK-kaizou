@@ -201,31 +201,42 @@ class WebUIRuntimeTests(unittest.TestCase):
         web.poll()
         self.assertIn(b"404 Not Found", web.response)
 
-    def test_device_key_post_waits_for_and_passes_complete_body(self):
+    def test_control_post_waits_for_and_passes_complete_body(self):
         calls = []
 
         def settings(*args):
             calls.append(args)
-            return "204 No Content", "text/plain", b""
+            return "202 Accepted", "application/json", b"{}"
 
         web = web_ui.WebUI(lambda _: None, settings_provider=settings)
+        body = b'{"link": 1, "code": "0123", "pad": "' + b"a" * 30 + b'"}'
         client = Client(
-            b"POST /api/device-key HTTP/1.1\r\n"
-            b"Content-Type: application/octet-stream\r\n"
-            b"X-BMCU-Key-Action: update\r\n"
-            b"Content-Length: 64\r\n\r\n" + b"a" * 20)
+            b"POST /api/control/reset HTTP/1.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"X-BMCU-Control-Action: reset\r\n"
+            b"Content-Length: %d\r\n\r\n" % len(body) + body[:20])
         web.client = client
         web.poll()
         self.assertIsNone(web.response)
         self.assertEqual(calls, [])
 
-        client.request = b"a" * 44
+        client.request = body[20:]
         web.poll()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0:2], ("POST", "/api/device-key"))
-        self.assertEqual(calls[0][2]["x-bmcu-key-action"], "update")
-        self.assertEqual(calls[0][3], b"a" * 64)
-        self.assertIn(b"204 No Content", web.response)
+        self.assertEqual(calls[0][0:2], ("POST", "/api/control/reset"))
+        self.assertEqual(calls[0][2]["x-bmcu-control-action"], "reset")
+        self.assertEqual(calls[0][3], body)
+        self.assertIn(b"202 Accepted", web.response)
+
+    def test_device_key_route_is_gone(self):
+        web = web_ui.WebUI(lambda _: None,
+                           settings_provider=lambda *_: ("204 No Content",
+                                                         "text/plain", b""))
+        web.client = Client(
+            b"POST /api/device-key HTTP/1.1\r\n"
+            b"Content-Length: 0\r\n\r\n")
+        web.poll()
+        self.assertIn(b"405", web.response)
 
     def test_transport_post_is_routed_to_settings_provider(self):
         calls = []

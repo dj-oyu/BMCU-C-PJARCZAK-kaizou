@@ -21,6 +21,7 @@ export const MessageType = {
   ControlResult: 49,
   Ping: 64,
   Pong: 65,
+  Heartbeat: 66,
   ProtocolError: 127,
 } as const
 export type MessageType = (typeof MessageType)[keyof typeof MessageType]
@@ -93,6 +94,8 @@ export const DropReason = {
   JournalCorrupt: 3,
   RecordTooLarge: 4,
   RetentionEviction: 5,
+  NetworkGap: 6,
+  ReceiverOverflow: 7,
 } as const
 export type DropReason = (typeof DropReason)[keyof typeof DropReason]
 
@@ -203,6 +206,11 @@ export const Diag = {
   RejectOversizeCount: 87,
   RejectRingErrorCount: 88,
   DurableDepthMax: 89,
+  UdpDatagramsSent: 90,
+  UdpRecordsSent: 91,
+  UdpSendErrors: 92,
+  UdpBytesSent: 93,
+  HeartbeatsSent: 94,
 } as const
 export type Diag = (typeof Diag)[keyof typeof Diag]
 

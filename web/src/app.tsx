@@ -8,7 +8,7 @@ import {
   type Telemetry,
 } from './api/decode'
 import { readSnapshot, type LinkSnapshot } from './api/snapshot'
-import { DeviceKeyCard } from './components/DeviceKeyCard'
+import { ResetCard } from './components/ResetCard'
 import { EndpointCard } from './components/EndpointCard'
 import { DiagnosticsPage } from './pages/DiagnosticsPage'
 import { OperatePage } from './pages/OperatePage'
@@ -168,7 +168,7 @@ export function App() {
             <h2>Connection settings</h2>
             <div class="settings-grid">
               <EndpointCard />
-              <DeviceKeyCard />
+              <ResetCard links={links} />
             </div>
           </section>
         )}

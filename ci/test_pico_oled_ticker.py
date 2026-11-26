@@ -706,7 +706,7 @@ class SingleSourceOfTruthTests(unittest.TestCase):
         self.assertEqual(assigned - set(oled_ticker.LINK_WORDS), set())
 
     def test_every_uplink_state_the_client_defines_has_a_symbol(self):
-        source = (ROOT / "pico" / "bambuddy_binary_tcp.py").read_text(
+        source = (ROOT / "pico" / "bmcu_stream_udp.py").read_text(
             encoding="utf-8")
         states = set(re.findall(r'^[A-Z_]+ = "([a-z_]+)"$', source, re.M))
 
