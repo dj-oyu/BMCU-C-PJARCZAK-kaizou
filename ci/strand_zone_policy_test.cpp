@@ -320,6 +320,21 @@ static int test_claim_keeps_a_measured_front(void)
     return 0;
 }
 
+// A tail piece left in the branch does not come back with the next strand's
+// backward travel: it is detached.
+static int test_tail_piece_is_not_pulled_back(void)
+{
+    State s; reset(s);
+    step(s, 0, true); travel(s, 60, true);
+    step(s, 10, false);                          // runout at 70
+    travel(s, 20, false);                        // a new strand fed in behind it
+    travel(s, -200, false);                      // and pulled back out
+    CHECK(s.tail_known && s.front == 90 && s.zone == kTail, 201);
+    step(s, 10, true);                           // it comes back to the switch
+    CHECK(s.remnant && s.zone == kTail, 202);
+    return 0;
+}
+
 int main(void)
 {
     int rc = 0;
@@ -342,5 +357,6 @@ int main(void)
     if ((rc = test_passage_needs_consumption()) != 0) return rc;
     if ((rc = test_written_ahead()) != 0) return rc;
     if ((rc = test_claim_keeps_a_measured_front()) != 0) return rc;
+    if ((rc = test_tail_piece_is_not_pulled_back()) != 0) return rc;
     return 0;
 }

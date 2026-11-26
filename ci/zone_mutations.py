@@ -52,6 +52,9 @@ MUTATIONS = [
      "            s.dir_acc = c.dir_band;"),
     ("a claim drops the measured front (the proof can never fire)",
      "    if (s.exact && s.front_known && !s.tail_known)\n    {", "    if (false)\n    {"),
+    ("a tail piece is pulled back by backward travel",
+     "if (!s.tail_known || fwd_delta > 0) s.front = clamp(moved, -c.head, c.head);",
+     "s.front = clamp(moved, -c.head, c.head);"),
     ("a claim is never released by the unload",
      "    if (s.claimed && s.last_dir < 0 && s.front_known && s.front < c.down_clear)\n"
      "        s.claimed = 0u;", ""),

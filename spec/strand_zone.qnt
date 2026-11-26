@@ -95,7 +95,9 @@ module strand_zone {
         if (delta == 0) e0
         else {
           val moved = e0.front + delta
-          val f = if (e0.known) clamp(moved, -HEAD, HEAD) else e0.front
+          // a tail piece is pushed on by what follows, never pulled back
+          val f = if (e0.known and (not(e0.tailKnown) or delta > 0)) clamp(moved, -HEAD, HEAD)
+                  else e0.front
           // travel past the head while consuming, from an exact front
           val gain = if (e0.known and delta > 0 and e0.exact and consuming and moved > HEAD)
                        moved - (if (e0.front > HEAD) e0.front else HEAD)
@@ -535,6 +537,17 @@ module strand_zone {
       .then(claim(0))
       .then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
       .expect(lastProof and not(isDown(est.get(1).zone)))
+
+  // A tail piece left in the branch, a new strand fed in and pulled back
+  // behind it, a reboot: the piece must still be counted when the new strand
+  // reaches the switch and pushes it on. (Found by the CI simulation.)
+  run stubSurvivesBackAndRebootTest =
+    init.then(insert(2)).then(fwd(2)).then(fwd(2)).then(fwd(2)).then(fwd(2))
+      .then(runout(2))
+      .then(insert(2)).then(fwd(2)).then(back(2)).then(back(2))
+      .then(reboot)
+      .then(insert(2)).then(fwd(2)).then(fwd(2))
+      .expect(isDown(est.get(2).zone) and safety)
 
   // The review's stale-head path: channel 0 reached the head, then its sensor
   // failed and it was pulled back unseen. Channel 1 loads into the tube; more

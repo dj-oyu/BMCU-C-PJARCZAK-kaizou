@@ -148,7 +148,9 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
             if (s.front_known)
             {
                 const int32_t moved = s.front + fwd_delta;
-                s.front = clamp(moved, -c.head, c.head);
+                // A tail piece is no longer attached to what the wheel turns:
+                // a strand behind it can push it on, but nothing pulls it back.
+                if (!s.tail_known || fwd_delta > 0) s.front = clamp(moved, -c.head, c.head);
                 // Only measured travel to the head, from a front measured at
                 // the switch, and on past it while the printer consumes,
                 // counts as passage; a front placed there by restore or an
