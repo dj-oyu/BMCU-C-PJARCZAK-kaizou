@@ -4,7 +4,7 @@ Two failures of the same measurement. The BMCU drives its motor forward and
 the AS5600 measures how far the strand moves; the buffer tells whether
 anything downstream pushes back. A **jam** is drive that produces no travel.
 An **open outlet** (a PTFE tube off the filament hub, or a load the extruder
-never took) is travel that meets nothing. They sit in opposite corners of the
+never took) is travel that nothing takes. They sit in opposite corners of the
 same plane, and they must be told apart without one triggering the other.
 
 Status:
@@ -13,7 +13,7 @@ Status:
 |---|---|
 | jam latch release (§1.2) | implemented, `346783f`, sim-verified, not yet flashed |
 | jam detection by resistance (§1.3) | design, not implemented |
-| open outlet guard (§2) | design, not implemented |
+| open outlet guard (§2) | implemented, `4b552c9`, sim-verified, not checked on hardware |
 | specs | `spec/bmcu_merger.qnt` (latch release), `spec/strand_zone.qnt` module `outlet_guard` (guard + jam interaction) |
 
 ## 1. Jam
@@ -103,7 +103,7 @@ learned for this channel in normal feeding.
 - **Latch and release** as in §1.2: stop forward drive, raise `0xF06F`, clear
   on before_pull_back, send_out or key empty.
 - **No encoder, no verdict.** With the AS5600 bad the detector does not
-  evaluate (the open-outlet guard takes over its budget by time, §2.3).
+  evaluate.
 - The buffer reading stays as a supplementary signal for the extruder side
   only (demand), not as the jam criterion.
 
@@ -111,125 +111,164 @@ Open: the thresholds (dead band, fraction, window) need the recordings of
 normal on_use and of the 11-27 event fitted; the 20 s high-PWM LOW latch
 should become a special case of this rule rather than a second one.
 
-## 2. Open outlet (design)
+## 2. Open outlet (implemented, `4b552c9`)
+
+Code: `src/outlet_guard_policy.h` (header-only, host-tested by
+`ci/outlet_guard_policy_test.cpp`), wired in `src/Motion_control.cpp`
+(`outlet_sample`, `Motion_control_set_PWM`). Sim: `OpenOutlet` in
+`sim/tests/test_firmware_sensors.py`, about 50 mm out of the gap before the
+trip. Not yet checked on hardware.
 
 ### 2.1 The failure
 
 The PTFE tube can come off the filament hub by accident. The BMCU does not
-know: it keeps feeding as if loaded, and bare filament comes out of the open
-end. The same thing, from the firmware's side, happens when a load is never
-taken by the extruder: forward travel with nothing pushing back. The guard
-does not try to tell the two apart.
+know: it keeps feeding as if loaded, and bare filament comes out of the gap.
+A load the extruder never takes looks the same from the firmware's side:
+forward travel that nothing takes. The guard does not tell the two apart.
 
-### 2.2 Where free travel is normal
+### 2.2 Why not the buffer
 
-Exactly one stretch: the send path, from the channel's rest position to the
-extruder. It has a known length, `AMS_RETRACT_LEN` (0.60 m in this build;
-`BMCU_KEY_TO_HEAD_MM` in `src/Motion_control.cpp`, line ~532, derives the
-zone head from it, `kZoneConfig.head`). On the night of 2026-11-27 the loads
-took 34, 35, 41 and 41 s from send_out to the tip arriving.
+The first version of this design (`31fb2cd`) took back-pressure from the
+buffer leaving a band around its rest reading. The data says no: AMS-B ch3,
+printing on 2026-11-27, read PWM ~600, encoder 1.1 mm/s and pull 51 %
+(FULL_STATUS), against 50 % for free travel. A printing strand does not press
+the buffer, so in on_use the band cannot mean contact.
 
-Everywhere else (on_use, before_on_use's hold_load, the idle feed, the DM
-Stage-2 re-push) a strand that is coupled to the extruder raises the buffer
-within a few mm of push. Free travel there is a fault.
+What does tell them apart is speed. A printing extruder takes at most a few
+mm/s (an A1 mini hotend tops out near 25-28 mm³/s, about 11 mm/s of 1.75 mm
+filament), and a strand cannot travel faster than that for long unless
+something other than the extruder takes it: the buffer filling (bounded by
+its stroke) or an open outlet.
 
 ### 2.3 The count
 
-Per channel, `free`: forward travel since the last back-pressure.
+Per channel, `excess`: forward travel in excess of what the printer could
+have consumed.
 
-- Measured by the AS5600 forward delta. With the AS5600 bad, by time ×
-  commanded speed, which is at least the real travel: the guard then trips
-  early, never late.
-- **Back-pressure** (contact) is the buffer leaving its free band around the
-  channel's rest reading, either way: up (the BMCU pushing a coupled strand)
-  or down (the extruder pulling one). On the send path the buffer sits in
-  the band; that is what "free" means. The band is learned from the idle
-  reading; the width needs fitting to recordings.
-- Contact sets `free = 0`. Backward travel subtracts from it (floor 0): a
-  retract pulls back what it fed, including filament that came out of an
-  open outlet.
-- Mode changes do not reset it. A repeated send_out must not buy another
-  budget; only contact or a retract does.
+- Each AS5600 sample adds its forward travel (negative for a retract).
+- Outside send_out, and only while not latched, it is drained by the
+  consumption ceiling × dt (`BMCU_OUTLET_CONSUME_MM_S`, 12 mm/s). It never
+  goes below zero.
+- In send_out nothing drains: the strand is not in the extruder yet.
+- **Reset by back-pressure**, either of:
+  - the buffer pressed, pull ≥ 55 % (a coupled strand pushed);
+  - the buffer pulled, pull < 47 %, while the motor is not pushing (the
+    extruder pulling a strand the BMCU is not feeding; the same condition is
+    the resume, §2.5).
+
+  In on_use the drain, not the buffer, is what accounts for a printing
+  strand.
+- **Reset by leaving send_out** for anything but a retract (count and latch
+  both). In the recordings the printer goes from send_out (p 50) to
+  before_on_use (p 53) before the buffer presses, so judging the budget at
+  that mode change, as the first design did, would have stopped every good
+  load. The printer moves on only once its own sensor has the filament, so
+  that is the arrival. A send that ends some other way (idle) is the
+  printer's to retry, with a new budget.
+- **Kept through a retract**: send_out → pull keeps the count, and the pull
+  winds it back.
+- The mode is the motor's (`outlet_sample`): send, pull, and every other
+  motion that can push (on_use, before_on_use, the idle feed, DM autoload).
+- **No encoder, no verdict.** With the AS5600 bad the count is held at zero
+  and nothing trips; a latch already set stays until contact or key empty.
+  The time × commanded-speed fallback of the first design is not
+  implemented: PWM is not a speed command.
 
 ### 2.4 The budget
 
-| mode | budget |
-|---|---|
-| send_out | `AMS_RETRACT_LEN` + margin (margin order of 100-150 mm, fitted to the 34-41 s loads) |
-| on_use, before_on_use, any other forward motion | a few tens of mm (order of 30-40 mm) |
+| mode | budget | macro |
+|---|---|---|
+| send_out | `BMCU_KEY_TO_HEAD_MM` (720) + 150 mm | `BMCU_OUTLET_SEND_MARGIN_MM` |
+| any other forward motion | 40 mm (buffer stroke + margin) | `BMCU_OUTLET_USE_MM` |
 
-The budget is judged on every sample and on every mode change. A
-before_on_use that arrives with no contact since the send (the load was not
-taken) trips at once, which is intended. A tie-in with the strand zone is
-possible later (budget = `head − front` + margin when the front is exact), but
-the plain path length is enough and does not depend on the estimate.
+A send starts with the strand at or past the key switch, so the
+switch-to-head distance, not `AMS_RETRACT_LEN`, bounds the free stretch.
+The whole guard is `BMCU_OUTLET_GUARD` (default on); the ceiling is
+`BMCU_OUTLET_CONSUME_MM_S`. Thresholds in `kOutletConfig`: pressed 55 %,
+pulled 47 %, jam 40 %, jam disarm 3 s.
+
+On the night of 2026-11-27 the loads took 34, 35, 41 and 41 s from send_out
+to the tip arriving.
 
 ### 2.5 Trip, hold, resume
 
-- **Trip:** `free > budget(mode)`. Latch `outlet_open[ch]`; stop forward
-  drive on that channel. Retracts are still served. No human action is
-  needed and none is asked for. Report it (a diag counter and a wire flag
-  bit); whether to raise anything to the printer is open: `0xF06F` would
-  start the printer's unload, which is not what a reseating tube needs.
-- **Hold:** while latched nothing pushes, so `free` cannot grow (at most one
-  sample past the budget).
-- **Resume:** when the printer consumes, the filament in the tube draws the
-  tube back onto the hub and the BMCU feels back-pressure (torque) again,
-  here as tension: the extruder pulling a strand the BMCU is not feeding.
-  That contact clears the latch and `free`, and feeding resumes.
-- **Retract:** a retract that winds `free` back to 0 also clears it: the
-  strand is back where the count started (the send-path case, where nothing
-  is consumed and a human has to put the tube back).
-- Key empty clears it, as it does every other per-strand latch.
+- **Trip:** `excess > budget(mode)`. Latch per channel. While latched,
+  `Motion_control_set_PWM` turns every logical push (logical PWM < 0) on that
+  channel into a brake, whatever path asked for it (the pressure controller,
+  DM autoload, the idle feed). Retracts pass. Nothing is raised to the
+  printer.
+- **Hold:** latched, nothing pushes, and `excess` is not drained: only a
+  retract may take back what went out.
+- **Resume:** the printer consumes the spilled slack, the tube is drawn back
+  onto the hub, and the extruder then pulls on a strand the BMCU is not
+  feeding: pull < 47 % with the motor not pushing. That clears count and
+  latch; no human step.
+- **Unwind:** a retract that brings the count back to zero clears the latch
+  (the send-path case, where nothing is consumed and a human puts the tube
+  back).
+- **Key empty** clears it.
 
 ### 2.6 Interaction with jam detection
 
-- **The resume looks like a jam to the buffer.** When the guard has stopped
-  the motor and the printer consumes, the buffer is stretched at the moment
-  contact returns. Today's detector (below 40 % for 300 ms) would latch a jam
-  right there, raise `0xF06F` and send the printer into its unload cycle. So:
-  - with today's detector, the resume must reset `on_use_jam` and keep it
-    disarmed until the buffer has come back above the low threshold once;
-  - with the resistance detector (§1.3) the hazard is gone by construction:
-    nothing is driven while stopped, and the first drive after the resume
-    moves freely against a pulling extruder, which is the opposite of a jam.
-- **The latches are disjoint.** A jam is drive without travel, so it never
-  adds to `free`; an open outlet is travel without resistance, so it never
-  looks like a jam. While either latch holds the motor, the other is not
-  evaluated (the guard does not judge a mode change while a jam holds; the
-  count is judged again after the printer's recovery clears the jam).
-- With the AS5600 bad, a held strand makes the time-based count grow and the
-  guard trips: the wrong reason, the right action (stop).
+The jam detector is still the buffer one (below 40 % for
+`BMCU_ON_USE_JAM_HOLD_MS`) plus the 20 s high-PWM timer; §1.3 is still a
+design.
 
-Spec (`spec/strand_zone.qnt`, module `outlet_guard`, one channel; separate
-from `strand_zone` so the replayed zone traces do not change):
+- **While latched** both are held off (the jam window and the high-PWM timer
+  are reset as on key empty): the push is braked, so a low buffer and a long
+  high PWM say nothing about a jam.
+- **After a resume** the jam window stays disarmed until the buffer is back
+  at or above 40 %, or for 3 s. The resume *is* a pulled buffer, which the
+  detector would otherwise latch as a jam, raising `0xF06F` and sending the
+  printer into its unload cycle.
+- **The latches are disjoint in cause:** a jam is drive without travel, so it
+  adds nothing to `excess`; an open outlet is travel with nothing taking it.
 
-- `freeBounded`: unlatched in a forward mode, `free ≤ budget(mode)`; always
-  `free ≤ max budget + 1`. "Free feed never grows past the budget."
-- `spillCounted`: filament pushed out of the open outlet ≤ `free`, so the
-  spill is bounded by the same budget.
-- `latchesDisjoint`, `jamSound` (a jam latches only on a held strand, in
+### 2.7 Spec
+
+`spec/strand_zone.qnt`, module `outlet_guard`, one channel: a transcription
+of `outlet_guard::sample` and the on_use jam check, against a physical model
+(strand position, spill out of the gap, buffer compression and stretch, a
+consumption ceiling per sample). It is a separate module so the replayed
+`strand_zone` traces do not change; nothing replays this one against the
+header yet.
+
+- `freeBounded`: once judged in its mode and unlatched, the count is within
+  that mode's budget; it is always ≤ the largest budget + one sample.
+- `spillBounded`: filament out of the gap since the count was last zero is
+  bounded (travel outpaces the drain by feed − ceiling per sample).
+- `noFalseTrip`: the guard trips only if, since the count was last zero,
+  travel went uncoupled outside send_out or out of the gap. Printing at the
+  consumption ceiling, and a send that reaches the extruder before the
+  buffer presses, never trip.
+- `latchBrakes`, `jamSound` (a jam latches only on a held strand, in
   particular not at the resume), `jamReleasedByCommand` (send_out / pull
-  release the jam), `resumeOnContact` (contact always clears the guard).
-- Witnesses kept reachable: the guard trips, it resumes, the buffer is
-  stretched at the resume (where a buffer-based detector would misfire), a
-  real jam still latches, the send-path spill exceeds the on_use budget.
-- Scenarios: `detachMidPrintTest`, `notTakenTest`, `jamIsNotOpenTest`.
+  release a jam).
+- Witnesses kept reachable: trip, resume, unwind, a pulled buffer at the
+  resume, a real jam, a send-path spill past the on_use budget, and an
+  unbounded spill with the encoder bad (no encoder, no verdict).
+- Scenarios: `arrivalBeforePressTest`, `detachMidPrintTest`,
+  `sendNotTakenTest` (trip, retry with a fresh budget, unwind),
+  `jamIsNotOpenTest`.
 
 ```
 quint test spec/strand_zone.qnt --main=outlet_guard
 quint run  spec/strand_zone.qnt --main=outlet_guard --invariant=safety
 ```
 
-These are not yet in `.github/workflows/quint.yml`, which checks the default
-module only.
+Not yet in `.github/workflows/quint.yml`, which checks the default module
+only.
 
-### 2.7 Not covered
+### 2.8 Not covered
 
 - The guard does not know where the outlet came off; on the send path up to
-  the whole budget can come out before it trips. That is the price of the one
-  stretch where free travel is normal.
+  the whole budget (870 mm) can come out before it trips. That is the price
+  of the one stretch where free travel is normal.
+- A send the printer abandons and retries gets a fresh budget each time, so
+  repeated retries into an open outlet each let out up to a budget unless a
+  retract comes between them.
+- With the AS5600 bad there is no guard at all.
 - A tube that comes off and never reseats leaves the channel latched until a
   retract or a key-empty; the printer's own runout/clog handling then decides.
-- Thresholds (band, margin, on_use budget) are placeholders until fitted to
-  recordings.
+- The thresholds come from one printing reading and the simulator; they are
+  not yet checked on hardware.

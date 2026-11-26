@@ -203,6 +203,8 @@ the tube. A tube off the hub breaks that silently; the strand's travel then
 goes out of the open end and the front estimate runs ahead of a strand that
 is not in the tube (an over-report, so the zone stays sound). Detecting that
 state, stopping the push and resuming on back-pressure is the open-outlet
-guard of `FEED_RESISTANCE_DESIGN.md` §2, specified in the `outlet_guard`
-module of `spec/strand_zone.qnt`. It uses the same geometry: the send path,
-`head` here, is the one stretch where free travel is normal.
+guard of `FEED_RESISTANCE_DESIGN.md` §2 (`src/outlet_guard_policy.h`,
+`4b552c9`), specified in the `outlet_guard` module of `spec/strand_zone.qnt`.
+It uses the same geometry: the send path, the switch-to-head distance
+(`BMCU_KEY_TO_HEAD_MM`, `head` here), is the one stretch where free travel
+is normal.
