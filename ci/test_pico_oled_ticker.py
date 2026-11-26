@@ -100,6 +100,15 @@ class Frame:
     def vline(self, x, y, height, colour):
         self.shapes.append(("vline", x, y, height, colour))
 
+    def hline(self, x, y, width, colour):
+        self.shapes.append(("hline", x, y, width, colour))
+
+    def line(self, x0, y0, x1, y1, colour):
+        self.shapes.append(("line", x0, y0, x1, y1, colour))
+
+    def ellipse(self, x, y, xr, yr, colour, fill=False):
+        self.shapes.append(("ellipse", x, y, xr, yr, colour, fill))
+
     def pixel(self, x, y, colour):
         pass
 
@@ -173,13 +182,14 @@ class HeaderTests(unittest.TestCase):
             [Monitor("bmcu-a"), Monitor("bmcu-b", "stale")],
             wifi_state="online", wifi_rssi=-58, client_state="online")
 
-        self.assertEqual(line, "A+ B? -58 U+")
+        self.assertEqual(line, "A:ok B:old S:ok")
 
     def test_an_offline_station_shows_its_state_instead_of_a_stale_rssi(self):
         line = header_line([Monitor("bmcu-a")], wifi_state="connecting",
                            wifi_rssi=-58, client_state="backoff")
 
-        self.assertEqual(line, "A+ conn Ub")
+        # No station means no uplink either; say which one is missing.
+        self.assertEqual(line, "A:ok srv:wifi")
 
 
 class LinkPageTests(unittest.TestCase):
@@ -278,9 +288,9 @@ class TickerLoopTests(unittest.TestCase):
             ticker.service(now)
             seen.append(ticker.page)
 
-        self.assertEqual(seen, [oled_ticker.PAGE_OVERVIEW, 0, 1,
-                                oled_ticker.PAGE_HEALTH,
-                                oled_ticker.PAGE_OVERVIEW])
+        self.assertEqual(seen, [oled_ticker.PAGE_OVERVIEW,
+                                oled_ticker.PAGE_FLOW, 0, 1,
+                                oled_ticker.PAGE_HEALTH])
         self.assertEqual(ticker.page_index, 4)
 
     def test_the_overview_is_held_longer_than_the_drill_downs(self):
@@ -290,7 +300,7 @@ class TickerLoopTests(unittest.TestCase):
 
         self.assertEqual(ticker.page, oled_ticker.PAGE_OVERVIEW)
         ticker.service(10000)
-        self.assertEqual(ticker.page, 0)
+        self.assertEqual(ticker.page, oled_ticker.PAGE_FLOW)
 
     def test_a_link_that_never_answered_gets_no_detail_page(self):
         # An unplugged second BMCU must not cost five seconds of "no status"
@@ -299,7 +309,7 @@ class TickerLoopTests(unittest.TestCase):
             Monitor("bmcu-a", status=status()),
             Monitor("bmcu-b", "offline", status=None)])
 
-        self.assertEqual(ticker.next_page(oled_ticker.PAGE_OVERVIEW), 0)
+        self.assertEqual(ticker.next_page(oled_ticker.PAGE_FLOW), 0)
         self.assertEqual(ticker.next_page(0), oled_ticker.PAGE_HEALTH)
         self.assertEqual(ticker.next_page(oled_ticker.PAGE_HEALTH),
                          oled_ticker.PAGE_OVERVIEW)
@@ -542,6 +552,123 @@ class StillMarqueeTests(unittest.TestCase):
         self.assertLess(display.frame.lines[56][1], first)
 
 
+class ChannelWordTests(unittest.TestCase):
+    def word(self, index=0, **overrides):
+        return oled_ticker.overview_channel(index, status(**overrides))[0][2:]
+
+    def test_every_motion_has_a_word(self):
+        words = [self.word(motion=[motion, 0, 0, 0])
+                 for motion in range(1, len(oled_ticker.MOTION_WORDS))]
+
+        self.assertEqual(words, ["LOAD ", "FEED ", "UNLD ", "UNLD ",
+                                 "LOAD ", "STOP "])
+
+    def test_an_idle_channel_says_what_is_in_it(self):
+        self.assertEqual(self.word(), "EMPTY")
+        self.assertEqual(self.word(inserted_mask=1), "READY")
+        self.assertEqual(self.word(channel_flags=[
+            flags(loaded=True), flags(), flags(), flags()]), "SET  ")
+        self.assertEqual(self.word(channel_flags=[
+            flags(loaded=True, tail=True), flags(), flags(), flags()]),
+            "TAIL ")
+
+    def test_a_latch_outranks_motion_jam_first(self):
+        self.assertEqual(self.word(motion=[2, 0, 0, 0], channel_flags=[
+            flags(low=True, jam=True, dm=True), flags(), flags(), flags()]),
+            "JAM  ")
+        self.assertEqual(self.word(motion=[2, 0, 0, 0], channel_flags=[
+            flags(low=True), flags(), flags(), flags()]), "LOW  ")
+        self.assertEqual(self.word(channel_flags=[
+            flags(dm=True), flags(), flags(), flags()]), "LOAD!")
+
+    def test_every_word_is_five_wide(self):
+        tables = list(oled_ticker.LATCH_WORDS[1:]) + \
+            [word for word in oled_ticker.MOTION_WORDS if word] + [
+                oled_ticker.WORD_EMPTY, oled_ticker.WORD_READY,
+                oled_ticker.WORD_SET, oled_ticker.WORD_TAIL,
+                oled_ticker.WORD_UNKNOWN, oled_ticker.WORD_FAULT]
+
+        self.assertEqual({len(word) for word in tables}, {5})
+
+    def test_the_motion_words_follow_the_firmware_enum(self):
+        self.assertEqual(len(oled_ticker.MOTION_WORDS),
+                         len(oled_ticker.MOTION_CHARS))
+
+
+class FlowPageTests(unittest.TestCase):
+    def monitors(self, motion=0, loaded=True, pull=50):
+        return [Monitor("bmcu-a", status=status(
+                    inserted_mask=0b0011, motion=[0, motion, 0, 0],
+                    pull_pct=[0, pull, 0, 0],
+                    channel_flags=[flags(), flags(loaded=loaded), flags(),
+                                   flags()])),
+                Monitor("bmcu-b", "offline", status=None)]
+
+    def draw(self, monitors, tick=0):
+        frame = Frame()
+        oled_ticker.draw_flow(frame, monitors, tick)
+        return frame
+
+    def head_x(self, frame):
+        rects = [shape for shape in frame.shapes if shape[0] == "rect"]
+        return rects[-1][1]
+
+    def test_a_moving_channel_is_the_one_animated(self):
+        self.assertEqual(oled_ticker.flow_active(self.monitors(motion=2)),
+                         (0, 1, 2))
+
+    def test_an_idle_owner_is_still_drawn_as_connected(self):
+        self.assertEqual(oled_ticker.flow_active(self.monitors()), (0, 1, 0))
+        self.assertIsNone(oled_ticker.flow_active(
+            self.monitors(loaded=False)))
+
+    def test_the_head_sweeps_only_while_feeding(self):
+        feeding = self.monitors(motion=2)
+        self.assertNotEqual(self.head_x(self.draw(feeding, 0)),
+                            self.head_x(self.draw(feeding, 5)))
+        idle = self.monitors()
+        self.assertEqual(self.head_x(self.draw(idle, 0)),
+                         self.head_x(self.draw(idle, 5)))
+
+    def test_the_spring_follows_the_pull(self):
+        def spring_lines(pull):
+            frame = self.draw(self.monitors(pull=pull))
+            return len([shape for shape in frame.shapes
+                        if shape[0] == "line"])
+
+        self.assertGreater(spring_lines(100), spring_lines(0))
+
+    def test_an_offline_link_says_so_instead_of_spools(self):
+        frame = self.draw(self.monitors())
+
+        self.assertEqual(frame.texts[(16, 38)][0], "off")
+        spools = [shape for shape in frame.shapes if shape[0] == "ellipse"
+                  and shape[2] == oled_ticker.FLOW_SPOOL_Y[1]]
+        self.assertEqual(spools, [])
+
+    def test_the_flow_page_redraws_on_its_own_clock(self):
+        display = Display()
+        ticker = OledTicker(display, self.monitors(motion=2))
+        ticker.page = oled_ticker.PAGE_FLOW
+        ticker._page_ms_mark = 0
+        for step in range(0, 1000, 50):
+            ticker.service(step)
+
+        self.assertGreaterEqual(ticker._flow_tick, 4)
+
+    def test_a_short_panel_skips_the_flow_page(self):
+        ticker = OledTicker(Display(pages=4), self.monitors())
+
+        self.assertNotEqual(ticker.next_page(oled_ticker.PAGE_OVERVIEW),
+                            oled_ticker.PAGE_FLOW)
+
+    def test_flow_ms_zero_removes_the_page(self):
+        ticker = OledTicker(Display(), self.monitors(), flow_ms=0)
+
+        self.assertNotEqual(ticker.next_page(oled_ticker.PAGE_OVERVIEW),
+                            oled_ticker.PAGE_FLOW)
+
+
 class SingleSourceOfTruthTests(unittest.TestCase):
     """The panel abbreviates canonical tables; it must not fork them."""
 
@@ -567,8 +694,8 @@ class SingleSourceOfTruthTests(unittest.TestCase):
         # merely offline would be indistinguishable from a silent one.
         from binary_api import LINK_STATE_CODES
 
-        self.assertEqual(set(oled_ticker.LINK_CHARS), set(LINK_STATE_CODES))
-        symbols = list(oled_ticker.LINK_CHARS.values())
+        self.assertEqual(set(oled_ticker.LINK_WORDS), set(LINK_STATE_CODES))
+        symbols = list(oled_ticker.LINK_WORDS.values())
         self.assertEqual(len(symbols), len(set(symbols)))
 
     def test_every_link_state_the_monitor_assigns_has_a_symbol(self):
@@ -576,7 +703,7 @@ class SingleSourceOfTruthTests(unittest.TestCase):
         assigned = set(re.findall(r'link_state\s*=\s*"([a-z_]+)"', source))
 
         self.assertTrue(assigned)
-        self.assertEqual(assigned - set(oled_ticker.LINK_CHARS), set())
+        self.assertEqual(assigned - set(oled_ticker.LINK_WORDS), set())
 
     def test_every_uplink_state_the_client_defines_has_a_symbol(self):
         source = (ROOT / "pico" / "bambuddy_binary_tcp.py").read_text(
@@ -584,7 +711,7 @@ class SingleSourceOfTruthTests(unittest.TestCase):
         states = set(re.findall(r'^[A-Z_]+ = "([a-z_]+)"$', source, re.M))
 
         self.assertTrue(states)
-        self.assertEqual(states - set(oled_ticker.UPLINK_CHARS), set())
+        self.assertEqual(states - set(oled_ticker.UPLINK_WORDS), set())
 
     def test_the_motion_table_matches_the_firmware_enum(self):
         # _filament_motion is the AMS enum, not part of the link registry, so
@@ -897,7 +1024,7 @@ class ChipDisplayTests(unittest.TestCase):
             [Monitor("bmcu-a")], wifi_state="online", wifi_rssi=-58,
             client_state="online", chip_masks=[oled_ticker.CHIP_LATCH])
 
-        self.assertEqual(line, "A+L -58 U+")
+        self.assertEqual(line, "A:ok! srv:ok")
 
     def test_both_lit_chips_order_latch_before_stuck(self):
         # LATCH first: it is the actively-harmful one -- the motor is
@@ -907,7 +1034,14 @@ class ChipDisplayTests(unittest.TestCase):
         mask = oled_ticker.CHIP_STUCK | oled_ticker.CHIP_LATCH
         line = header_line([Monitor("bmcu-a")], chip_masks=[mask])
 
-        self.assertIn("A+LS", line)
+        self.assertIn("A:ok!", line)
+        self.assertNotIn("!!", line)
+
+    def test_crowded_chips_shorten_the_server_label_not_its_state(self):
+        line = header_line([Monitor("bmcu-a"), Monitor("bmcu-b")],
+                           client_state="online", chip_masks=[1, 2])
+
+        self.assertEqual(line, "A:ok! B:ok! S:ok")
 
     def test_a_lit_chip_changes_the_digest_so_the_header_redraws(self):
         # content_digest is what gates _draw_body; a chip that toggled but
@@ -1032,6 +1166,21 @@ class HealthPageTests(unittest.TestCase):
         self.assertIn("up 3d05h", lines)
 
 
+class OverviewFooterTests(unittest.TestCase):
+    def test_a_healthy_link_has_no_footer(self):
+        self.assertEqual(oled_ticker.overview_footer(
+            Monitor(status=status()), 8), "")
+
+    def test_a_control_error_is_named(self):
+        self.assertEqual(oled_ticker.overview_footer(
+            Monitor(status=status(control_error=3)), 8), "ERR 3")
+
+    def test_wire_errors_show_when_there_is_no_control_error(self):
+        monitor = Monitor(status=status())
+        monitor.decoder.crc_errors = 4
+        self.assertEqual(oled_ticker.overview_footer(monitor, 8), "wire4")
+
+
 class OverviewTests(unittest.TestCase):
     def a_and_b(self, b_status=None, b_state="offline"):
         return [Monitor("bmcu-a", status=status(
@@ -1051,26 +1200,33 @@ class OverviewTests(unittest.TestCase):
     def test_both_links_get_a_column(self):
         frame = self.draw(self.a_and_b(status(), "online"))
 
-        self.assertEqual(frame.texts[(0, 8)][0], "A+ s2")
-        self.assertEqual(frame.texts[(64, 8)][0], "B+ s-")
-        self.assertEqual(frame.texts[(0, 16)][0], "1#. ")
-        self.assertEqual(frame.texts[(0, 24)][0], "2*U ")
+        self.assertEqual(frame.texts[(0, 8)][0], "A:ok")
+        self.assertEqual(frame.texts[(64, 8)][0], "B:ok")
+        self.assertEqual(frame.texts[(0, 16)][0], "1 READY")
+        self.assertEqual(frame.texts[(0, 24)][0], "2>FEED ")
+        self.assertEqual(frame.texts[(0, 32)][0], "3 EMPTY")
         self.assertIn(("vline", 63, 8, 48, 1), frame.shapes)
 
     def test_a_link_with_no_status_says_its_state_instead_of_empty_bars(self):
         frame = self.draw(self.a_and_b())
 
-        self.assertEqual(frame.texts[(64, 8)][0], "Bx")
-        self.assertEqual(frame.texts[(64, 16)][0], "offline")
+        self.assertEqual(frame.texts[(64, 8)][0], "B:off")
+        self.assertEqual(frame.texts[(64, 16)][0], "no data")
         self.assertNotIn((64, 24), frame.texts)
         self.assertFalse([shape for shape in frame.shapes
                           if shape[0] == "rect" and shape[1] >= 64])
 
-    def test_the_pull_bar_is_proportional(self):
+    def test_two_columns_draw_the_pull_as_a_level_meter(self):
         frame = self.draw(self.a_and_b())
-        # Channel 2 at 62 %: bar from x=32 to x=61, 28 inner pixels.
-        self.assertIn(("rect", 32, 25, 30, 6, 1), frame.shapes)
-        self.assertIn(("fill_rect", 33, 26, 28 * 62 // 100, 4, 1),
+        # Channel 2 at 62 %: 5 px meter, 3 px filled from the bottom.
+        self.assertIn(("rect", 57, 24, 5, 7, 1), frame.shapes)
+        self.assertIn(("fill_rect", 58, 27, 3, 3, 1), frame.shapes)
+
+    def test_a_single_column_draws_the_pull_as_a_bar(self):
+        frame = self.draw([self.a_and_b()[0]])
+        # Bar from x=56 to x=101, 44 inner pixels.
+        self.assertIn(("rect", 56, 25, 46, 6, 1), frame.shapes)
+        self.assertIn(("fill_rect", 57, 26, 44 * 62 // 100, 4, 1),
                       frame.shapes)
 
     def test_a_latched_channel_is_drawn_inverted_with_its_letter(self):
@@ -1079,19 +1235,19 @@ class OverviewTests(unittest.TestCase):
                                   flags(), flags(), flags()])
         frame = self.draw(self.a_and_b(b, "online"))
 
-        self.assertEqual(frame.texts[(64, 16)], ("1*UJ", 0))
-        self.assertIn(("fill_rect", 64, 16, 31, 8, 1), frame.shapes)
+        self.assertEqual(frame.texts[(64, 16)], ("1>JAM  ", 0))
+        self.assertIn(("fill_rect", 64, 16, 55, 8, 1), frame.shapes)
 
     def test_a_motion_fault_alone_still_marks_the_channel(self):
         row = oled_ticker.overview_channel(0, status(
             motion_fault=[1, 0, 0, 0]))
 
-        self.assertEqual(row, ("1..F", True, 0))
+        self.assertEqual(row, ("1 FAULT", True, 0))
 
     def test_old_firmware_without_flags_is_unknown_not_empty(self):
         row = oled_ticker.overview_channel(0, status(channel_flags=None))
 
-        self.assertEqual(row[0][1], "?")
+        self.assertEqual(row[0], "1 ?    ")
 
     def test_a_single_link_uses_the_whole_width_and_prints_the_number(self):
         frame = self.draw([self.a_and_b()[0]])
