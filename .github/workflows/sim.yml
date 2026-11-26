@@ -1,0 +1,79 @@
+name: Firmware simulator
+
+# Runs a built firmware image, unmodified, on the CH32V203 machine model in
+# sim/ and checks what the outside world observes (monitor link, printer bus,
+# RS-485 direction pin).  See sim/README.md.
+
+on:
+  push:
+    branches:
+      - main
+      - alpha
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+            ~/.platformio/packages
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO and Unicorn
+        run: python -m pip install --upgrade platformio "unicorn==2.1.1"
+
+      # The configuration the two real loaders run: AMS-A, retract 0.60 m,
+      # standard profile, DM autoload on, filament RGB off.
+      - name: Build the AMS-A firmware image
+        env:
+          BAMBU_BUS_AMS_NUM: "0"
+          AMS_RETRACT_LEN: "0.60f"
+          BMCU_DM_TWO_MICROSWITCH: "1"
+          BMCU_ONLINE_LED_FILAMENT_RGB: "0"
+          DBMCU_P1S: "0"
+          BMCU_SOFT_LOAD: "0"
+        run: |
+          pio run -e fw
+          mkdir -p sim-out
+          cp .pio/build/fw/firmware.bin sim-out/ams_a_060.bin
+
+      # A skip here would mean the image test did not run; treat it as failure,
+      # the same rule host-tests.yml applies.
+      - name: Simulator tests
+        env:
+          BMCU_SIM_IMAGE: sim-out/ams_a_060.bin
+        run: |
+          set -o pipefail
+          python -m unittest discover -s sim/tests -t . -v 2>&1 | tee sim-tests.log
+          if grep -qE '\.\.\. skipped|\(skipped=[0-9]+\)' sim-tests.log; then
+            echo "::error::a simulator test was skipped"
+            exit 1
+          fi
+
+      - name: Record a trace
+        run: python -m sim.run sim-out/ams_a_060.bin --seconds 8 --trace sim-out/trace.jsonl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-trace-${{ github.sha }}
+          path: sim-out/
+          retention-days: 14

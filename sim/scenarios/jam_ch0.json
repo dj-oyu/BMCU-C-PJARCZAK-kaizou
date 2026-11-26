@@ -1,0 +1,5 @@
+{"seconds": 8, "events": [
+  {"t": 0.0, "do": "jam", "ch": 0, "at_mm": 40},
+  {"t": 1.0, "do": "insert", "ch": 0},
+  {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 00 ff 00", "every": 0.25, "until": 8}
+]}
