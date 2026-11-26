@@ -58,8 +58,10 @@ class Params:
     key_v_external: float = 1.55           # outer (spool-side) switch only -- assumed
     key_v_internal: float = 1.20           # inner switch only -- assumed
     key_v_both: float = 1.85
-    s1_mm: float = -40.0                   # outer switch, upstream of the drive gear
-    s2_mm: float = -10.0                   # inner switch, just before the gear
+    # Order along the path (user, 2026-11-26): outer switch -> gear -> inner
+    # switch.  The distances are assumptions.
+    s1_mm: float = -10.0                   # outer switch, upstream of the drive gear
+    s2_mm: float = 15.0                    # inner switch, downstream of the gear
     gear_mm: float = 0.0                   # filament must reach here to be driven
     head_mm: float = 800.0                 # gear to extruder entry (path length)
     user_push_mm_s: float = 15.0           # a hand feeding filament in until the gear bites
@@ -355,13 +357,13 @@ class World:
     def insert(self, ch, tip_mm=None, push_s=None):
         """A user feeds filament in from the spool side.
 
-        The front appears at tip_mm (default: just past the inner switch) and
+        The front appears at tip_mm (default: just past the outer switch) and
         the hand keeps pushing toward the gear for push_s seconds.  Whether the
         firmware spins the gear while the hand is still there decides whether
         the filament is caught, as on the real feeder.
         """
         c = self.channels[ch]
-        c.tip_mm = self.p.s2_mm + 2.0 if tip_mm is None else tip_mm
+        c.tip_mm = self.p.s1_mm + 2.0 if tip_mm is None else tip_mm
         c.tail_mm = None
         c.push_until_s = self.m.cycles / HCLK_HZ + (self.p.user_push_s if push_s is None else push_s)
 

@@ -20,8 +20,10 @@ IMAGE = os.environ.get("BMCU_SIM_IMAGE")
 
 CALIBRATE = {"seconds": 14, "events": [{"t": 3.0, "do": "calibration_gesture", "until": 14}]}
 LOAD = {"seconds": 6, "events": [{"t": 1.0, "do": "insert", "ch": 0}]}
-# Filament pushed only past the outer switch and let go (no push toward the gear).
-SHORT_INSERT = {"seconds": 7.5, "events": [{"t": 1.0, "do": "insert", "ch": 0, "tip_mm": -35, "push_s": 0}]}
+# Filament pushed past the outer switch but not to the gear, then pulled out
+# just after the firmware gives up (the auto-load times out 5 s after ks=2).
+SHORT_INSERT = {"seconds": 7.5, "events": [{"t": 1.0, "do": "insert", "ch": 0, "tip_mm": -5, "push_s": 0},
+                                           {"t": 6.2, "do": "remove", "ch": 0}]}
 RECORDING = Path(__file__).resolve().parent.parent / "recordings" / "2026-11-25_ams_a_short_insert.jsonl"
 
 
@@ -73,19 +75,32 @@ class CalibrateThenLoad(unittest.TestCase):
             self.assertEqual(bus.nacks, 0, f"ch{bus.ch}")
 
 
-    def test_short_insertion_times_out_like_the_recording(self):
-        # Pico recording, AMS-A, 2026-11-25 10:03:56-10:04:20: ch0 went online,
-        # then the auto-load gave up with exactly this record, twice.
-        recorded = [json.loads(line).get("event", {}) for line in RECORDING.read_text().splitlines()]
-        recorded = [e for e in recorded if e.get("event_name") == "dm_teardown" and e["dm_auto_state"] == 2]
-        self.assertEqual(len(recorded), 2)
+    def test_short_insertion_matches_the_recording(self):
+        # Pico recording, AMS-A, 2026-11-25 10:03:56-10:04:20, twice: online,
+        # auto-load gives up (state 2, cause 3, ks 2, 5000 ms), filament gone
+        # (state 3, cause 4, ks 0), offline.
+        lines = RECORDING.read_text().splitlines()
+        recorded = [json.loads(line).get("event", {}) for line in lines]
+        recorded = [e for e in recorded if e.get("event_name") in ("dm_teardown", "state_change")]
         got = [msg["data"] for msg in self.short[1].messages
-               if msg.get("type") == "event" and msg["data"].get("event_name") == "dm_teardown"]
-        self.assertTrue(got, "no dm_teardown")
-        for key in ("slot", "dm_auto_state", "cause", "ks"):
-            self.assertEqual(got[0][key], recorded[0][key], key)
-        self.assertAlmostEqual(got[0]["held_ms"], recorded[0]["held_ms"], delta=50)
+               if msg.get("type") == "event" and msg["data"].get("event_name") in ("dm_teardown", "state_change")
+               and msg["sim_ms"] > 500]
+        fields = ("event_name", "slot", "field", "previous_value", "value", "dm_auto_state", "cause", "ks")
 
+        def shape(events):
+            return [{k: e[k] for k in fields if k in e} for e in events]
+        # The recording starts with online 0->1.  The simulated firmware puts
+        # that change in the STATUS reply to the GET_STATUS the monitor sent
+        # 15 ms after insertion (GET_STATUS consumes pending changes without
+        # an event), so it is checked through STATUS instead.
+        self.assertEqual(recorded[0]["field"], 3)
+        self.assertTrue(any(msg["data"]["online_mask"] & 1 for msg in self.short[1].messages
+                            if msg.get("type") == "status" and 1000 <= msg["sim_ms"] < 6000))
+        self.assertEqual(shape(got), shape(recorded[1:4]))
+        self.assertAlmostEqual(got[0]["held_ms"], recorded[1]["held_ms"], delta=50)
+        # Not compared: held_ms of the second teardown.  The device reports 0
+        # (the filament had left the outer switch within a millisecond of the
+        # timeout, both times); here the hand pulls it 0.1 s later.
 
 if __name__ == "__main__":
     unittest.main()
