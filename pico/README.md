@@ -63,7 +63,8 @@ to keep it quiet. Panel geometry, address, page dwell, and marquee speed are the
 
 On a 128x64 panel the top row is always the header (`A+ B? -58 U+`: per-link
 state, RSSI, uplink), the bottom row is always a marquee (lit alerts first, then
-the most recent decoded events), and the six rows between rotate:
+the most recent decoded events, or the IP when there are none; copy that fits
+the row is held still instead of scrolling), and the six rows between rotate:
 
 1. **Overview** (`OLED_OVERVIEW_MS`, 10 s): every link side by side, one 64 px
    column each (the full width when only one link is configured). Each column

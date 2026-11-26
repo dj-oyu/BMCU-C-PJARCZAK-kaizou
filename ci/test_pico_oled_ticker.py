@@ -118,6 +118,9 @@ class Display:
         self.written.append(page)
 
 
+LONG_EVENT = "A ch3 DM st1 cause3 ks0 1200ms"
+
+
 class ChannelLineTests(unittest.TestCase):
     def test_a_loaded_channel_shows_the_merger_owner_and_its_pull(self):
         line = channel_line(0, status(
@@ -250,6 +253,7 @@ class TickerLoopTests(unittest.TestCase):
 
     def test_the_marquee_scrolls_without_touching_the_body_pages(self):
         ticker, display, _ = self.ticker()
+        ticker._messages = [LONG_EVENT]
         for step in range(8):
             ticker.service(step)
         display.written.clear()
@@ -445,6 +449,7 @@ class TickerLoopTests(unittest.TestCase):
     def test_a_recovered_panel_redraws_every_page(self):
         display = Display()
         ticker, _, _ = self.ticker(display)
+        ticker._messages = [LONG_EVENT]  # a scrolling marquee keeps flushing
         for step in range(8):
             ticker.service(step)
         display.written.clear()
@@ -482,6 +487,59 @@ class TickerLoopTests(unittest.TestCase):
         self.assertEqual(sorted(display.written), [0, 1, 2, 3])
         # Header, two body rows, marquee -- nothing drawn past the panel.
         self.assertEqual(sorted(display.frame.lines), [0, 8, 16, 24])
+
+
+class StillMarqueeTests(unittest.TestCase):
+    """Copy that fits the row is held still; only wider copy scrolls."""
+
+    class Wifi:
+        state = "online"
+        ip = "192.168.100.215"
+
+    def run_steps(self, ticker, start, count):
+        for step in range(count):
+            ticker.service(start + step * ticker.marquee_ms)
+
+    def test_an_idle_panel_shows_the_whole_ip_still(self):
+        display = Display()
+        ticker = OledTicker(display, [Monitor(status=status())],
+                            wifi=self.Wifi())
+        self.run_steps(ticker, 0, 80)
+
+        self.assertEqual(display.frame.lines[56], ("192.168.100.215", 0))
+
+    def test_a_still_marquee_does_not_keep_rewriting_its_page(self):
+        display = Display()
+        ticker = OledTicker(display, [Monitor(status=status())],
+                            wifi=self.Wifi())
+        self.run_steps(ticker, 0, 80)
+        display.written.clear()
+
+        self.run_steps(ticker, 80 * ticker.marquee_ms, 20)
+
+        self.assertNotIn(7, display.written)
+
+    def test_a_new_event_still_replaces_the_still_line(self):
+        monitor = Monitor(status=status())
+        display = Display()
+        ticker = OledTicker(display, [monitor], wifi=self.Wifi())
+        self.run_steps(ticker, 0, 10)
+        monitor.events.append({"event_name": "state_change", "field": 4,
+                               "slot": 0, "previous_value": 0, "value": 2})
+
+        self.run_steps(ticker, 10 * ticker.marquee_ms, 80)
+
+        self.assertEqual(display.frame.lines[56][0], "A ch1 mot 0>2")
+
+    def test_wider_copy_still_scrolls(self):
+        display = Display()
+        ticker = OledTicker(display, [Monitor(status=status())])
+        ticker._messages = [LONG_EVENT]
+        self.run_steps(ticker, 0, 5)
+        first = display.frame.lines[56][1]
+        self.run_steps(ticker, 5 * ticker.marquee_ms, 5)
+
+        self.assertLess(display.frame.lines[56][1], first)
 
 
 class SingleSourceOfTruthTests(unittest.TestCase):

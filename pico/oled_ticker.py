@@ -869,9 +869,9 @@ class OledTicker:
         if alerts:
             return "   ".join(alerts)
         if not self._messages:
-            return "%s  %s" % (
-                " ".join(link_badge(m) for m in self.monitors),
-                getattr(self.wifi, "ip", None) or "no events yet")
+            # The header already carries the link badges; on its own the IP
+            # fits the row and is drawn still (see _step_marquee).
+            return getattr(self.wifi, "ip", None) or "no events yet"
         return "   ".join(self._messages)
 
     # -- drawing -----------------------------------------------------------
@@ -955,7 +955,8 @@ class OledTicker:
         frame = self.display.frame
         top = (self.rows - 1) * 8
         frame.fill_rect(0, top, self.display.width, 8, 0)
-        frame.text(self._marquee, self._marquee_x, top)
+        frame.text(self._marquee,
+                   0 if self._marquee_fits() else self._marquee_x, top)
         self._dirty |= 1 << (self.rows - 1)
 
     # -- loop --------------------------------------------------------------
@@ -1015,16 +1016,33 @@ class OledTicker:
         self._flush_one_page()
 
     def _step_marquee(self):
+        """Scroll copy wider than the panel; hold copy that fits still.
+
+        Text that fits is drawn at x=0 and left alone: scrolling an IP
+        address means any one glance (or photo) catches it cut in half.
+        _marquee_x keeps ticking as the clock that decides when to re-read
+        the copy, so a new event still replaces it on the same schedule.
+        """
         if self._marquee_x <= -(len(self._marquee) * 8):
             # Re-read the copy only at the wrap: swapping it mid-scroll would
             # make the line jump while somebody is still reading it.
+            previous = self._marquee
             self._marquee = self.marquee_text()
             self._marquee_x = self.display.width
+            if self._marquee_fits() and self._marquee == previous:
+                return  # still the same still line; nothing to redraw
         else:
             if not self._marquee:
                 self._marquee = self.marquee_text()
-            self._marquee_x -= self.marquee_step
+                self._marquee_x -= self.marquee_step
+            else:
+                self._marquee_x -= self.marquee_step
+                if self._marquee_fits():
+                    return
         self._draw_marquee()
+
+    def _marquee_fits(self):
+        return len(self._marquee) * 8 <= self.display.width
 
     def _flush_one_page(self):
         """At most one 128-byte I2C write per loop iteration."""
