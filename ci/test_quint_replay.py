@@ -44,6 +44,17 @@ class QuintSpecTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0,
                                  result.stdout[-3000:] + result.stderr)
 
+    def test_scenarios_hold(self):
+        # Fixed paths through the passage proof (`run ...Test` in the spec).
+        result = _quint("test", str(ZONE), "--backend=typescript")
+        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr)
+
+    def test_feed_weighted_safety(self):
+        result = _quint("run", str(ZONE), "--backend=typescript", "--step=stepFeed",
+                        "--invariant=safety", "--max-samples=300", "--max-steps=80",
+                        "--seed=7")
+        self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr)
+
     def test_known_behaviours_stay_reachable(self):
         for spec, names in WITNESSES.items():
             for witness in names:
@@ -61,20 +72,13 @@ class QuintSpecTests(unittest.TestCase):
                                             "--seed", "11"]), 0)
 
     @unittest.skipIf(shutil.which("zig") is None, "zig compiler is not installed")
-    def test_replay_catches_a_planted_bug(self):
+    def test_replay_catches_every_planted_bug(self):
         # The replay is only worth something if it fails on a wrong header:
-        # drop the remnant a new strand behind an old tail must leave.
-        import quint_replay
-        header = (ROOT / "src" / "strand_zone_policy.h").read_text(encoding="utf-8")
-        planted = "if (s.front_known && s.front > 0) s.remnant = 1u;"
-        self.assertIn(planted, header)
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "strand_zone_policy.h").write_text(header.replace(planted, ""),
-                                                             encoding="utf-8")
-            rc = quint_replay.main(["--spec", "zone", "--traces", "150", "--steps", "50",
-                                    "--seed", "11"], [f"-I{tmp}"])
-        self.assertEqual(rc, 1)
-
+        # each mutation in ci/zone_mutations.py breaks one rule.
+        import zone_mutations
+        results = zone_mutations.run(300, 80, "21")
+        missed = [name for name, rc in results if rc != 1]
+        self.assertEqual(missed, [], "the zone replay no longer reaches these rules")
 
 if __name__ == "__main__":
     unittest.main()

@@ -78,6 +78,10 @@ jobs:
           for s in bmcu_merger strand_zone; do
             quint run spec/$s.qnt --invariant=safety --max-samples=20000 --max-steps=50
           done
+          # Weighted towards loads that reach the head (the passage proof).
+          quint run spec/strand_zone.qnt --step=stepFeed --invariant=safety \
+            --max-samples=20000 --max-steps=80
+          quint test spec/strand_zone.qnt
 
       # Expected to be violated: each witness is a behaviour the firmware does
       # not prevent (or an over-report the estimate is allowed). A witness that

@@ -58,13 +58,13 @@ module strand_zone {
   type Est = {
     front: int, bootFront: int, lastDir: int, key: bool, keyValid: bool, known: bool,
     tailKnown: bool, remnant: bool, exact: bool, reachedHead: bool, passage: bool,
-    consumed: int, zone: int,
+    consumed: int, claimed: bool, zone: int,
   }
 
   pure val EST0: Est = {
     front: 0, bootFront: 0, lastDir: 0, key: false, keyValid: true, known: false,
     tailKnown: false, remnant: false, exact: false, reachedHead: false, passage: false,
-    consumed: 0, zone: NONE,
+    consumed: 0, claimed: false, zone: NONE,
   }
 
   pure def clamp(v: int, lo: int, hi: int): int =
@@ -74,6 +74,7 @@ module strand_zone {
     if (e.remnant) TAIL
     else if (e.tailKnown) (if (e.known and e.front > 0) TAIL else UPSTREAM)
     else if (not(e.known)) (if (e.key) UPSTREAM else NONE)
+    else if (e.claimed) DOWNSTREAM
     else if (e.zone == DOWNSTREAM) (if (e.front < CLEAR) UPSTREAM else DOWNSTREAM)
     else if (e.front > SET) DOWNSTREAM
     else UPSTREAM
@@ -137,7 +138,10 @@ module strand_zone {
         else e1
       } else e1
     val e3 = { ...e2, key: keyNow }
-    { ...e3, zone: deriveZone(e3) }
+    val e4 = if (e3.claimed and e3.lastDir < 0 and e3.known and e3.front < CLEAR)
+               { ...e3, claimed: false }
+             else e3
+    { ...e4, zone: deriveZone(e4) }
   }
 
   // strand_zone::take_passage: true once per arrival at the head.
@@ -149,7 +153,7 @@ module strand_zone {
   pure def proofOne(e: Est): Est = {
     val inTube = e.known and e.front > SET
     val e1 = { ...e, remnant: false,
-               reachedHead: false, passage: false, consumed: 0,
+               reachedHead: false, passage: false, consumed: 0, claimed: false,
                exact: if (inTube) false else e.exact,
                front: if (inTube) SET else e.front,
                zone: if (e.zone == DOWNSTREAM) UPSTREAM else e.zone }
@@ -159,6 +163,10 @@ module strand_zone {
   // strand_zone::claim
   pure def claimOne(e: Est): Est =
     if (isDown(e.zone)) e
+    else if (e.exact and e.known and not(e.tailKnown)) {
+      val e1 = { ...e, claimed: true }
+      { ...e1, zone: deriveZone(e1) }
+    }
     else {
       val e1 = { ...e, known: true, front: HEAD, exact: false, reachedHead: false,
                  passage: false, consumed: 0, tailKnown: false }
@@ -434,6 +442,28 @@ module strand_zone {
     }
   }
 
+  // Same actions, weighted towards loads that reach the head and get
+  // consumed (the passage proof), for the random simulator: `quint run
+  // --step=stepFeed`. The default step rarely gets a strand there.
+  action stepFeed = {
+    nondet x = CHANNELS.oneOf()
+    nondet dice = 0.to(19).oneOf()
+    any {
+      all { dice < 3, insert(x) },
+      fwd(x), fwd(x), fwd(x), fwd(x), fwd(x), fwd(x),
+      all { dice < 8, back(x) },
+      all { dice < 2, runout(x) },
+      all { dice < 3, consume(x) },
+      all { dice < 2, float(x) },
+      all { dice < 1, asFail(x) },
+      all { dice < 6, asRecover(x) },
+      all { dice < 12, claim(x) },
+      all { dice < 6, release },
+      all { dice < 1, reboot },
+      all { dice < 1, loseRecord },
+    }
+  }
+
   // ---------------------------------------------------------------- invariants
 
   // Never under-reports: anything physically past the junction reads as
@@ -465,4 +495,58 @@ module strand_zone {
   val witnessNoDoubleDown: bool =
     CHANNELS.forall(a => CHANNELS.forall(b =>
       (a != b) implies not(physDown.get(a) and physDown.get(b))))
+
+  // ---------------------------------------------------------------- scenarios
+  // Fixed paths through the passage proof, which random traces rarely reach.
+  // `quint test` checks each keeps `safety`; ci/quint_replay.py replays their
+  // ITF traces against the header like the random ones.
+
+  // Channel 1 runs out with its tail piece in its own branch; channel 0 loads
+  // to the head and is consumed. The proof fires, and must keep 1's piece.
+  run proofKeepsBranchStubTest =
+    init.then(insert(1)).then(fwd(1)).then(fwd(1)).then(fwd(1)).then(fwd(1))
+      .then(runout(1))
+      .then(insert(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .then(claim(0))
+      .then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .expect(est.get(0).reachedHead and est.get(1).tailKnown and isDown(est.get(1).zone))
+      .then(release).then(insert(1)).then(fwd(1)).then(fwd(1))
+      .expect(est.get(1).remnant and safety)
+
+  // Channel 1 leaves a tail piece in the tube; channel 0's passage pushes it
+  // out at the nozzle.
+  run proofClearsTubeRemnantTest =
+    init.then(insert(1)).then(fwd(1)).then(fwd(1)).then(fwd(1)).then(fwd(1))
+      .then(fwd(1)).then(fwd(1)).then(fwd(1)).then(runout(1))
+      .then(insert(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .then(claim(0))
+      .then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .expect(not(rem.get(1)) and est.get(0).reachedHead and safety)
+
+  // Channel 1's sensor fails while it is pushed: the estimate guesses
+  // downstream though the strand stays in its branch. Channel 0 passes and
+  // clears the guess.
+  run proofClearsUnseenGuessTest =
+    init.then(insert(1)).then(fwd(1)).then(fwd(1)).then(fwd(1)).then(fwd(1))
+      .then(asFail(1)).then(fwd(1))
+      .expect(est.get(1).zone == DOWNSTREAM)
+      .then(asRecover(1)).then(back(1))
+      .then(insert(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .then(claim(0))
+      .then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .expect(lastProof and not(isDown(est.get(1).zone)))
+
+  // The review's stale-head path: channel 0 reached the head, then its sensor
+  // failed and it was pulled back unseen. Channel 1 loads into the tube; more
+  // samples of channel 0 must not prove anything.
+  run staleHeadProvesNothingTest =
+    init.then(insert(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .then(claim(0))
+      .then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0)).then(fwd(0))
+      .then(asFail(0)).then(back(0)).then(back(0)).then(back(0)).then(back(0))
+      .then(release)
+      .then(insert(1)).then(fwd(1)).then(fwd(1)).then(fwd(1)).then(fwd(1))
+      .then(fwd(1)).then(fwd(1)).then(fwd(1))
+      .then(float(0)).then(back(0))
+      .expect(isDown(est.get(1).zone) and safety)
 }

@@ -301,6 +301,25 @@ static int test_written_ahead(void)
     return 0;
 }
 
+// The merger is usually taken with the strand parked: the claim keeps the
+// measured front, so the send that follows can prove passage, and the zone
+// reads downstream until the unload brings it back.
+static int test_claim_keeps_a_measured_front(void)
+{
+    State s; reset(s);
+    step(s, 0, true); travel(s, 120, true);
+    CHECK(claim(s, C) && s.zone == kDownstream && s.front == 120 && s.exact, 191);
+    travel(s, 620, true);                        // send, then consumed past the head
+    CHECK(take_passage(s, C), 192);
+    travel(s, -600, true);                       // the unload
+    CHECK(s.zone == kUpstream && !s.claimed, 193);
+    State u; reset(u);
+    update(u, C, 0, false, true, true, false);   // assumed front: put at the head
+    u.zone = kUpstream; u.front = 100;
+    CHECK(claim(u, C) && u.front == C.head && !u.claimed, 194);
+    return 0;
+}
+
 int main(void)
 {
     int rc = 0;
@@ -322,5 +341,6 @@ int main(void)
     if ((rc = test_short_stub_becomes_remnant()) != 0) return rc;
     if ((rc = test_passage_needs_consumption()) != 0) return rc;
     if ((rc = test_written_ahead()) != 0) return rc;
+    if ((rc = test_claim_keeps_a_measured_front()) != 0) return rc;
     return 0;
 }

@@ -21,7 +21,7 @@
 //   <trace> <step> <action> <ch> <delta> <measured> <driving> <key> <owner>
 //   then, for each spec channel:
 //   <zone> <front> <known> <tail_known> <remnant> <exact> <reached_head>
-//   <last_dir> <key> <key_valid>
+//   <last_dir> <key> <key_valid> <claimed>
 // `key` after <driving> is the switch reading of <ch> after the step. A line
 // "reset <trace>" starts a new trace. ci/quint_replay.py writes this format.
 
@@ -125,7 +125,8 @@ bool apply(Machine& m, const char* action, int ch, int delta, bool measured, boo
 
 struct Expect
 {
-    int zone, front, known, tail_known, remnant, exact, reached_head, last_dir, key, key_valid;
+    int zone, front, known, tail_known, remnant, exact, reached_head, last_dir, key, key_valid,
+        claimed;
 };
 
 bool same(const strand_zone::State& s, const Expect& e)
@@ -135,16 +136,17 @@ bool same(const strand_zone::State& s, const Expect& e)
            (!e.known || s.front == e.front * kScale) && s.tail_known == e.tail_known &&
            s.remnant == e.remnant && s.exact == e.exact &&
            s.reached_head == e.reached_head && s.last_dir == e.last_dir && s.key == e.key &&
-           s.key_valid == e.key_valid;
+           s.key_valid == e.key_valid && s.claimed == e.claimed;
 }
 
 void print_state(const char* who, int ch, const strand_zone::State& s)
 {
     fprintf(stderr,
             "  %-8s ch%d zone=%d front=%d known=%d tail=%d remnant=%d exact=%d head=%d "
-            "dir=%d key=%d key_valid=%d (front in counts, %d per spec unit)\n",
+            "dir=%d key=%d key_valid=%d claimed=%d (front in counts, %d per spec unit)\n",
             who, ch, s.zone, static_cast<int>(s.front), s.front_known, s.tail_known, s.remnant,
-            s.exact, s.reached_head, s.last_dir, s.key, s.key_valid, static_cast<int>(kScale));
+            s.exact, s.reached_head, s.last_dir, s.key, s.key_valid, s.claimed,
+            static_cast<int>(kScale));
 }
 
 }
@@ -179,9 +181,9 @@ int main(void)
         {
             Expect& e = exp[i];
             int n = 0;
-            if (sscanf(p, "%d %d %d %d %d %d %d %d %d %d%n", &e.zone, &e.front, &e.known,
+            if (sscanf(p, "%d %d %d %d %d %d %d %d %d %d %d%n", &e.zone, &e.front, &e.known,
                        &e.tail_known, &e.remnant, &e.exact, &e.reached_head, &e.last_dir,
-                       &e.key, &e.key_valid, &n) != 10)
+                       &e.key, &e.key_valid, &e.claimed, &n) != 11)
             {
                 fprintf(stderr, "bad line: %s", line);
                 return 2;
@@ -229,6 +231,7 @@ int main(void)
             s.last_dir = static_cast<int8_t>(exp[i].last_dir);
             s.key = static_cast<uint8_t>(exp[i].key);
             s.key_valid = static_cast<uint8_t>(exp[i].key_valid);
+            s.claimed = static_cast<uint8_t>(exp[i].claimed);
             print_state("spec:", i, s);
             print_state("firmware:", i, m.zone[i]);
             return 1;

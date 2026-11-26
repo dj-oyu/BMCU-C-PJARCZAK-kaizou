@@ -64,6 +64,8 @@ struct State
     uint8_t reached_head; // measured travel from an exact front reached the head,
                           // and the printer consumed `consume` past it
     uint8_t passage;      // reached_head just went 0 -> 1; take_passage() consumes it
+    uint8_t claimed;      // the merger was taken with the front measured: downstream
+                          // until measured back upstream, front left as measured
     uint8_t zone;
 };
 
@@ -76,6 +78,7 @@ inline uint8_t derive_zone(const State& s, const Config& c)
         // record keeps it across a reboot.
         return (s.front_known && s.front > 0) ? kTail : kUpstream;
     if (!s.front_known) return s.key ? kUpstream : kNone;
+    if (s.claimed) return kDownstream;
     if (s.zone == kDownstream) return (s.front < c.down_clear) ? kUpstream : kDownstream;
     return (s.front > c.down_set) ? kDownstream : kUpstream;
 }
@@ -95,6 +98,7 @@ inline void reset(State& s)
     s.exact = 0u;
     s.reached_head = 0u;
     s.passage = 0u;
+    s.claimed = 0u;
     s.zone = kNone;
 }
 
@@ -244,6 +248,11 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
     }
     s.key = key;
 
+    // A claimed strand counts as downstream until travel shows it went back
+    // upstream (an unload, a hand pulling it out).
+    if (s.claimed && s.last_dir < 0 && s.front_known && s.front < c.down_clear)
+        s.claimed = 0u;
+
     s.zone = derive_zone(s, c);
     return s.zone != before;
 }
@@ -278,6 +287,7 @@ inline uint8_t passage_proof(State* all, const Config& c, uint8_t ch)
         s.reached_head = 0u;
         s.passage = 0u;
         s.consumed = 0;
+        s.claimed = 0u;
         if (in_tube)
         {
             // At most the junction: the tube is clear, but a strand may sit
@@ -294,9 +304,20 @@ inline uint8_t passage_proof(State* all, const Config& c, uint8_t ch)
 }
 
 // The merger was acquired by this channel: owning the tube means using it.
+// A front measured from a switch edge is kept as it is -- the merger is
+// usually taken with the strand still parked, and the send that follows is
+// the measured travel the passage proof needs -- and the zone reads
+// DOWNSTREAM until travel brings it back. An unknown or assumed front is put
+// at the head.
 inline bool claim(State& s, const Config& c)
 {
     if (is_downstream(s.zone)) return false;
+    if (s.exact && s.front_known && !s.tail_known)
+    {
+        s.claimed = 1u;
+        s.zone = derive_zone(s, c);
+        return true;
+    }
     s.front_known = 1u;
     s.front = c.head;
     s.exact = 0u;

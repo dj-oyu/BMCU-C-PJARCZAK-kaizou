@@ -77,10 +77,20 @@ Updated every AS5600 sample with the signed forward delta and the debounced
 |---|---|---|
 | `NONE` | no front known, switch empty | no |
 | `UPSTREAM` | front known, short of the merger | no |
-| `DOWNSTREAM` | front past `down_set` (hysteresis to `down_clear`), or owning the merger | yes |
+| `DOWNSTREAM` | front past `down_set` (hysteresis to `down_clear`), or claimed | yes |
 | `TAIL` | a tail piece past the switch, or a remnant | yes |
 
 The wire flag (BmcuChannelFlags bit 7) is `zone ∈ {DOWNSTREAM, TAIL}`.
+
+**Claim.** Taking the merger (before_on_use / on_use) makes the channel
+downstream: owning the tube means using it. The merger is usually taken with
+the strand still parked, so a front measured from a switch edge is kept as it
+is and only marked `claimed`; the send that follows is the measured travel the
+passage proof needs. The mark is dropped when sustained backward travel brings
+the front below `down_clear` (the unload). An unknown or assumed front is put
+at the head instead. (An earlier version put every claimed front at the head,
+which dropped `exact` and so meant the proof could never fire on an ordinary
+load; replaying traces through the proof found it.)
 
 ## Clearing a strand the BMCU cannot see: proof by passage
 

@@ -94,20 +94,25 @@ def zone_lines(path: Path) -> list[str]:
             fields += [_int(e["zone"]), _int(e["front"]), int(e["known"]),
                        int(e["tailKnown"]), int(e["remnant"]), int(e["exact"]),
                        int(e["reachedHead"]), _int(e["lastDir"]), int(e["key"]),
-                       int(e["keyValid"])]
+                       int(e["keyValid"]), int(e["claimed"])]
         lines.append(" ".join(str(x) for x in fields))
     return lines
 
 
+# spec, adapter, line converter, step actions to draw traces from (the traces
+# are split evenly between them).
 SPECS = {
     "merger": (ROOT / "spec" / "bmcu_merger.qnt", ROOT / "ci" / "quint_replay_adapter.cpp",
-               merger_lines),
+               merger_lines, ["step"]),
+    # stepFeed weights loads that reach the head, so the passage proof is
+    # replayed too; the default step almost never gets there.
     "zone": (ROOT / "spec" / "strand_zone.qnt", ROOT / "ci" / "zone_replay_adapter.cpp",
-             zone_lines),
+             zone_lines, ["step", "stepFeed"]),
 }
 
 
-def generate(spec: Path, itf_dir: Path, traces: int, steps: int, seed: str | None) -> None:
+def generate(spec: Path, itf_dir: Path, traces: int, steps: int, seed: str | None,
+             step: str = "step") -> None:
     quint = shutil.which("quint")
     if quint is None:
         raise SystemExit("quint is not installed (npm i -g @informalsystems/quint)")
@@ -115,7 +120,8 @@ def generate(spec: Path, itf_dir: Path, traces: int, steps: int, seed: str | Non
     command = [
         quint, "run", str(spec), "--backend=typescript", "--mbt",
         f"--max-samples={traces}", f"--n-traces={traces}", f"--max-steps={steps}",
-        "--invariant=safety", f"--out-itf={itf_dir}/trace_{{seq}}.itf.json",
+        f"--step={step}", "--invariant=safety",
+        f"--out-itf={itf_dir}/{step}_{{seq}}.itf.json",
     ]
     if seed:
         command.append(f"--seed={seed}")
@@ -123,6 +129,19 @@ def generate(spec: Path, itf_dir: Path, traces: int, steps: int, seed: str | Non
     if result.returncode != 0:
         sys.stderr.write(result.stdout[-4000:] + result.stderr[-2000:])
         raise SystemExit(f"quint run {spec.name} failed (safety violated or spec error)")
+
+
+def scenarios(spec: Path, itf_dir: Path) -> None:
+    """The spec's fixed `run ...Test` paths, as ITF traces next to the random
+    ones: they reach what random traces rarely do (the passage proof)."""
+    quint = shutil.which("quint")
+    result = subprocess.run(
+        [quint, "test", str(spec), "--backend=typescript",
+         f"--out-itf={itf_dir}/run_{{test}}_{{seq}}.itf.json"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout[-4000:] + result.stderr[-2000:])
+        raise SystemExit(f"quint test {spec.name} failed")
 
 
 def build_adapter(source: Path, out: Path, defines: list[str] = ()) -> None:
@@ -137,12 +156,16 @@ def build_adapter(source: Path, out: Path, defines: list[str] = ()) -> None:
 
 
 def replay(kind: str, args, tmp_path: Path, defines: list[str] = ()) -> int:
-    spec, adapter, to_lines = SPECS[kind]
+    spec, adapter, to_lines, steps = SPECS[kind]
     itf_dir = args.itf_dir
     if itf_dir is None:
         itf_dir = tmp_path / f"itf-{kind}"
         itf_dir.mkdir()
-        generate(spec, itf_dir, args.traces, args.steps, args.seed)
+        share = max(1, args.traces // len(steps))
+        for step in steps:
+            generate(spec, itf_dir, share, args.steps, args.seed, step)
+        if kind == "zone":
+            scenarios(spec, itf_dir)
     files = sorted(itf_dir.glob("*.itf.json"))
     if not files:
         raise SystemExit(f"no ITF traces in {itf_dir}")
