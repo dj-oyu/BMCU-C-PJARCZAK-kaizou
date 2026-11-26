@@ -47,12 +47,18 @@ OLED_HEIGHT = 64
 # Kept below full drive because the header and body rows are a static image for
 # hours: 0xFF on an always-on panel is how OLEDs burn in.
 OLED_CONTRAST = 0x7F
-# Pages rotate overview -> one detail page per answering link -> network.
+# Pages rotate overview -> flow -> one detail page per answering link ->
+# network.
 # The overview (both BMCUs side by side) is held for OLED_OVERVIEW_MS, every
 # other page for OLED_PAGE_MS; contents are redrawn at most every
 # OLED_REFRESH_MS, and only when something on them changed.
 OLED_PAGE_MS = 5000
 OLED_OVERVIEW_MS = 10000
+# The animated flow page (spools, buffer, printer head) follows the overview.
+# Each frame redraws the six body pages over I2C, so OLED_FLOW_FRAME_MS is
+# also its bus cost. OLED_FLOW_MS = 0 removes the page.
+OLED_FLOW_MS = 10000
+OLED_FLOW_FRAME_MS = 200
 OLED_REFRESH_MS = 1000
 # Marquee speed: pixels per step, one step per interval. 4 px / 120 ms reads at
 # about four characters a second.

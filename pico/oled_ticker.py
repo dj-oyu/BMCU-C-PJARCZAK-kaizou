@@ -10,27 +10,37 @@ the layout is testable on CPython; only OledTicker touches I2C.
 
 Layout on a 128x64 panel (16 columns, 8 rows of the built-in 8x8 font):
 
-    row 0      header: link states + chips, Wi-Fi, uplink  (always visible)
+    row 0      header: `A:ok B:off srv:ok` -- each link, the bambuddy server
     rows 1..6  the rotating page
-    row 7      the marquee: alerts, then the latest events (always scrolling)
+    row 7      the marquee: alerts, then the latest events, else the IP
 
-The pages rotate overview -> one detail page per link that has reported a
-STATUS -> network/health, and back. A link that never answered gets no detail
-page of its own (the overview already says it is down), so an unplugged second
-BMCU costs no dead air.
+Anything a passer-by reads is a word, not a code. Codes stay on the detail
+page, which is for debugging.
+
+The pages rotate overview -> flow -> one detail page per link that has
+reported a STATUS -> network/health, and back. A link that never answered
+gets no detail page of its own (the overview already says it is down), so an
+unplugged second BMCU costs no dead air.
 
 Overview: every link side by side, one column each (64 px for two links, the
 whole width for one). A column reads
 
-    A+ s2          link letter, link state, the channel feeding the printer
-    1*U |=====|    per channel: slot, owner, motion, latch, then the buffer
-    2#. |==   |    pull as a bar with a tick at the 50 % centre; a channel
-    3.. |     |    with any latch set is drawn inverted so it reads from
-    4.. |     |    across the room
-    E0 c0          control error, link wire errors (crc + framing + gaps)
+    A:ok           link and its state
+    1 READY #      per channel: slot, `>` on the channel holding the merger
+    2>FEED  #      (the one wired to the printer), one state word, and the
+    3 EMPTY #      buffer pull as a small level meter (a bar with the number
+    4 JAM   #      when one link has the whole width)
+    ERR 3          only when there is something to say
 
-Owner is `T` (tail past the online key, merger still held), `*` (owns the
-merger), `#` (inserted, not owner), `.` (empty), `?` (firmware too old to say).
+The word is the most urgent of: JAM, LOW (low-pull latch), LOAD! (autoload
+failed), FAULT; then the motion: LOAD, FEED (printing), UNLD, STOP; then what
+sits idle in the channel: TAIL, SET (owns the merger), READY, EMPTY. A latched
+channel's text is drawn inverted.
+
+Flow: a moving picture -- spools per link (spoke turning on the active one,
+a latched one blinking), the active filament path marching toward the
+printer or back, the buffer as a spring following its pull, and the toolhead
+sweeping while the channel feeds. See the flow section below.
 
 Detail (one per link) is the dense text view; a channel row reads `1*#oK2U 85LJ`:
 
@@ -59,15 +69,34 @@ import bambuddy_binary_tcp as tcp
 # pull_back, before_on_use, stop_on_use.
 MOTION_CHARS = ".SU<Pb="
 # Every state BMCUMonitor can assign, and every uplink state the client class
-# defines. A state with no symbol here would fall through to "?" and read as
-# `stale`, so ci/test_pico_oled_ticker.py asserts both tables stay complete
-# against their sources rather than trusting this list to be maintained.
-LINK_CHARS = {"online": "+", "resyncing": "~", "stale": "?",
-              "incompatible": "!", "offline": "x", "unknown": "-"}
-UPLINK_CHARS = {tcp.ONLINE: "+", tcp.DISABLED: "-", tcp.WIFI_WAIT: "w",
-                tcp.BACKOFF: "b", tcp.CONNECTING: "c",
-                tcp.CHALLENGE_WAIT: "h", tcp.HELLO_SEND: "h",
-                tcp.ACCEPT_WAIT: "a"}
+# defines, as the word the header and overview print. Anything a passer-by
+# reads is a word: a row of one-letter codes only means something with the
+# table in hand. A state missing here would fall through to "?", so
+# ci/test_pico_oled_ticker.py asserts both tables stay complete against their
+# sources rather than trusting this list to be maintained.
+LINK_WORDS = {"online": "ok", "resyncing": "sync", "stale": "old",
+              "incompatible": "bad", "offline": "off", "unknown": "--"}
+UPLINK_WORDS = {tcp.ONLINE: "ok", tcp.DISABLED: "off", tcp.WIFI_WAIT: "wifi",
+                tcp.BACKOFF: "wait", tcp.CONNECTING: "conn",
+                tcp.CHALLENGE_WAIT: "auth", tcp.HELLO_SEND: "auth",
+                tcp.ACCEPT_WAIT: "auth"}
+# One word per channel, padded to five so rows line up without a per-row
+# ljust(). Indexed by motion (_filament_motion in src/ams.h): idle, send_out,
+# on_use, before_pull_back, pull_back, before_on_use, stop_on_use. Idle is
+# None: what an idle channel is depends on what is sitting in it.
+MOTION_WORDS = (None, "LOAD ", "FEED ", "UNLD ", "UNLD ", "LOAD ", "STOP ")
+WORD_EMPTY = "EMPTY"
+WORD_READY = "READY"
+WORD_SET = "SET  "
+WORD_TAIL = "TAIL "
+WORD_UNKNOWN = "?    "
+# Latches outrank motion. Indexed by low | jam << 1 | dm << 2, most urgent
+# first: a jam is a motor pushing on a blockage now; the low latch has stopped
+# the motor; a DM autoload failure is a load that gave up.
+LATCH_WORDS = ("", "LOW  ", "JAM  ", "JAM  ", "LOAD!", "LOW  ", "JAM  ",
+               "JAM  ")
+WORD_FAULT = "FAULT"
+
 # Abbreviations of the canonical state_field ids. The ids themselves are
 # generated into docs/bmcu_link_enum_registry.json from
 # src/bmcu_link_protocol.h; only the short spellings are local to the panel.
@@ -80,18 +109,14 @@ DEFAULT_COLUMNS = 16
 SLOT_LABELS = ("1", "2", "3", "4")
 KS_LABELS = ("K0", "K1", "K2", "K3")
 LATCH_LABELS = ("", "L", "J", "LJ", "D", "LD", "JD", "LJD")
-# The overview has room for one latch letter per channel, so it shows the most
-# urgent one. A jam is a motor pushing against a blockage right now; the low
-# latch has stopped the motor; a DM autoload failure is a load that gave up; a
-# motion fault is the policy's own complaint. The detail page lists them all.
-OVERVIEW_LATCH = ("", "L", "J", "J", "D", "L", "J", "J")
 # Pseudo page ids; a non-negative page is an index into the monitors.
 PAGE_OVERVIEW = -1
 PAGE_HEALTH = -2
+PAGE_FLOW = -3
 # Pixel geometry of one overview channel row: four characters of text, then the
 # pull bar up to just short of the column's right edge (the last pixel column
 # of the left half is the divider between links).
-OVERVIEW_TEXT_PX = 32
+OVERVIEW_TEXT_PX = 56
 OVERVIEW_DIGITS_MIN_WIDTH = 96
 
 # -- alert chips ---------------------------------------------------------
@@ -163,10 +188,6 @@ CHIP_COUNT = 2
 # the print continues (10.7). STUCK second: a parked buffer skew is wrong
 # but nothing is actively being dragged.
 CHIP_NAMES = ("LATCH", "STUCK")
-# Indexed by a 2-bit mask (bit0 LATCH, bit1 STUCK). Built once per distinct
-# combination like LATCH_LABELS above, rather than concatenated per bit on
-# every header/marquee rebuild.
-CHIP_SUFFIXES = ("", "L", "S", "LS")
 # How long a chip condition has to hold, continuously, before it lights.
 # On a link the printer is actively polling, STATUS arrives at roughly
 # 12.5 Hz (the interval in src/pressure_event_policy.h), so CHIP_HOLD_MS
@@ -294,32 +315,37 @@ def link_letter(link_id):
     return link_id[-1].upper() if link_id else "?"
 
 
-def link_badge(monitor):
-    return link_letter(getattr(monitor, "link_id", "")) + \
-        LINK_CHARS.get(getattr(monitor, "link_state", None), "?")
+def link_word(monitor):
+    """`A:ok`, `B:off` -- the link and its state, readable without a key."""
+    return link_letter(getattr(monitor, "link_id", "")) + ":" + \
+        LINK_WORDS.get(getattr(monitor, "link_state", None), "?")
 
 
 def header_line(monitors, wifi_state=None, wifi_rssi=None, client_state=None,
                 chip_masks=None, columns=DEFAULT_COLUMNS):
-    """The header, with each link's badge followed by its lit chip letters.
+    """`A:ok B:off S:ok`: each link, then the server (bambuddy) uplink.
 
-    chip_masks is a per-monitor list of 0..3 (see CHIP_LATCH/CHIP_STUCK).
-    The header is the one line drawn on every page, so this is where the
-    chips have to land to stay visible regardless of which page is up --
-    same as the link and uplink state that already live here.
+    chip_masks is a per-monitor list of 0..3 (see CHIP_LATCH/CHIP_STUCK). A
+    lit chip adds `!` after its link: the header is the one line drawn on
+    every page, so the flag has to live here, while the marquee spells out
+    which chip and which channel. The RSSI moved to the network page; it is
+    accepted here only so existing callers keep working.
     """
     parts = []
     for index in range(len(monitors)):
         mask = chip_masks[index] if chip_masks and index < len(chip_masks) \
             else 0
-        parts.append(link_badge(monitors[index]) + CHIP_SUFFIXES[mask])
-    if wifi_state == "online":
-        # The RSSI is the number that moves; the word "online" is not.
-        parts.append("%d" % wifi_rssi if wifi_rssi is not None else "wifi")
+        parts.append(link_word(monitors[index]) + ("!" if mask else ""))
+    if wifi_state is not None and wifi_state != "online":
+        uplink = "wifi"
     else:
-        parts.append((wifi_state or "no wifi")[:4])
-    parts.append("U" + UPLINK_CHARS.get(client_state, "~"))
-    return _fit(" ".join(parts), columns)
+        uplink = UPLINK_WORDS.get(client_state, "?")
+    line = " ".join(parts)
+    # `srv` (the bambuddy server) when it fits, `S` when chips crowd it out:
+    # the state word matters more than the label.
+    if len(line) + 5 + len(uplink) <= columns:
+        return line + " srv:" + uplink
+    return _fit(line + " S:" + uplink, columns)
 
 
 def channel_line(index, status, columns=DEFAULT_COLUMNS):
@@ -402,62 +428,84 @@ def wire_error_total(monitor):
 
 def overview_title(monitor, columns):
     status = getattr(monitor, "status", None)
-    badge = link_badge(monitor)
+    badge = link_word(monitor)
     if not status:
         # The state word goes on the row below (overview_idle), where it has
         # the whole column instead of what is left after the badge.
         return badge
-    slot = status.get("current_slot", 0xFF)
-    return _fit(badge + " s" + ("-" if slot > 3 else SLOT_LABELS[slot]),
-                columns)
+    # The channel feeding the printer is marked on its own row (`>`), so the
+    # title is just the link and its state.
+    return _fit(badge, columns)
+
+
+def channel_word(index, status, flags):
+    """The one word that matters most for a channel right now.
+
+    Latch, then motion, then what is sitting in the channel. Always five
+    characters (the tables are pre-padded), so callers never pad.
+    """
+    if flags:
+        latch = LATCH_WORDS[(1 if flags["low_latch"] else 0) |
+                            (2 if flags["jam_latch"] else 0) |
+                            (4 if flags["dm_fail_latch"] else 0)]
+        if latch:
+            return latch, True
+    faults = status.get("motion_fault") or ()
+    if index < len(faults) and faults[index]:
+        return WORD_FAULT, True
+    motion_list = status.get("motion") or ()
+    motion = motion_list[index] if index < len(motion_list) else 0
+    if 0 < motion < len(MOTION_WORDS):
+        return MOTION_WORDS[motion], False
+    if not flags:
+        return WORD_UNKNOWN, False
+    if flags["tail"]:
+        return WORD_TAIL, False
+    if flags["loaded"]:
+        return WORD_SET, False
+    if (status.get("inserted_mask", 0) >> index) & 1:
+        return WORD_READY, False
+    return WORD_EMPTY, False
 
 
 def overview_channel(index, status):
-    """(four characters, latched, pull) for one overview channel row.
+    """(text, latched, pull) for one overview channel row, e.g. `1>FEED `.
 
-    Returns None when there is no STATUS to draw from: the column then shows
-    the link state in its title and leaves the rows empty rather than drawing
-    four bars of zero that would read as "empty and healthy".
+    `>` marks the channel that owns the shared merger, i.e. the one wired
+    through to the printer. Returns None when there is no STATUS to draw
+    from: the column then shows the link state instead of rows that would
+    read as "empty and healthy".
     """
     if not status:
         return None
     flags_list = status.get("channel_flags") or ()
     flags = flags_list[index] if index < len(flags_list) else None
-    inserted = (status.get("inserted_mask", 0) >> index) & 1
-    if flags:
-        owner = "T" if flags["tail"] else ("*" if flags["loaded"] else
-                                           ("#" if inserted else "."))
-        latch_bits = (1 if flags["low_latch"] else 0) | \
-            (2 if flags["jam_latch"] else 0) | \
-            (4 if flags["dm_fail_latch"] else 0)
-    else:
-        owner = "?"
-        latch_bits = 0
-    latch = OVERVIEW_LATCH[latch_bits]
-    faults = status.get("motion_fault") or ()
-    if not latch and index < len(faults) and faults[index]:
-        latch = "F"
-    motion_list = status.get("motion") or ()
-    motion = motion_list[index] if index < len(motion_list) else 0
-    motion = MOTION_CHARS[motion] if 0 <= motion < len(MOTION_CHARS) else "?"
+    word, latched = channel_word(index, status, flags)
+    owner = ">" if flags and (flags["loaded"] or flags["tail"]) else " "
     pull_list = status.get("pull_pct") or ()
     pull = pull_list[index] if index < len(pull_list) else 0
     pull = 0 if pull < 0 else (100 if pull > 100 else pull)
-    return ("%s%s%s%s" % (SLOT_LABELS[index], owner, motion, latch or " "),
-            bool(latch), pull)
+    return SLOT_LABELS[index] + owner + word, latched, pull
 
 
 def overview_idle(monitor, columns):
     """What a column says in place of its channels while it has no STATUS."""
-    return _fit(getattr(monitor, "link_state", None) or "no data", columns)
+    # The title already carries the state word (`B:off`).
+    return _fit("no data", columns)
 
 
 def overview_footer(monitor, columns):
     status = getattr(monitor, "status", None)
     if not status:
         return ""
-    return _fit("E%d c%d" % (status.get("control_error", 0),
-                             wire_error_total(monitor)), columns)
+    # Blank while healthy: a row of zeros is one more thing to decode.
+    control = status.get("control_error", 0)
+    if control:
+        return _fit("ERR %d" % control, columns)
+    wire = wire_error_total(monitor)
+    if wire:
+        return _fit("wire%d" % wire, columns)
+    return ""
 
 
 def _uptime_text(seconds):
@@ -558,13 +606,181 @@ def event_text(link_id, event):
     return prefix + "%s sev%d" % (name, severity)
 
 
+# -- flow page -----------------------------------------------------------
+#
+# A moving picture of the machine: both BMCUs' spools on the left, the path
+# of whichever channel is active into the shared merger, the buffer as a
+# spring whose length follows that channel's pull, and the printer's
+# toolhead on the right. Everything is drawn from STATUS alone, so the
+# printer is only as animated as the BMCU knows: the head sweeps while the
+# active channel is feeding (on_use), and parks otherwise.
+#
+# Geometry for the body area of a 128x64 panel (y 8..55). Integer tables
+# only, so a frame allocates nothing.
+FLOW_SPOOL_X = (15, 29, 43, 57)
+FLOW_SPOOL_Y = (18, 42)
+FLOW_SPOOL_R = 5
+FLOW_BUS_Y = (27, 33)
+FLOW_MERGE_X = 66
+FLOW_TUBE_Y = 30
+FLOW_SPRING_X = 70
+FLOW_RAIL_Y = 10
+FLOW_RAIL_X = 96
+FLOW_HEAD_TRAVEL = 22
+FLOW_BED_Y = 50
+# Spoke end points for eight rotation steps, radius 4.
+FLOW_SPOKE = ((4, 0), (3, 3), (0, 4), (-3, 3), (-4, 0), (-3, -3), (0, -4),
+              (3, -3))
+# +1 toward the printer, -1 back toward the spool, 0 holding still.
+FLOW_DIRECTION = (0, 1, 1, -1, -1, 1, 0)
+
+
+def flow_active(monitors):
+    """(link, channel, motion) of the channel to animate, or None.
+
+    A moving channel wins; failing that, the one holding the merger. Only
+    the first two links are drawn, matching the overview.
+    """
+    shown = len(monitors) if len(monitors) < 2 else 2
+    held = None
+    for link in range(shown):
+        status = getattr(monitors[link], "status", None)
+        if not status:
+            continue
+        motion = status.get("motion") or ()
+        flags = status.get("channel_flags") or ()
+        for channel in range(4):
+            m = motion[channel] if channel < len(motion) else 0
+            if 0 < m < len(FLOW_DIRECTION):
+                return link, channel, m
+            f = flags[channel] if channel < len(flags) else None
+            if held is None and f and (f["loaded"] or f["tail"]):
+                held = (link, channel, 0)
+    return held
+
+
+def _flow_segment(frame, x0, y0, x1, y1, start, phase, moving):
+    """A straight, axis-aligned or 45-degree run; dashed and marching when
+    `moving`. Returns the path position after it, so dashes stay continuous
+    around corners."""
+    dx = (x1 > x0) - (x1 < x0)
+    dy = (y1 > y0) - (y1 < y0)
+    steps = abs(x1 - x0) if abs(x1 - x0) > abs(y1 - y0) else abs(y1 - y0)
+    x, y = x0, y0
+    for step in range(steps + 1):
+        if not moving or ((start + step - phase) & 3) < 2:
+            frame.pixel(x, y, 1)
+        x += dx
+        y += dy
+    return start + steps
+
+
+def _flow_spring(frame, x0, length, y):
+    """Zigzag from x0 over `length` pixels: the buffer, longer when slack."""
+    x = x0
+    up = True
+    while x + 2 <= x0 + length:
+        frame.line(x, y, x + 2, y - 2 if up else y + 2, 1)
+        frame.line(x + 2, y - 2 if up else y + 2, x + 4, y, 1)
+        x += 4
+        up = not up
+    return x
+
+
+def draw_flow(frame, monitors, tick):
+    """Draw the flow page for animation step `tick` into `frame`."""
+    active = flow_active(monitors)
+    shown = len(monitors) if len(monitors) < 2 else 2
+    phase = 0
+    direction = 0
+    if active:
+        direction = FLOW_DIRECTION[active[2]]
+        phase = tick * direction
+    ellipse = getattr(frame, "ellipse", None)
+    for link in range(shown):
+        monitor = monitors[link]
+        sy = FLOW_SPOOL_Y[link]
+        frame.text(LINK_LETTERS[link] if link < len(LINK_LETTERS) else "?",
+                   0, sy - 4, 1)
+        status = getattr(monitor, "status", None)
+        if not status:
+            frame.text(LINK_WORDS.get(getattr(monitor, "link_state", None),
+                                      "?"), 16, sy - 4, 1)
+            continue
+        inserted = status.get("inserted_mask", 0)
+        flags = status.get("channel_flags") or ()
+        for channel in range(4):
+            sx = FLOW_SPOOL_X[channel]
+            f = flags[channel] if channel < len(flags) else None
+            latched = f and (f["low_latch"] or f["jam_latch"] or
+                             f["dm_fail_latch"])
+            if ellipse is None:
+                frame.rect(sx - FLOW_SPOOL_R, sy - FLOW_SPOOL_R,
+                           2 * FLOW_SPOOL_R + 1, 2 * FLOW_SPOOL_R + 1, 1)
+            elif latched and tick & 1:
+                # A latched spool blinks solid.
+                ellipse(sx, sy, FLOW_SPOOL_R, FLOW_SPOOL_R, 1, True)
+                continue
+            else:
+                ellipse(sx, sy, FLOW_SPOOL_R, FLOW_SPOOL_R, 1)
+            if (inserted >> channel) & 1:
+                if ellipse is not None:
+                    ellipse(sx, sy, 3, 3, 1)
+                turning = active and active[0] == link and \
+                    active[1] == channel and direction
+                spoke = FLOW_SPOKE[(tick * direction) & 7] if turning \
+                    else FLOW_SPOKE[0]
+                frame.line(sx, sy, sx + spoke[0], sy + spoke[1], 1)
+    # Path of the active channel: spool -> bus -> merger -> spring -> head.
+    head_x = FLOW_RAIL_X
+    feeding = active is not None and active[2] == MOTION_ON_USE
+    if feeding:
+        sweep = tick % (2 * FLOW_HEAD_TRAVEL)
+        head_x += sweep if sweep <= FLOW_HEAD_TRAVEL else \
+            2 * FLOW_HEAD_TRAVEL - sweep
+    if active:
+        link, channel, motion = active
+        moving = direction != 0
+        sx = FLOW_SPOOL_X[channel]
+        bus = FLOW_BUS_Y[link]
+        edge = FLOW_SPOOL_Y[link] + (FLOW_SPOOL_R + 1 if link == 0 else
+                                     -FLOW_SPOOL_R - 1)
+        pos = _flow_segment(frame, sx, edge, sx, bus, 0, phase, moving)
+        corner = FLOW_MERGE_X - abs(FLOW_TUBE_Y - bus)
+        pos = _flow_segment(frame, sx, bus, corner, bus, pos, phase, moving)
+        pos = _flow_segment(frame, corner, bus, FLOW_MERGE_X, FLOW_TUBE_Y,
+                            pos, phase, moving)
+        status = getattr(monitors[link], "status", None) or {}
+        pull_list = status.get("pull_pct") or ()
+        pull = pull_list[channel] if channel < len(pull_list) else 50
+        pull = 0 if pull < 0 else (100 if pull > 100 else pull)
+        _flow_segment(frame, FLOW_MERGE_X, FLOW_TUBE_Y, FLOW_SPRING_X,
+                      FLOW_TUBE_Y, pos, phase, moving)
+        end = _flow_spring(frame, FLOW_SPRING_X, 8 + pull * 16 // 100,
+                           FLOW_TUBE_Y)
+        # The bowden tube follows the head.
+        frame.line(end, FLOW_TUBE_Y, head_x + 4, FLOW_RAIL_Y + 8, 1)
+    # The printer: rail, head with nozzle, bed.
+    frame.hline(FLOW_RAIL_X, FLOW_RAIL_Y, 128 - FLOW_RAIL_X, 1)
+    frame.rect(head_x, FLOW_RAIL_Y + 1, 9, 7, 1)
+    frame.hline(head_x + 3, FLOW_RAIL_Y + 8, 3, 1)
+    frame.pixel(head_x + 4, FLOW_RAIL_Y + 9, 1)
+    if feeding:
+        # Plastic leaving the nozzle on alternate frames.
+        frame.vline(head_x + 4, FLOW_RAIL_Y + 11, 1 + (tick & 1), 1)
+    frame.hline(FLOW_RAIL_X, FLOW_BED_Y, 128 - FLOW_RAIL_X, 1)
+
+
+LINK_LETTERS = ("A", "B")
+
+
 class OledTicker:
     """Drives the panel from the main loop without ever blocking on a frame."""
 
     def __init__(self, display, monitors, wifi=None, client=None, metrics=None,
                  outbox=None, journal=None, platform_stats=None,
-                 page_ms=5000, overview_ms=10000, refresh_ms=1000,
-                 marquee_ms=120,
+                 page_ms=5000, overview_ms=10000, flow_ms=10000,
+                 flow_frame_ms=200, refresh_ms=1000, marquee_ms=120,
                  marquee_step=4, error_backoff_ms=5000,
                  exception_count=None):
         self.display = display
@@ -582,6 +798,13 @@ class OledTicker:
         # The overview is the page the panel exists for; the others are
         # drill-downs, so it is held longer.
         self.overview_ms = overview_ms
+        # 0 drops the flow page from the rotation.
+        self.flow_ms = flow_ms
+        # One animation step per flow_frame_ms; each step redraws the body,
+        # so this is also what the page costs in I2C (six 128-byte pages).
+        self.flow_frame_ms = flow_frame_ms
+        self._flow_tick = 0
+        self._flow_ms_mark = None
         self.refresh_ms = refresh_ms
         self.marquee_ms = marquee_ms
         self.marquee_step = marquee_step
@@ -634,7 +857,10 @@ class OledTicker:
         """
         if page == PAGE_HEALTH:
             return PAGE_OVERVIEW
-        candidate = 0 if page == PAGE_OVERVIEW else page + 1
+        if page == PAGE_OVERVIEW and self.flow_ms and self.body_rows >= 6:
+            # The picture needs the whole body; a short panel skips it.
+            return PAGE_FLOW
+        candidate = 0 if page in (PAGE_OVERVIEW, PAGE_FLOW) else page + 1
         while candidate < len(self.monitors):
             if getattr(self.monitors[candidate], "status", None):
                 return candidate
@@ -642,14 +868,17 @@ class OledTicker:
         return PAGE_HEALTH
 
     def page_dwell_ms(self):
-        return self.overview_ms if self.page == PAGE_OVERVIEW else \
-            self.page_ms
+        if self.page == PAGE_OVERVIEW:
+            return self.overview_ms
+        if self.page == PAGE_FLOW:
+            return self.flow_ms
+        return self.page_ms
 
     def body_lines(self):
         """The text rows of the current page; the overview is drawn, not
         written, and has none."""
         page = self.page
-        if page == PAGE_OVERVIEW:
+        if page in (PAGE_OVERVIEW, PAGE_FLOW):
             return []
         if page == PAGE_HEALTH or page >= len(self.monitors):
             rssi, temperature = self._platform()
@@ -682,18 +911,13 @@ class OledTicker:
         value = self._mix(value, hash(wifi_state))
         value = self._mix(value, hash(
             getattr(self.client, "state", None) or ""))
-        if wifi_state == "online":
-            # Only then does the header print it. Mixing the RSSI while it is
-            # offscreen would redraw the panel for a number nobody can read.
-            rssi, _ = self._platform()
-            value = self._mix(value, rssi if rssi is not None else 0)
         if page == PAGE_HEALTH or page >= len(self.monitors):
             # The health page carries the uptime, so it redraws on its own
             # schedule -- one second is the resolution it prints.
             value = self._mix(value, hash(getattr(self.wifi, "ip", None)
                                           or ""))
             return self._mix(value, self.uptime_s)
-        if page == PAGE_OVERVIEW:
+        if page in (PAGE_OVERVIEW, PAGE_FLOW):
             for index in range(len(self.monitors)):
                 value = self._mix_link(value, self.monitors[index])
             return value
@@ -886,6 +1110,8 @@ class OledTicker:
             chip_masks=self._chip_active_mask, columns=self.columns), 0, 0)
         if self.page == PAGE_OVERVIEW:
             self._draw_overview(frame)
+        elif self.page == PAGE_FLOW:
+            draw_flow(frame, self.monitors, self._flow_tick)
         else:
             lines = self.body_lines()
             for row in range(min(self.body_rows, len(lines))):
@@ -936,6 +1162,15 @@ class OledTicker:
             frame.text(text, left, top, 1)
         bar_left = left + OVERVIEW_TEXT_PX
         bar_right = left + width - 3
+        if bar_right - bar_left < 16:
+            # Two-column layout: no room across, so the buffer is a small
+            # level meter filling upwards. 7 px tall, so a 1 px gap keeps
+            # stacked rows from merging into one column.
+            frame.rect(bar_left + 1, top, 5, 7, 1)
+            fill = 5 * pull // 100
+            if fill:
+                frame.fill_rect(bar_left + 2, top + 6 - fill, 3, fill, 1)
+            return
         if width >= OVERVIEW_DIGITS_MIN_WIDTH:
             # A full-width column has room to print the number too.
             bar_right -= 24
@@ -995,6 +1230,14 @@ class OledTicker:
             self.page = self.next_page(self.page)
             self._page_ms_mark = now_ms
             self._content_ms = None
+        if self.page == PAGE_FLOW:
+            # Animated: redrawn on its own clock, not when the digest moves.
+            if self._flow_ms_mark is None or _ticks_diff(
+                    now_ms, self._flow_ms_mark) >= self.flow_frame_ms:
+                self._flow_ms_mark = now_ms
+                self._flow_tick = (self._flow_tick + 1) & 0xFFFF
+                self._draw_body()
+                self._content_ms = now_ms
         if self._content_ms is None or \
                 _ticks_diff(now_ms, self._content_ms) >= self.refresh_ms:
             # Redraw only when something the body shows actually moved. The
@@ -1067,6 +1310,8 @@ DISPLAY_KEYS = (("OLED_WIDTH", "width"), ("OLED_HEIGHT", "height"),
                 ("OLED_ADDRESS", "address"), ("OLED_CONTRAST", "contrast"))
 TICKER_KEYS = (("OLED_PAGE_MS", "page_ms"),
                ("OLED_OVERVIEW_MS", "overview_ms"),
+               ("OLED_FLOW_MS", "flow_ms"),
+               ("OLED_FLOW_FRAME_MS", "flow_frame_ms"),
                ("OLED_REFRESH_MS", "refresh_ms"),
                ("OLED_MARQUEE_MS", "marquee_ms"),
                ("OLED_MARQUEE_STEP_PX", "marquee_step"))
