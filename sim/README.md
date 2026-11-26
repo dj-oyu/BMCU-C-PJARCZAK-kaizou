@@ -131,7 +131,10 @@ recordings.  The checks built on them use loose bounds for that reason.
 gesture, checks that it is written to flash, then boots again from that flash,
 inserts filament in channel 0 and checks that only channel 0 is driven, the
 filament moves, the channel goes online on the monitor link and every encoder
-is polled without a NACK.
+is polled without a NACK. It also runs a printer unload and reload. The pull
+back must stop with the tip still in front of the gear (the outer lever stays
+pressed, so the key never reads none; see `src/pull_back_end_policy.h`), and
+the following send_out must drive it forward again.
 
 `sim/tests/test_world.py` checks the world models alone: the AS5600 slave
 against a datasheet-sequence I2C master, switch voltages along the path, the

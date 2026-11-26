@@ -24,6 +24,19 @@ LOAD = {"seconds": 6, "events": [{"t": 1.0, "do": "insert", "ch": 0}]}
 # just after the firmware gives up (the auto-load times out 5 s after ks=2).
 SHORT_INSERT = {"seconds": 7.5, "events": [{"t": 1.0, "do": "insert", "ch": 0, "tip_mm": -5, "push_s": 0},
                                            {"t": 6.2, "do": "remove", "ch": 0}]}
+# A printer unload of a loaded channel, then a reload. On the world's path the
+# outer lever stays pressed while the strand lies over it (outer -> gear ->
+# inner), as on AMS-B slot 3: once the tip leaves the inner switch the key reads
+# outer only, never none. Seen live on 2026-11-26: the pull back kept going
+# until the tip was behind the gear, and the reload could not catch it.
+# Motion frames are [ams, statu_flag, channel, motion_flag].
+PULL_BACK_RELOAD = {"seconds": 11, "events": [
+    {"t": 0.5, "do": "insert", "ch": 0, "tip_mm": 60, "push_s": 0},
+    {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 07 00 7f", "every": 0.25, "until": 1.5},  # on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 09 00 3f", "every": 0.25, "until": 2.0},  # before_pull_back
+    {"t": 2.0, "do": "printer_repeat", "type": 3, "payload": "00 03 ff 00", "every": 0.25, "until": 8.0},  # pull_back
+    {"t": 8.0, "do": "printer_repeat", "type": 3, "payload": "00 03 00 00", "every": 0.25, "until": 11.0},  # send_out
+]}
 RECORDING = Path(__file__).resolve().parent.parent / "recordings" / "2026-11-25_ams_a_short_insert.jsonl"
 
 
@@ -40,6 +53,7 @@ class CalibrateThenLoad(unittest.TestCase):
         cls.load = run(cls.image, 0, scenario=LOAD, nvm=cls.nvm)
         cls.world = cls.load[0].world
         cls.short = run(cls.image, 0, scenario=SHORT_INSERT, nvm=cls.nvm)
+        cls.pull = run(cls.image, 0, scenario=PULL_BACK_RELOAD, nvm=cls.nvm)
 
     def test_calibration_is_written_to_flash(self):
         m = self.cal[0]
@@ -101,6 +115,24 @@ class CalibrateThenLoad(unittest.TestCase):
         # Not compared: held_ms of the second teardown.  The device reports 0
         # (the filament had left the outer switch within a millisecond of the
         # timeout, both times); here the hand pulls it 0.1 s later.
+
+    def test_pull_back_stops_in_front_of_the_gear_and_reloads(self):
+        from sim.world import Params
+        m, pico = self.pull[0], self.pull[1]
+        self.assertIsNone(m.fault)
+        gear = Params().gear_mm
+        tips = [(t / HCLK_HZ, s[0]["tip_mm"]) for t, s in m.world.snapshots]
+        # The unload ends once the tip has left the inner switch, with the
+        # strand still in the gear, and stays there until the printer reloads.
+        motions = [(msg["sim_ms"], msg["data"]["motion"][0]) for msg in pico.messages
+                   if msg.get("type") == "status"]
+        self.assertTrue(any(2500 < ms < 6000 and mo == 0 for ms, mo in motions),
+                        "pull back never returned to idle")
+        held = [tip for t, tip in tips if 6.0 < t < 8.0]
+        self.assertTrue(held)
+        self.assertTrue(all(tip is not None and tip >= gear for tip in held), held[:5])
+        # The reload catches it.
+        self.assertGreater(tips[-1][1], 30.0)
 
 if __name__ == "__main__":
     unittest.main()
