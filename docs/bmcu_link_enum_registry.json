@@ -138,7 +138,8 @@
       "2": "ams_would_reoffer",
       "3": "merger_tail_held",
       "4": "merger_tail_preempted",
-      "5": "downstream_occupied"
+      "5": "printer_motion_cmd",
+      "6": "downstream_occupied"
     },
     "reset_state": {
       "1": "scheduled",

@@ -137,6 +137,10 @@ void bmcu_link_merger_tail_refused(uint32_t count);
 // Not edge-latched: one emission per preempt, and a preempt ends the TAIL
 // episode that produced it, so there is nothing here to storm.
 void bmcu_link_merger_tail_preempted(uint8_t claiming_ch);
+// Observe-only: a motion/stu_motion frame for any AMS on the bus. Emits a
+// record only when the command for that unit changes. See printer_motion_watch.h.
+void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel,
+                                  uint8_t statu_flag, uint8_t motion_flag);
 
 // `sending_ch` started pushing towards the head (send, or a load taking the
 // merger) while the channels in `others_mask` were estimated downstream of the

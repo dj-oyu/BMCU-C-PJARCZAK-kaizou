@@ -88,6 +88,9 @@ int ownership_trace_count = 0;
 uint8_t service_frames[kMaxRecords];
 int service_frame_count = 0;
 
+MotionCmd motion_cmds[kMaxRecords];
+int motion_cmd_count = 0;
+
 uint32_t status_change_mask = 0u;
 int status_change_count = 0;
 int registration_query_count = 0;
@@ -171,6 +174,14 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
 }
 
 void bmcu_link_ams_service_poll(void) {}
+
+void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel,
+                                  uint8_t statu_flag, uint8_t motion_flag)
+{
+    if (host_bus::motion_cmd_count >= host_bus::kMaxRecords) return;
+    host_bus::motion_cmds[host_bus::motion_cmd_count++] =
+        host_bus::MotionCmd{kind, ams_num, channel, statu_flag, motion_flag};
+}
 
 void bmcu_link_ams_service_frame(uint8_t service_kind)
 {
@@ -353,6 +364,7 @@ void reset(void)
     tail_cleared_by_idle = 0;
     ownership_trace_count = 0;
     service_frame_count = 0;
+    motion_cmd_count = 0;
     status_change_mask = 0u;
     status_change_count = 0;
     registration_query_count = 0;

@@ -19,6 +19,7 @@
 // online-detect window -- that has no reset entry point. Sharing a process
 // would make vectors order-dependent in ways no assertion here would show.
 
+#include "printer_motion_watch.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -351,6 +352,15 @@ int test_peer_addressed_short_frame(void)
     // conversation as ours.
     CHECK(host_bus::service_frame_count == 0, 311);
 
+    // ...but the printer's command to the peer is still observed, which is the
+    // only record an unmonitored peer unit gets (printer_motion_watch.h).
+    CHECK(host_bus::motion_cmd_count == 1, 319);
+    CHECK(host_bus::motion_cmds[0].kind == printer_motion_watch::kKindMotion, 320);
+    CHECK(host_bus::motion_cmds[0].ams_num == kPeer, 321);
+    CHECK(host_bus::motion_cmds[0].channel == 0u, 322);
+    CHECK(host_bus::motion_cmds[0].statu_flag == kStatuOnUse, 323);
+    CHECK(host_bus::motion_cmds[0].motion_flag == kFlagOnUse, 324);
+
     // Nothing of ours moved.
     CHECK(host_bus::merger_stage() == ams_merger::stage_unloaded, 312);
     CHECK(host_bus::merger_event_count == 0, 313);
@@ -388,6 +398,11 @@ int test_peer_addressed_long_frame(void)
     CHECK(t.outcome == OUTCOME_FAILED, 356);
     CHECK(t.reason == REASON_NO_RESPONSE, 357);
     CHECK(host_bus::service_frame_count == 0, 358);
+    CHECK(host_bus::motion_cmd_count == 1, 371);
+    CHECK(host_bus::motion_cmds[0].kind == printer_motion_watch::kKindStuMotion, 372);
+    CHECK(host_bus::motion_cmds[0].ams_num == kPeer, 373);
+    CHECK(host_bus::motion_cmds[0].statu_flag == kStatuOnUse, 374);
+    CHECK(host_bus::motion_cmds[0].motion_flag == kFlagOnUse, 375);
     CHECK(host_bus::merger_event_count == 0, 359);
 
     // Our own long frame is answered, and its reply is the 0x3C-long form.
