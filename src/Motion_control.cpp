@@ -2819,9 +2819,36 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
         {
         case filament_pulling_back:
         {
+            auto &motor = MOTOR_CONTROL[i];
+
+            // The printer moved on to feeding this channel again. Holding the
+            // channel here skips the dispatch, so the retract used to run to
+            // its full target while the printer's send_out went unanswered --
+            // the reload then waited on a motor that was still pulling. A
+            // forward command ends the pull back; the dispatch takes it from
+            // here this same pass. Idle and session frames do not: after a
+            // pull_back command the printer expects the retract to finish.
+            {
+                const _filament_motion cmd = A.filament[i].motion;
+                if (A.now_filament_num == i &&
+                    (cmd == _filament_motion::send_out ||
+                     cmd == _filament_motion::before_on_use ||
+                     cmd == _filament_motion::on_use))
+                {
+                    pull_back_empty_t0_ms[i] = 0u;
+                    g_pull_remain_counts[i] = 0;
+                    g_pull_speed_set_q[i] = -PULL_V_FAST_Q;
+                    g_pull_pwm_floor[i] = PULL_PWM_MIN;
+                    motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                    filament_pull_back_target_counts[i] =
+                        distance_m_to_counts(motion_control_pull_back_distance);
+                    filament_now_position[i] = filament_idle;
+                    break;
+                }
+            }
+
             MC_STU_RGB_set_latch(i, 0xFFu, 0x00u, 0xFFu, time_now, 1u);
 
-            auto &motor = MOTOR_CONTROL[i];
             const int32_t target_counts = filament_pull_back_target_counts[i];
             const int32_t progress_counts = motor.directed_progress_counts;
             constexpr int32_t PULL_PROGRESS_QUANTUM_COUNTS = distance_m_to_counts(0.0005f);
@@ -3049,20 +3076,18 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
 
             case _filament_motion::send_out:
             {
-                if (g_on_use_jam_latch[num])
+                // A send_out is the printer deciding to feed this channel
+                // again, which is all the confirmation a jam needs. This used
+                // to wait for the buffer above 85 % with the motor braked: a
+                // hand push cannot get past a braked gear, so only pinching the
+                // buffer itself during the send_out window opened it (AMS-A
+                // ch3, 2026-11-27), while a normal print sits near 55 %. A jam
+                // still there latches again in the next on_use.
+                if (g_on_use_jam_latch[num] || g_on_use_low_latch[num])
                 {
-                    if (MC_PULL_pct_q[num] > 8500)
-                    {
-                        g_on_use_low_latch[num] = 0u;
-                        g_on_use_jam_latch[num] = 0u;
-                        g_on_use_hi_pwm_us[num] = 0u;
-                    }
-                    else
-                    {
-                        MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                        MC_STU_RGB_set_latch(num, 0x00u, 0xD5u, 0x2Au, time_now, 0u);
-                        break;
-                    }
+                    g_on_use_low_latch[num] = 0u;
+                    g_on_use_jam_latch[num] = 0u;
+                    g_on_use_hi_pwm_us[num] = 0u;
                 }
 
                 MC_STU_RGB_set_latch(num, 0x00u, 0xD5u, 0x2Au, time_now, 0u);
@@ -3113,6 +3138,19 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
                 if (filament_now_position[num] != filament_before_pull_back)
                 {
                     filament_now_position[num] = filament_before_pull_back;
+                    // The printer has acted on the jam: it stopped the channel
+                    // and is unloading it. The latch has done its job (stop
+                    // feeding into a held strand, raise 0xF06F). Kept past this
+                    // point it vetoed every later send_out and cut this pull
+                    // back to 100 mm, so a strand left in the path made every
+                    // reload fail even after the cause was cleared -- the only
+                    // ways out were pinching the buffer past 85% during a
+                    // send_out or withdrawing the filament. A jam that is still
+                    // there latches again in the next on_use. AMS-A ch3,
+                    // 2026-11-27: spool end held at the core.
+                    g_on_use_low_latch[num] = 0u;
+                    g_on_use_jam_latch[num] = 0u;
+                    g_on_use_hi_pwm_us[num] = 0u;
                     before_pb_last_counts[num]      = g_filament_position_counts[num];
                     before_pb_retracted_counts[num] = 0;
                     before_pb_sign[num]             = 0;

@@ -134,5 +134,62 @@ class CalibrateThenLoad(unittest.TestCase):
         # The reload catches it.
         self.assertGreater(tips[-1][1], 30.0)
 
+
+# The spool end holds at the core while printing (AMS-A ch3, 2026-11-27,
+# recording sim/recordings/2026-11-27_ams_a_ch3_anchored_spool_jam.log): the
+# extruder stretches the buffer, LOW+JAM latch, the printer stops the channel
+# and unloads it. The user then frees the spool end, and the printer reloads.
+# Live, the latch outlived the printer's unload: it cut the pull back to 100 mm
+# and vetoed every later send_out, so the reload failed again and again until
+# the buffer was pinched past 85 % by hand during a send_out.
+ANCHORED_JAM = {"seconds": 30, "events": [
+    {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
+    {"t": 0.3, "do": "extruder", "mm_s": 1.5},
+    {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 7f", "every": 0.25, "until": 1.5},   # before_on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 14.0},  # on_use
+    {"t": 3.0, "do": "set", "ch": 3, "anchored": True},
+    {"t": 14.0, "do": "extruder", "mm_s": 0.0},
+    {"t": 14.0, "do": "printer_repeat", "type": 3, "payload": "00 07 03 00", "every": 0.25, "until": 16.0},  # stop_on_use
+    {"t": 16.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 3f", "every": 0.25, "until": 17.0},  # before_pull_back
+    {"t": 17.0, "do": "printer_repeat", "type": 3, "payload": "00 03 ff 00", "every": 0.25, "until": 22.0},  # pull_back
+    {"t": 22.0, "do": "printer_repeat", "type": 3, "payload": "00 00 ff 00", "every": 0.25, "until": 24.0},  # slot 255
+    {"t": 23.0, "do": "set", "ch": 3, "anchored": False},                                                     # spool end freed
+    {"t": 24.0, "do": "printer_repeat", "type": 3, "payload": "00 03 03 00", "every": 0.25, "until": 30.0},  # send_out ch3
+]}
+
+
+@unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
+class AnchoredSpoolJam(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from sim.run import run
+        with open(IMAGE, "rb") as f:
+            image = f.read()
+        nvm = bytes(run(image, 0, scenario=CALIBRATE)[0].flash.raw)
+        cls.m, cls.pico = run(image, 0, scenario=ANCHORED_JAM, nvm=nvm)[:2]
+        cls.status = [(msg["sim_ms"] / 1000, msg["data"]) for msg in cls.pico.messages
+                      if msg.get("type") == "status"]
+        cls.world = [(t / HCLK_HZ, s[3]) for t, s in cls.m.world.snapshots]
+
+    def _jam(self, t0, t1):
+        return [d["channel_flags"][3]["jam_latch"] for t, d in self.status if t0 < t < t1]
+
+    def test_the_held_strand_latches_a_jam(self):
+        self.assertIsNone(self.m.fault)
+        self.assertTrue(any(self._jam(3.0, 14.0)), "the anchored spool never latched JAM")
+
+    def test_the_printer_unload_clears_the_jam(self):
+        self.assertTrue(self._jam(22.0, 30.0))
+        self.assertFalse(any(self._jam(22.0, 30.0)), "JAM outlived the printer's unload")
+
+    def test_the_unload_is_not_cut_to_100_mm(self):
+        tips = [c["tip_mm"] for t, c in self.world if 16.0 < t < 24.0 and c["tip_mm"] is not None]
+        self.assertGreater(max(tips) - min(tips), 150.0)
+
+    def test_the_reload_drives_once_the_spool_end_is_free(self):
+        drive = [c["drive"] for t, c in self.world if 24.5 < t < 30.0]
+        self.assertTrue(any(d > 0.1 for d in drive), "send_out never drove the motor")
+
+
 if __name__ == "__main__":
     unittest.main()

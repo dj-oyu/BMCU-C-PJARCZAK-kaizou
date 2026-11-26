@@ -80,6 +80,10 @@ class Channel:
     angle: float = 1000.0                  # AS5600 angle, counts (0..4096)
     buffer_mm: float = 0.0                 # + compressed, - stretched
     jam_at_mm: float | None = None         # filament cannot pass this point
+    # The spool end is fixed to the core and holds: nothing more pays out, so
+    # the strand cannot move toward the printer (motor or extruder), while a
+    # retract still winds it back.  The 2026-11-27 AMS-A ch3 "runout".
+    anchored: bool = False
     as5600_present: bool = True
     magnet_ok: bool = True
     overrides: dict = field(default_factory=dict)   # name -> value (forced reading)
@@ -324,6 +328,9 @@ class World:
         consume = self.extruder_mm_s * dt if at_head else 0.0
         if c.jam_at_mm is not None and c.tip_mm + dx > c.jam_at_mm and dx > 0:
             dx = max(0.0, c.jam_at_mm - c.tip_mm)     # stalls against the jam
+            c.speed_mm_s = 0.0
+        if c.anchored and dx > 0:
+            dx = 0.0                                  # the spool gives nothing
             c.speed_mm_s = 0.0
         if at_head or c.tip_mm + dx > p.head_mm:
             # The strand is held at the extruder: feeding compresses the

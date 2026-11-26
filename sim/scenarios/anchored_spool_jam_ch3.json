@@ -1,0 +1,133 @@
+{
+ "seconds": 200,
+ "ams": 0,
+ "events": [
+  {
+   "t": 0.0,
+   "do": "insert",
+   "ch": 3,
+   "tip_mm": 800,
+   "push_s": 0
+  },
+  {
+   "t": 0.0,
+   "do": "insert",
+   "ch": 1,
+   "tip_mm": 20,
+   "push_s": 0
+  },
+  {
+   "t": 0.0,
+   "do": "insert",
+   "ch": 2,
+   "tip_mm": 20,
+   "push_s": 0
+  },
+  {
+   "t": 0.3,
+   "do": "extruder",
+   "mm_s": 1.5
+  },
+  {
+   "t": 1.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 09 03 7f",
+   "every": 0.25,
+   "until": 1.5
+  },
+  {
+   "t": 1.5,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 07 03 7f",
+   "every": 0.25,
+   "until": 29.0
+  },
+  {
+   "t": 20.0,
+   "do": "set",
+   "ch": 3,
+   "anchored": true
+  },
+  {
+   "t": 29.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 07 03 00",
+   "every": 0.25,
+   "until": 37.0
+  },
+  {
+   "t": 29.0,
+   "do": "extruder",
+   "mm_s": 0.0
+  },
+  {
+   "t": 37.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 09 03 3f",
+   "every": 0.25,
+   "until": 39.0
+  },
+  {
+   "t": 39.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 03 ff 00",
+   "every": 0.25,
+   "until": 78.0
+  },
+  {
+   "t": 78.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 00 ff 00",
+   "every": 0.25,
+   "until": 93.0
+  },
+  {
+   "t": 93.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 03 03 00",
+   "every": 0.25,
+   "until": 132.0
+  },
+  {
+   "t": 132.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 00 ff 00",
+   "every": 0.25,
+   "until": 157.0
+  },
+  {
+   "t": 132.5,
+   "do": "extruder",
+   "mm_s": -8.0
+  },
+  {
+   "t": 133.5,
+   "do": "extruder",
+   "mm_s": 0.0
+  },
+  {
+   "t": 157.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 03 03 00",
+   "every": 0.25,
+   "until": 196.0
+  },
+  {
+   "t": 196.0,
+   "do": "printer_repeat",
+   "type": 3,
+   "payload": "00 00 ff 00",
+   "every": 0.25,
+   "until": 200.0
+  }
+ ]
+}
