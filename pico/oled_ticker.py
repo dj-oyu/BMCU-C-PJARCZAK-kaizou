@@ -1,20 +1,38 @@
-"""Rolling OLED status ticker for the Pico bridge.
+"""Rolling OLED status panel for the Pico bridge.
 
 The panel shows what only matters while it is happening: which channel owns the
 merger, what each motor is doing, which latch just tripped. Counters that are
 worth reading after the fact stay in the web UI and the journal -- this is the
-scrolling sign above the machine, not a second copy of the diagnostics.
+sign above the machine, not a second copy of the diagnostics.
 
 Every render helper is a pure function over the monitor's live STATUS dict, so
 the layout is testable on CPython; only OledTicker touches I2C.
 
 Layout on a 128x64 panel (16 columns, 8 rows of the built-in 8x8 font):
 
-    row 0      header: link states, Wi-Fi, uplink        (always visible)
-    rows 1..6  the rotating page                         (a link, or health)
-    row 7      the marquee: the most recent BMCU events  (always scrolling)
+    row 0      header: link states + chips, Wi-Fi, uplink  (always visible)
+    rows 1..6  the rotating page
+    row 7      the marquee: alerts, then the latest events (always scrolling)
 
-A channel row reads `1*#oK2U 85LJ`:
+The pages rotate overview -> one detail page per link that has reported a
+STATUS -> network/health, and back. A link that never answered gets no detail
+page of its own (the overview already says it is down), so an unplugged second
+BMCU costs no dead air.
+
+Overview: every link side by side, one column each (64 px for two links, the
+whole width for one). A column reads
+
+    A+ s2          link letter, link state, the channel feeding the printer
+    1*U |=====|    per channel: slot, owner, motion, latch, then the buffer
+    2#. |==   |    pull as a bar with a tick at the 50 % centre; a channel
+    3.. |     |    with any latch set is drawn inverted so it reads from
+    4.. |     |    across the room
+    E0 c0          control error, link wire errors (crc + framing + gaps)
+
+Owner is `T` (tail past the online key, merger still held), `*` (owns the
+merger), `#` (inserted, not owner), `.` (empty), `?` (firmware too old to say).
+
+Detail (one per link) is the dense text view; a channel row reads `1*#oK2U 85LJ`:
 
     1   slot number
     *   owns the shared PTFE merger (`T` once the tail passed the online key)
@@ -24,6 +42,9 @@ A channel row reads `1*#oK2U 85LJ`:
     U   motion, indexed into MOTION_CHARS below
     85  pull percentage
     LJ  latched faults: L low pull, J jam, D DM autoload, F motion fault
+
+Network/health puts the IP address on a line of its own: a dotted quad is up to
+15 characters, and sharing its line with anything cut it to `192.168`.
 """
 
 try:
@@ -59,6 +80,19 @@ DEFAULT_COLUMNS = 16
 SLOT_LABELS = ("1", "2", "3", "4")
 KS_LABELS = ("K0", "K1", "K2", "K3")
 LATCH_LABELS = ("", "L", "J", "LJ", "D", "LD", "JD", "LJD")
+# The overview has room for one latch letter per channel, so it shows the most
+# urgent one. A jam is a motor pushing against a blockage right now; the low
+# latch has stopped the motor; a DM autoload failure is a load that gave up; a
+# motion fault is the policy's own complaint. The detail page lists them all.
+OVERVIEW_LATCH = ("", "L", "J", "J", "D", "L", "J", "J")
+# Pseudo page ids; a non-negative page is an index into the monitors.
+PAGE_OVERVIEW = -1
+PAGE_HEALTH = -2
+# Pixel geometry of one overview channel row: four characters of text, then the
+# pull bar up to just short of the column's right edge (the last pixel column
+# of the left half is the divider between links).
+OVERVIEW_TEXT_PX = 32
+OVERVIEW_DIGITS_MIN_WIDTH = 96
 
 # -- alert chips ---------------------------------------------------------
 #
@@ -335,7 +369,10 @@ def link_lines(monitor, columns=DEFAULT_COLUMNS):
                           columns))
     else:
         slot = status.get("current_slot", 0xFF)
-        lines.append(_fit("s%s P%d E%d" % (
+        # The link letter leads: the header lists every link, so without it
+        # nothing on a detail page says which BMCU it is.
+        lines.append(_fit("%s s%s P%d E%d" % (
+            link_letter(getattr(monitor, "link_id", "")),
             "-" if slot > 3 else SLOT_LABELS[slot],
             status.get("pressure", 0),
             status.get("control_error", 0)), columns))
@@ -353,27 +390,127 @@ def _uptime_text(seconds):
     return "%dh%02dm" % (seconds // 3600, (seconds // 60) % 60)
 
 
+def wire_error_total(monitor):
+    """crc + framing errors + sequence gaps: one number for "is the wire ok"."""
+    decoder = getattr(monitor, "decoder", None)
+    total = getattr(monitor, "sequence_gap_count", 0)
+    if decoder:
+        total += getattr(decoder, "crc_errors", 0) + \
+            getattr(decoder, "frame_errors", 0)
+    return total
+
+
+def overview_title(monitor, columns):
+    status = getattr(monitor, "status", None)
+    badge = link_badge(monitor)
+    if not status:
+        # The state word goes on the row below (overview_idle), where it has
+        # the whole column instead of what is left after the badge.
+        return badge
+    slot = status.get("current_slot", 0xFF)
+    return _fit(badge + " s" + ("-" if slot > 3 else SLOT_LABELS[slot]),
+                columns)
+
+
+def overview_channel(index, status):
+    """(four characters, latched, pull) for one overview channel row.
+
+    Returns None when there is no STATUS to draw from: the column then shows
+    the link state in its title and leaves the rows empty rather than drawing
+    four bars of zero that would read as "empty and healthy".
+    """
+    if not status:
+        return None
+    flags_list = status.get("channel_flags") or ()
+    flags = flags_list[index] if index < len(flags_list) else None
+    inserted = (status.get("inserted_mask", 0) >> index) & 1
+    if flags:
+        owner = "T" if flags["tail"] else ("*" if flags["loaded"] else
+                                           ("#" if inserted else "."))
+        latch_bits = (1 if flags["low_latch"] else 0) | \
+            (2 if flags["jam_latch"] else 0) | \
+            (4 if flags["dm_fail_latch"] else 0)
+    else:
+        owner = "?"
+        latch_bits = 0
+    latch = OVERVIEW_LATCH[latch_bits]
+    faults = status.get("motion_fault") or ()
+    if not latch and index < len(faults) and faults[index]:
+        latch = "F"
+    motion_list = status.get("motion") or ()
+    motion = motion_list[index] if index < len(motion_list) else 0
+    motion = MOTION_CHARS[motion] if 0 <= motion < len(MOTION_CHARS) else "?"
+    pull_list = status.get("pull_pct") or ()
+    pull = pull_list[index] if index < len(pull_list) else 0
+    pull = 0 if pull < 0 else (100 if pull > 100 else pull)
+    return ("%s%s%s%s" % (SLOT_LABELS[index], owner, motion, latch or " "),
+            bool(latch), pull)
+
+
+def overview_idle(monitor, columns):
+    """What a column says in place of its channels while it has no STATUS."""
+    return _fit(getattr(monitor, "link_state", None) or "no data", columns)
+
+
+def overview_footer(monitor, columns):
+    status = getattr(monitor, "status", None)
+    if not status:
+        return ""
+    return _fit("E%d c%d" % (status.get("control_error", 0),
+                             wire_error_total(monitor)), columns)
+
+
+def _uptime_text(seconds):
+    if seconds < 3600:
+        return "%dm%02ds" % (seconds // 60, seconds % 60)
+    if seconds < 86400:
+        return "%dh%02dm" % (seconds // 3600, (seconds // 60) % 60)
+    return "%dd%02dh" % (seconds // 86400, (seconds // 3600) % 24)
+
+
 def health_lines(uptime_s=0, metrics=None, outbox=None, client=None,
                  journal=None, exception_count=0, wifi=None,
-                 temperature_milli_c=None, columns=DEFAULT_COLUMNS):
+                 temperature_milli_c=None, wifi_rssi=None,
+                 columns=DEFAULT_COLUMNS):
+    """Network first, then the bridge's own health.
+
+    The IP is alone on the first row: a dotted quad needs up to 15 of the 16
+    columns, and every earlier layout that shared its row cut it short.
+    """
     heap_free = gc.mem_free() if hasattr(gc, "mem_free") else 0
     loop = getattr(metrics, "loop_gap", None)
+    wifi_state = getattr(wifi, "state", None)
+    ip = getattr(wifi, "ip", None)
+    if ip:
+        address = ip
+    else:
+        address = "ip - " + (wifi_state or "no wifi")
+    if wifi_state == "online" and wifi_rssi is not None:
+        radio = "rssi%d" % wifi_rssi
+    else:
+        radio = "wifi " + (wifi_state or "-")
     lines = [
-        "up " + _uptime_text(uptime_s),
-        "heap %dk" % (heap_free // 1024),
-        "loop %dms max%d" % (
-            (loop.percentile(99) // 1000) if loop else 0,
-            (loop.maximum // 1000) if loop else 0),
-        "q%d drop%d" % (getattr(outbox, "queue_depth", 0),
-                        getattr(outbox, "forced_drop_count", 0)),
-        "tcp rc%d jf%d" % (getattr(client, "reconnect_count", 0),
-                           getattr(journal, "failure_count", 0)),
-        "exc%d %s%s" % (
-            exception_count,
-            ("%dC " % (temperature_milli_c // 1000))
-            if temperature_milli_c is not None else "",
-            getattr(wifi, "ip", None) or ""),
+        address,
+        radio,
+        "bmb1 %s rc%d" % (getattr(client, "state", None) or "-",
+                          getattr(client, "reconnect_count", 0)),
+        "up %s%s" % (_uptime_text(uptime_s),
+                     (" %dC" % (temperature_milli_c // 1000))
+                     if temperature_milli_c is not None else ""),
+        "heap%dk exc%d" % (heap_free // 1024, exception_count),
     ]
+    drops = getattr(outbox, "forced_drop_count", 0)
+    failures = getattr(journal, "failure_count", 0)
+    if drops or failures:
+        # Lost records outrank the loop timing once any have been lost; the
+        # web UI still has both.
+        lines.append("q%d drop%d jf%d" % (getattr(outbox, "queue_depth", 0),
+                                          drops, failures))
+    else:
+        lines.append("loop%d/%dms q%d" % (
+            (loop.percentile(99) // 1000) if loop else 0,
+            (loop.maximum // 1000) if loop else 0,
+            getattr(outbox, "queue_depth", 0)))
     return [_fit(line, columns) for line in lines]
 
 
@@ -426,7 +563,8 @@ class OledTicker:
 
     def __init__(self, display, monitors, wifi=None, client=None, metrics=None,
                  outbox=None, journal=None, platform_stats=None,
-                 page_ms=5000, refresh_ms=1000, marquee_ms=120,
+                 page_ms=5000, overview_ms=10000, refresh_ms=1000,
+                 marquee_ms=120,
                  marquee_step=4, error_backoff_ms=5000,
                  exception_count=None):
         self.display = display
@@ -441,6 +579,9 @@ class OledTicker:
         self.platform_stats = platform_stats
         self.exception_count = exception_count or (lambda: 0)
         self.page_ms = page_ms
+        # The overview is the page the panel exists for; the others are
+        # drill-downs, so it is held longer.
+        self.overview_ms = overview_ms
         self.refresh_ms = refresh_ms
         self.marquee_ms = marquee_ms
         self.marquee_step = marquee_step
@@ -448,7 +589,10 @@ class OledTicker:
         self.columns = display.width // 8
         self.rows = display.pages
         self.body_rows = max(1, self.rows - 2)
+        # page_index counts rotations (tests and logs read it); page is what
+        # is on screen: PAGE_OVERVIEW, PAGE_HEALTH, or a monitor index.
         self.page_index = 0
+        self.page = PAGE_OVERVIEW
         self.error_count = 0
         # Accumulated from per-call deltas rather than measured against a start
         # tick: ticks_diff saturates at about 6.2 days, and this bridge is meant
@@ -479,17 +623,41 @@ class OledTicker:
     # -- content -----------------------------------------------------------
 
     def page_count(self):
-        return len(self.monitors) + 1
+        """Every page the rotation can reach: overview, links, health."""
+        return len(self.monitors) + 2
+
+    def next_page(self, page):
+        """Overview, then each link that has a STATUS, then health, then back.
+
+        A link with no STATUS is skipped rather than shown as six rows of
+        "no status": the overview column already says the link is down.
+        """
+        if page == PAGE_HEALTH:
+            return PAGE_OVERVIEW
+        candidate = 0 if page == PAGE_OVERVIEW else page + 1
+        while candidate < len(self.monitors):
+            if getattr(self.monitors[candidate], "status", None):
+                return candidate
+            candidate += 1
+        return PAGE_HEALTH
+
+    def page_dwell_ms(self):
+        return self.overview_ms if self.page == PAGE_OVERVIEW else \
+            self.page_ms
 
     def body_lines(self):
-        index = self.page_index % self.page_count()
-        if index < len(self.monitors):
-            return link_lines(self.monitors[index], self.columns)
-        rssi, temperature = self._platform()
-        return health_lines(
-            self.uptime_s, self.metrics, self.outbox, self.client,
-            self.journal, self.exception_count(), self.wifi, temperature,
-            self.columns)
+        """The text rows of the current page; the overview is drawn, not
+        written, and has none."""
+        page = self.page
+        if page == PAGE_OVERVIEW:
+            return []
+        if page == PAGE_HEALTH or page >= len(self.monitors):
+            rssi, temperature = self._platform()
+            return health_lines(
+                self.uptime_s, self.metrics, self.outbox, self.client,
+                self.journal, self.exception_count(), self.wifi, temperature,
+                rssi, self.columns)
+        return link_lines(self.monitors[page], self.columns)
 
     def content_digest(self):
         """An allocation-free fingerprint of everything the body draws.
@@ -500,8 +668,8 @@ class OledTicker:
         seconds nothing on the panel actually moved, and this is what keeps an
         idle machine from spending ~2 KB/s to redraw the same six rows.
         """
-        page = self.page_index % self.page_count()
-        value = self._mix(page, page)
+        page = self.page
+        value = self._mix(page + 3, page + 3)
         for index in range(len(self.monitors)):
             monitor = self.monitors[index]
             value = self._mix(value, hash(
@@ -519,11 +687,19 @@ class OledTicker:
             # offscreen would redraw the panel for a number nobody can read.
             rssi, _ = self._platform()
             value = self._mix(value, rssi if rssi is not None else 0)
-        if page >= len(self.monitors):
+        if page == PAGE_HEALTH or page >= len(self.monitors):
             # The health page carries the uptime, so it redraws on its own
             # schedule -- one second is the resolution it prints.
+            value = self._mix(value, hash(getattr(self.wifi, "ip", None)
+                                          or ""))
             return self._mix(value, self.uptime_s)
-        monitor = self.monitors[page]
+        if page == PAGE_OVERVIEW:
+            for index in range(len(self.monitors)):
+                value = self._mix_link(value, self.monitors[index])
+            return value
+        return self._mix_link(value, self.monitors[page])
+
+    def _mix_link(self, value, monitor):
         status = getattr(monitor, "status", None)
         decoder = getattr(monitor, "decoder", None)
         value = self._mix(value, getattr(decoder, "crc_errors", 0) if decoder
@@ -532,7 +708,7 @@ class OledTicker:
                           else 0)
         value = self._mix(value, getattr(monitor, "sequence_gap_count", 0))
         if not status:
-            return value
+            return self._mix(value, 0x5A5A)
         for key in ("current_slot", "inserted_mask", "online_mask", "pressure",
                     "control_error"):
             value = self._mix(value, status.get(key, 0))
@@ -693,9 +869,9 @@ class OledTicker:
         if alerts:
             return "   ".join(alerts)
         if not self._messages:
-            return "%s  %s" % (
-                " ".join(link_badge(m) for m in self.monitors),
-                getattr(self.wifi, "ip", None) or "no events yet")
+            # The header already carries the link badges; on its own the IP
+            # fits the row and is drawn still (see _step_marquee).
+            return getattr(self.wifi, "ip", None) or "no events yet"
         return "   ".join(self._messages)
 
     # -- drawing -----------------------------------------------------------
@@ -708,16 +884,79 @@ class OledTicker:
             self.monitors, getattr(self.wifi, "state", None), rssi,
             getattr(self.client, "state", None),
             chip_masks=self._chip_active_mask, columns=self.columns), 0, 0)
-        lines = self.body_lines()
-        for row in range(min(self.body_rows, len(lines))):
-            frame.text(lines[row], 0, (row + 1) * 8)
+        if self.page == PAGE_OVERVIEW:
+            self._draw_overview(frame)
+        else:
+            lines = self.body_lines()
+            for row in range(min(self.body_rows, len(lines))):
+                frame.text(lines[row], 0, (row + 1) * 8)
         self._dirty |= (1 << (self.rows - 1)) - 1
+
+    def _draw_overview(self, frame):
+        """Every link in its own column; see the module docstring."""
+        shown = len(self.monitors) if len(self.monitors) < 2 else 2
+        if not shown:
+            return
+        width = self.display.width // shown
+        columns = width // 8
+        body = self.body_rows
+        for column in range(shown):
+            monitor = self.monitors[column]
+            left = column * width
+            frame.text(overview_title(monitor, columns), left, 8)
+            status = getattr(monitor, "status", None)
+            # Rows left for channels once the title is placed; the footer
+            # only gets drawn on a panel tall enough for all four channels.
+            channel_rows = body - 1 if body - 1 < 4 else 4
+            if not status:
+                if channel_rows:
+                    frame.text(overview_idle(monitor, columns), left, 16)
+                channel_rows = 0
+            for index in range(channel_rows):
+                row = overview_channel(index, status)
+                self._draw_channel(frame, left, (index + 2) * 8, width, row)
+            if body >= 6:
+                footer = overview_footer(monitor, columns)
+                if footer:
+                    frame.text(footer, left, 6 * 8)
+            if column:
+                # The divider sits on the last pixel column of the left half,
+                # which the bars leave free.
+                frame.vline(left - 1, 8, body * 8, 1)
+
+    @staticmethod
+    def _draw_channel(frame, left, top, width, row):
+        text, latched, pull = row
+        if latched:
+            # Only the text cell is inverted: an inverted bar reads backwards,
+            # its empty part looking like the full one.
+            frame.fill_rect(left, top, OVERVIEW_TEXT_PX - 1, 8, 1)
+            frame.text(text, left, top, 0)
+        else:
+            frame.text(text, left, top, 1)
+        bar_left = left + OVERVIEW_TEXT_PX
+        bar_right = left + width - 3
+        if width >= OVERVIEW_DIGITS_MIN_WIDTH:
+            # A full-width column has room to print the number too.
+            bar_right -= 24
+            frame.text("%3d" % pull, bar_right + 2, top, 1)
+        bar_width = bar_right - bar_left + 1
+        frame.rect(bar_left, top + 1, bar_width, 6, 1)
+        fill = (bar_width - 2) * pull // 100
+        if fill:
+            frame.fill_rect(bar_left + 1, top + 2, fill, 4, 1)
+        # Centre tick above and below the bar. Stacked rows line their ticks
+        # up into a dotted 50 % rule down the column.
+        centre = bar_left + bar_width // 2
+        frame.pixel(centre, top, 1)
+        frame.pixel(centre, top + 7, 1)
 
     def _draw_marquee(self):
         frame = self.display.frame
         top = (self.rows - 1) * 8
         frame.fill_rect(0, top, self.display.width, 8, 0)
-        frame.text(self._marquee, self._marquee_x, top)
+        frame.text(self._marquee,
+                   0 if self._marquee_fits() else self._marquee_x, top)
         self._dirty |= 1 << (self.rows - 1)
 
     # -- loop --------------------------------------------------------------
@@ -751,8 +990,9 @@ class OledTicker:
         self._update_chips(now_ms)
         if self._page_ms_mark is None:
             self._page_ms_mark = now_ms
-        elif _ticks_diff(now_ms, self._page_ms_mark) >= self.page_ms:
+        elif _ticks_diff(now_ms, self._page_ms_mark) >= self.page_dwell_ms():
             self.page_index += 1
+            self.page = self.next_page(self.page)
             self._page_ms_mark = now_ms
             self._content_ms = None
         if self._content_ms is None or \
@@ -776,16 +1016,33 @@ class OledTicker:
         self._flush_one_page()
 
     def _step_marquee(self):
+        """Scroll copy wider than the panel; hold copy that fits still.
+
+        Text that fits is drawn at x=0 and left alone: scrolling an IP
+        address means any one glance (or photo) catches it cut in half.
+        _marquee_x keeps ticking as the clock that decides when to re-read
+        the copy, so a new event still replaces it on the same schedule.
+        """
         if self._marquee_x <= -(len(self._marquee) * 8):
             # Re-read the copy only at the wrap: swapping it mid-scroll would
             # make the line jump while somebody is still reading it.
+            previous = self._marquee
             self._marquee = self.marquee_text()
             self._marquee_x = self.display.width
+            if self._marquee_fits() and self._marquee == previous:
+                return  # still the same still line; nothing to redraw
         else:
             if not self._marquee:
                 self._marquee = self.marquee_text()
-            self._marquee_x -= self.marquee_step
+                self._marquee_x -= self.marquee_step
+            else:
+                self._marquee_x -= self.marquee_step
+                if self._marquee_fits():
+                    return
         self._draw_marquee()
+
+    def _marquee_fits(self):
+        return len(self._marquee) * 8 <= self.display.width
 
     def _flush_one_page(self):
         """At most one 128-byte I2C write per loop iteration."""
@@ -808,7 +1065,9 @@ BUS_KEYS = (("OLED_I2C_ID", "id"), ("OLED_SDA_PIN", "sda"),
             ("OLED_SCL_PIN", "scl"), ("OLED_I2C_FREQ", "freq"))
 DISPLAY_KEYS = (("OLED_WIDTH", "width"), ("OLED_HEIGHT", "height"),
                 ("OLED_ADDRESS", "address"), ("OLED_CONTRAST", "contrast"))
-TICKER_KEYS = (("OLED_PAGE_MS", "page_ms"), ("OLED_REFRESH_MS", "refresh_ms"),
+TICKER_KEYS = (("OLED_PAGE_MS", "page_ms"),
+               ("OLED_OVERVIEW_MS", "overview_ms"),
+               ("OLED_REFRESH_MS", "refresh_ms"),
                ("OLED_MARQUEE_MS", "marquee_ms"),
                ("OLED_MARQUEE_STEP_PX", "marquee_step"))
 # Only the pins are defaulted here, because there is nowhere else to put them:

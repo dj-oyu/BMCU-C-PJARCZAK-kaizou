@@ -62,9 +62,29 @@ to keep it quiet. Panel geometry, address, page dwell, and marquee speed are the
 `OLED_*` keys in `config_example.py`.
 
 On a 128x64 panel the top row is always the header (`A+ B? -58 U+`: per-link
-state, RSSI, uplink), the bottom row is always a marquee of the most recent
-decoded events, and the six rows between rotate through one page per link plus a
-Pico health page. A channel row reads `1*#oK2U 85LJ`:
+state, RSSI, uplink), the bottom row is always a marquee (lit alerts first, then
+the most recent decoded events, or the IP when there are none; copy that fits
+the row is held still instead of scrolling), and the six rows between rotate:
+
+1. **Overview** (`OLED_OVERVIEW_MS`, 10 s): every link side by side, one 64 px
+   column each (the full width when only one link is configured). Each column
+   is a title (`A+ s2`: link, state, the slot feeding the printer), four
+   channel rows, and a footer (`E0 c0`: control error, crc + framing errors +
+   sequence gaps). A channel row is `1*U` plus one latch letter, then the
+   buffer pull as a bar with a tick at 50 %. Owner is `T` tail / `*` owner /
+   `#` inserted / `.` empty / `?` not reported; the latch letter is the most
+   urgent of `J` jam, `L` low pull, `D` DM autoload, `F` motion fault, and a
+   channel with any latch has its text cell drawn inverted. A link with no
+   STATUS shows its state word (`offline`) instead of bars.
+2. **One detail page per link** (`OLED_PAGE_MS`, 5 s), only for links that have
+   reported a STATUS -- an unplugged second BMCU gets no page of its own.
+3. **Network/health**: the IP alone on the first row (up to 15 characters, so
+   it is never cut), RSSI, BMB1 uplink state and reconnects, uptime and
+   temperature, heap and exceptions, then loop timing -- replaced by
+   `q drop jf` once records have been dropped or the journal has failed.
+
+A detail-page channel row reads `1*#oK2U 85LJ`, under a summary row
+`A s3 P140 E1` (link, slot, pressure, control error):
 
 | field | meaning |
 | --- | --- |
