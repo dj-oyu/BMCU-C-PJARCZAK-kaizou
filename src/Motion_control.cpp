@@ -521,7 +521,7 @@ static unload_hold::State g_unload_hold[4] = {{0u, 0u}, {0u, 0u}, {0u, 0u}, {0u,
 // reported until a measured retract or a new strand clears them.
 #ifdef BMCU_KEY_TO_HEAD_MM
 #ifndef BMCU_ZONE_PROOF
-#define BMCU_ZONE_PROOF 1
+#define BMCU_ZONE_PROOF 0
 #endif
 #else
 #define BMCU_KEY_TO_HEAD_MM (120.0f + AMS_RETRACT_LEN * 1000.0f)
@@ -541,7 +541,7 @@ static constexpr strand_zone::Config kZoneConfig = {
 };
 static_assert(kZoneConfig.down_clear < kZoneConfig.down_set, "zone hysteresis");
 static_assert(kZoneConfig.down_set < kZoneConfig.head, "head must be past the merger");
-static_assert(kZoneConfig.dir_band > 0, "direction band");
+static_assert(kZoneConfig.dir_band > 0 && kZoneConfig.dir_band < 32767, "direction band (int16 integrator)");
 
 // The switch reading the estimate sees is debounced: a lever float during
 // printing would otherwise read as the tail passing (falling edge while
@@ -568,6 +568,16 @@ static void zone_changed()
     g_zone_rep_ch = 0xFFu;
     ams_downstream_changed();
     bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+}
+
+// &g_zone[ch] through an empty asm: GCC otherwise recomputes the address
+// (ch * 28 + base) before nearly every field access of the inlined update,
+// about 150 B of flash. A noinline wrapper fixes it too, but costs 80 B more.
+static inline strand_zone::State& zone_state(uint8_t ch)
+{
+    strand_zone::State* p = &g_zone[ch];
+    __asm__("" : "+r"(p));
+    return *p;
 }
 
 // One AS5600 sample of channel `ch`. `fwd_delta` is forward travel in counts.
@@ -604,10 +614,12 @@ static void zone_sample(uint8_t ch, int32_t fwd_delta, bool measured, bool drivi
     const bool consuming =
         ams_state_get_loaded() == ch &&
         ams[motion_control_ams_num].filament[ch].motion == _filament_motion::on_use;
-    bool changed = strand_zone::update(g_zone[ch], kZoneConfig, fwd_delta, measured,
-                                       driving_fwd, g_zone_key[ch] != 0u, consuming);
+    strand_zone::State& zs = zone_state(ch);
+    bool changed = strand_zone::update(zs, kZoneConfig, fwd_delta, measured, driving_fwd,
+                                       g_zone_key[ch] != 0u, consuming);
     // Once per arrival: a front that stays at the head proves nothing new.
-    if (strand_zone::take_passage(g_zone[ch], kZoneConfig) &&
+    // Compiled out when the proof is off (consume 0): passage never fires.
+    if (kZoneConfig.consume > 0 && strand_zone::take_passage(zs, kZoneConfig) &&
         strand_zone::passage_proof(g_zone, kZoneConfig, ch) != 0u)
         changed = true;
     if (changed) zone_changed();
@@ -638,12 +650,13 @@ void Motion_control_zone_claimed(uint8_t ch)
 {
     if (!BMCU_DOWNSTREAM_STRAND || ch >= 4u) return;
     Motion_control_zone_send_started(ch);
-    if (strand_zone::claim(g_zone[ch], kZoneConfig)) zone_changed();
+    if (strand_zone::claim(zone_state(ch), kZoneConfig)) zone_changed();
 }
 
 uint8_t Motion_control_zone_pack(void)
 {
-    return strand_zone::pack(g_zone, kZoneConfig);
+    // Off: every zone reads NONE, and g_zone and its companions are dropped.
+    return BMCU_DOWNSTREAM_STRAND ? strand_zone::pack(g_zone, kZoneConfig) : 0u;
 }
 
 uint8_t Motion_control_downstream_mask(void)
@@ -653,14 +666,14 @@ uint8_t Motion_control_downstream_mask(void)
 
 void Motion_control_zone_restore(uint8_t packed, bool valid, uint8_t owner)
 {
+    if (!BMCU_DOWNSTREAM_STRAND) return;
     g_zone_ready = 0u;
     for (uint8_t i = 0u; i < 4u; i++)
     {
         const uint8_t z = static_cast<uint8_t>((packed >> (2u * i)) & 0x03u);
         // The switch is read once it has settled (zone_sample); until then
         // the zone reads as stored.
-        strand_zone::restore(g_zone[i], kZoneConfig, BMCU_DOWNSTREAM_STRAND ? z : 0u, valid,
-                             BMCU_DOWNSTREAM_STRAND && owner == i);
+        strand_zone::restore(g_zone[i], kZoneConfig, z, valid, owner == i);
         g_zone_key[i] = 0u;
         g_zone_key_change_ms[i] = 0u;
     }
@@ -668,7 +681,7 @@ void Motion_control_zone_restore(uint8_t packed, bool valid, uint8_t owner)
     // With none, the first settled readings decide what is written: a record
     // of placeholders would read as valid at the next boot.
     g_zone_packed = strand_zone::pack(g_zone, kZoneConfig);
-    if (BMCU_DOWNSTREAM_STRAND && valid && g_zone_packed != packed)
+    if (valid && g_zone_packed != packed)
         ams_downstream_changed();
 }
 
@@ -2553,6 +2566,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         (kSpeedReciprocalNumeratorQ20 + dt_us / 2u) / dt_us;
 
     MC_AS5600.updata_angle();
+    const uint32_t zone_now_ms = time_ms_fast_from_ticks32(now_ticks);
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
@@ -2581,7 +2595,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
             zone_sample(i, 0, false,
                         g_motor_pwm[i] != 0 &&
                             MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pull,
-                        time_ms_fast_from_ticks32(now_ticks));
+                        zone_now_ms);
             continue;
         }
 
@@ -2606,7 +2620,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         g_filament_position_counts[i] += diff;
         // Raw counts grow on a retract (send negates them for its progress),
         // so forward travel is -diff.
-        zone_sample(i, -diff, true, false, time_ms_fast_from_ticks32(now_ticks));
+        zone_sample(i, -diff, true, false, zone_now_ms);
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=

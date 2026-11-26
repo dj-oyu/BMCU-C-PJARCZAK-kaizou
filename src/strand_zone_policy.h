@@ -51,8 +51,9 @@ struct Config
 struct State
 {
     int32_t front;        // downstream end, valid when front_known
-    int32_t boot_front;   // where an unknown strand found at boot is put
-    int32_t dir_acc;      // travel integrator for last_dir, in [-dir_band, dir_band]
+    uint8_t boot_valid;   // the boot record was valid: an unknown strand found at
+                          // boot is put at down_set, else at the head
+    int16_t dir_acc;      // travel integrator for last_dir, in [-dir_band, dir_band]
     int32_t consumed;     // measured travel past the head while consuming
     int8_t last_dir;      // direction of the last sustained motion
     uint8_t key;          // last switch reading (1 = filament at the switch)
@@ -86,7 +87,7 @@ inline uint8_t derive_zone(const State& s, const Config& c)
 inline void reset(State& s)
 {
     s.front = 0;
-    s.boot_front = 0;
+    s.boot_valid = 0u;
     s.dir_acc = 0;
     s.consumed = 0;
     s.last_dir = 0;
@@ -130,7 +131,7 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
         if (key && !s.front_known)
         {
             s.front_known = 1u;
-            s.front = s.boot_front;
+            s.front = s.boot_valid ? c.down_set : c.head;
             s.exact = 0u;
         }
     }
@@ -142,7 +143,7 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
             // Direction is set by sustained travel, not by the sign of one
             // count: a count of jitter at rest must not turn a runout into a
             // float or a float into a runout.
-            s.dir_acc = clamp(s.dir_acc + fwd_delta, -c.dir_band, c.dir_band);
+            s.dir_acc = static_cast<int16_t>(clamp(s.dir_acc + fwd_delta, -c.dir_band, c.dir_band));
             if (s.dir_acc >= c.dir_band) s.last_dir = 1;
             else if (s.dir_acc <= -c.dir_band) s.last_dir = -1;
             if (s.front_known)
@@ -160,7 +161,7 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
                     s.reached_head = 0u;
                     s.consumed = 0;
                 }
-                else if (s.exact && consuming && moved > c.head)
+                else if (c.consume > 0 && s.exact && consuming && moved > c.head)
                 {
                     s.consumed += moved - (moved - fwd_delta > c.head ? moved - fwd_delta : c.head);
                     if (!s.reached_head && c.consume > 0 && s.consumed >= c.consume)
@@ -186,7 +187,7 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
             const int32_t past = c.down_set + (c.down_set - c.down_clear);
             if (!s.front_known || s.front < past) s.front = past;
             s.front_known = 1u;
-            s.dir_acc = c.dir_band;
+            s.dir_acc = static_cast<int16_t>(c.dir_band);
             s.last_dir = 1;
         }
     }
@@ -379,7 +380,7 @@ inline void restore(State& s, const Config& c, uint8_t stored_zone, bool valid, 
     // A strand known only to be short of the merger may be anywhere in its
     // branch up to the junction: an estimate behind the real front would
     // under-report its next push.
-    s.boot_front = valid ? c.down_set : c.head;
+    s.boot_valid = valid ? 1u : 0u;
     switch (z)
     {
     case kDownstream:
