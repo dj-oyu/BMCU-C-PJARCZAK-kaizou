@@ -118,6 +118,14 @@ def decode_channel_flags(raw):
         # Firmware before wire revision 8 sent this bit as zero, which reads as
         # "never in TAIL" and is the correct thing for it to mean there.
         "tail": bool(raw & 0x40),
+        # This channel's strand (or a tail piece it left) may be past the
+        # merger, by the firmware's travel-based estimate
+        # (docs/strand_zone_design.md). Independent of loaded,
+        # which is released at command time -- this is what tells an idle
+        # channel whose tip waits at the merger from one whose tip was left in
+        # the tool head. More than one channel set is the collision it shows.
+        # Firmware before wire revision 12 sent this bit as zero.
+        "downstream": bool(raw & 0x80),
         "raw": raw,
     }
 

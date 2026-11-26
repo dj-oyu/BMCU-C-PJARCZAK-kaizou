@@ -8,9 +8,11 @@
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "strand_zone_policy.h"
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
 #include "on_use_jam_policy.h"
+#include "empty_unload_policy.h"
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 #include "unload_hold_policy.h"
@@ -500,6 +502,189 @@ static uint32_t g_last_on_use_exit_ms[4] = {0u,0u,0u,0u};
 #define BMCU_UNLOAD_HOLD 1
 #endif
 static unload_hold::State g_unload_hold[4] = {{0u, 0u}, {0u, 0u}, {0u, 0u}, {0u, 0u}};
+
+// ===== Strand zones =====
+// Where each channel's strand is, estimated from AS5600 travel; see
+// docs/strand_zone_design.md and src/strand_zone_policy.h. Observe-only:
+// persisted, reported as BmcuChannelFlags bit 7, and nothing gates on it.
+//
+// Geometry, in counts from the inner switch. Park is where DM autoload's
+// Stage 2 leaves the tip. The head is derived from this build's retract
+// length -- the value chosen so an unload brings the tip back to the merger --
+// unless -DBMCU_KEY_TO_HEAD_MM gives the real distance.
+//
+// The passage proof (another channel reaching the head clears this one) is
+// only as good as the head distance: a head short of the real nozzle fires it
+// while a remnant is still in the tube. The derived head is a guess, so the
+// proof is off unless the real distance is given (or -DBMCU_ZONE_PROOF=1
+// accepts the guess); without it remnants and hand-removed strands stay
+// reported until a measured retract or a new strand clears them.
+#ifdef BMCU_KEY_TO_HEAD_MM
+#ifndef BMCU_ZONE_PROOF
+#define BMCU_ZONE_PROOF 0
+#endif
+#else
+#define BMCU_KEY_TO_HEAD_MM (120.0f + AMS_RETRACT_LEN * 1000.0f)
+#endif
+#ifndef BMCU_ZONE_PROOF
+#define BMCU_ZONE_PROOF 0
+#endif
+static constexpr strand_zone::Config kZoneConfig = {
+    distance_m_to_counts(0.120f),
+    distance_m_to_counts(0.150f),
+    distance_m_to_counts(0.130f),
+    distance_m_to_counts(BMCU_KEY_TO_HEAD_MM / 1000.0f),
+    distance_m_to_counts(0.001f),   // direction needs 1 mm of net travel
+    0,                              // the switch opens where it closed
+    // 10 mm consumed past the head while the printer feeds from the channel
+    BMCU_ZONE_PROOF ? distance_m_to_counts(0.010f) : 0,
+};
+static_assert(kZoneConfig.down_clear < kZoneConfig.down_set, "zone hysteresis");
+static_assert(kZoneConfig.down_set < kZoneConfig.head, "head must be past the merger");
+static_assert(kZoneConfig.dir_band > 0 && kZoneConfig.dir_band < 32767, "direction band (int16 integrator)");
+
+// The switch reading the estimate sees is debounced: a lever float during
+// printing would otherwise read as the tail passing (falling edge while
+// moving forward). Short enough to keep the edge within a few mm of travel.
+static constexpr uint32_t ZONE_KEY_DEBOUNCE_MS = 50u;
+// After boot the estimate waits for each switch to read the same for this
+// long before taking it as the first reading (the ADC filter starts at 0).
+static constexpr uint32_t ZONE_KEY_SETTLE_MS = 200u;
+
+static strand_zone::State g_zone[4];
+static uint8_t g_zone_key[4] = {0u,0u,0u,0u};          // debounced reading
+static uint32_t g_zone_key_change_ms[4] = {0u,0u,0u,0u};
+static uint8_t g_zone_ready = 0u;                       // channels past the settle
+static uint8_t g_zone_packed = 0u;                      // record as last asked for
+// Report latch for DOWNSTREAM_OCCUPIED: the last (channel, others) pair
+// emitted, re-armed whenever any zone changes. A send edge can repeat every
+// pass when something forces the motor out of send and motor_motion_switch
+// puts it back (a bad AS5600, a bus error); it reports once.
+static uint8_t g_zone_rep_ch = 0xFFu;
+static uint8_t g_zone_rep_others = 0u;
+
+static void zone_changed()
+{
+    g_zone_rep_ch = 0xFFu;
+    ams_downstream_changed();
+    bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+}
+
+// &g_zone[ch] through an empty asm: GCC otherwise recomputes the address
+// (ch * 28 + base) before nearly every field access of the inlined update,
+// about 150 B of flash. A noinline wrapper fixes it too, but costs 80 B more.
+static inline strand_zone::State& zone_state(uint8_t ch)
+{
+    strand_zone::State* p = &g_zone[ch];
+    __asm__("" : "+r"(p));
+    return *p;
+}
+
+// One AS5600 sample of channel `ch`. `fwd_delta` is forward travel in counts.
+static void zone_sample(uint8_t ch, int32_t fwd_delta, bool measured, bool driving_fwd,
+                        uint32_t now_ms)
+{
+    if (!BMCU_DOWNSTREAM_STRAND) return;
+
+    // ks 1 (both) and 3 (inner only) have filament at the inner switch;
+    // single-switch builds only ever report 0 or 1.
+    const uint8_t raw = (MC_ONLINE_key_stu[ch] == 1u || MC_ONLINE_key_stu[ch] == 3u) ? 1u : 0u;
+    const uint8_t bit = static_cast<uint8_t>(1u << ch);
+    if (!(g_zone_ready & bit))
+    {
+        // Settling after boot. Nothing moves before the printer talks, so
+        // travel seen here is not counted.
+        if (raw != g_zone_key[ch] || g_zone_key_change_ms[ch] == 0u)
+        {
+            g_zone_key[ch] = raw;
+            g_zone_key_change_ms[ch] = now_ms ? now_ms : 1u;
+            return;
+        }
+        if ((now_ms - g_zone_key_change_ms[ch]) < ZONE_KEY_SETTLE_MS) return;
+        g_zone_ready = static_cast<uint8_t>(g_zone_ready | bit);
+        g_zone_key_change_ms[ch] = now_ms;
+        // The restore left the key unread: this update takes it, not as an
+        // edge.
+    }
+    else if (raw == g_zone_key[ch]) g_zone_key_change_ms[ch] = now_ms;
+    else if ((now_ms - g_zone_key_change_ms[ch]) >= ZONE_KEY_DEBOUNCE_MS) g_zone_key[ch] = raw;
+
+    // The printer is feeding from this channel: travel past the head is
+    // filament it melts, not a push against something blocked.
+    const bool consuming =
+        ams_state_get_loaded() == ch &&
+        ams[motion_control_ams_num].filament[ch].motion == _filament_motion::on_use;
+    strand_zone::State& zs = zone_state(ch);
+    bool changed = strand_zone::update(zs, kZoneConfig, fwd_delta, measured, driving_fwd,
+                                       g_zone_key[ch] != 0u, consuming);
+    // Once per arrival: a front that stays at the head proves nothing new.
+    // Compiled out when the proof is off (consume 0): passage never fires.
+    if (kZoneConfig.consume > 0 && strand_zone::take_passage(zs, kZoneConfig) &&
+        strand_zone::passage_proof(g_zone, kZoneConfig, ch) != 0u)
+        changed = true;
+    if (changed) zone_changed();
+    // The record is written ahead of the zone (strand_zone::stored_zone), so
+    // it can change while the zone does not.
+    const uint8_t packed = strand_zone::pack(g_zone, kZoneConfig);
+    if (packed != g_zone_packed)
+    {
+        g_zone_packed = packed;
+        ams_downstream_changed();
+    }
+}
+
+void Motion_control_zone_send_started(uint8_t ch)
+{
+    if (!BMCU_DOWNSTREAM_STRAND || ch >= 4u) return;
+    const uint8_t others = static_cast<uint8_t>(
+        strand_zone::downstream_mask(g_zone) & static_cast<uint8_t>(~(1u << ch)) & 0x0Fu);
+    if (others == 0u || (g_zone_rep_ch == ch && g_zone_rep_others == others)) return;
+    g_zone_rep_ch = ch;
+    g_zone_rep_others = others;
+    bmcu_link_downstream_occupied(ch, others);
+}
+
+// The merger owner is using the tube, so its strand counts as downstream even
+// if no travel says so yet (before_on_use straight onto a parked strand).
+void Motion_control_zone_claimed(uint8_t ch)
+{
+    if (!BMCU_DOWNSTREAM_STRAND || ch >= 4u) return;
+    Motion_control_zone_send_started(ch);
+    if (strand_zone::claim(zone_state(ch), kZoneConfig)) zone_changed();
+}
+
+uint8_t Motion_control_zone_pack(void)
+{
+    // Off: every zone reads NONE, and g_zone and its companions are dropped.
+    return BMCU_DOWNSTREAM_STRAND ? strand_zone::pack(g_zone, kZoneConfig) : 0u;
+}
+
+uint8_t Motion_control_downstream_mask(void)
+{
+    return BMCU_DOWNSTREAM_STRAND ? strand_zone::downstream_mask(g_zone) : 0u;
+}
+
+void Motion_control_zone_restore(uint8_t packed, bool valid, uint8_t owner)
+{
+    if (!BMCU_DOWNSTREAM_STRAND) return;
+    g_zone_ready = 0u;
+    for (uint8_t i = 0u; i < 4u; i++)
+    {
+        const uint8_t z = static_cast<uint8_t>((packed >> (2u * i)) & 0x03u);
+        // The switch is read once it has settled (zone_sample); until then
+        // the zone reads as stored.
+        strand_zone::restore(g_zone[i], kZoneConfig, z, valid, owner == i);
+        g_zone_key[i] = 0u;
+        g_zone_key_change_ms[i] = 0u;
+    }
+    // Only a valid record is rewritten here (the owner forced downstream).
+    // With none, the first settled readings decide what is written: a record
+    // of placeholders would read as valid at the next boot.
+    g_zone_packed = strand_zone::pack(g_zone, kZoneConfig);
+    if (valid && g_zone_packed != packed)
+        ams_downstream_changed();
+}
+
 
 extern void RGB_update();
 
@@ -1070,6 +1255,9 @@ public:
         pwm_zeroed = 0;
 
         if (_motion == filament_motion_enum::filament_motion_send) {
+            // Pushing towards the head: report any other strand still past
+            // the merger. An edge, since an unchanged motion returned above.
+            Motion_control_zone_send_started(static_cast<uint8_t>(CHx));
             send_start_ms = time_now;
             send_stop_latch = false;
             send_len_abort = 0;
@@ -2378,6 +2566,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         (kSpeedReciprocalNumeratorQ20 + dt_us / 2u) / dt_us;
 
     MC_AS5600.updata_angle();
+    const uint32_t zone_now_ms = time_ms_fast_from_ticks32(now_ticks);
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
@@ -2401,6 +2590,12 @@ void AS5600_distance_updata(uint32_t now_ticks)
             was_ok[i] = 0u;
             speed_as5600_q[i] = 0;
             g_as5600_last_delta[i] = 0;
+            // Unmeasured: any drive that is not a pull may be moving the
+            // strand forward, and the zone assumes it did.
+            zone_sample(i, 0, false,
+                        g_motor_pwm[i] != 0 &&
+                            MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pull,
+                        zone_now_ms);
             continue;
         }
 
@@ -2423,6 +2618,9 @@ void AS5600_distance_updata(uint32_t now_ticks)
         as5600_distance_save[i] = now;
         g_as5600_last_delta[i] = static_cast<int16_t>(diff);
         g_filament_position_counts[i] += diff;
+        // Raw counts grow on a retract (send negates them for its progress),
+        // so forward travel is -diff.
+        zone_sample(i, -diff, true, false, zone_now_ms);
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=
@@ -2949,6 +3147,17 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
             filament_now_position[num] = filament_idle;
             MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_pressure_ctrl_idle, 100, time_now);
             MC_STU_RGB_set_latch(num, 0x00u, 0x00u, 0x00u, time_now, 0u);
+
+            // A retract commanded on a channel that is already empty can never
+            // move anything; finish it the way a successful one finishes so
+            // the printer stops waiting for it. See empty_unload_policy.h.
+            if (BMCU_EMPTY_UNLOAD_COMPLETE &&
+                empty_unload::completes_at_once(motion, MC_ONLINE_key_stu[num]))
+            {
+                A.filament_use_flag = 0x00;
+                A.filament[num].motion = _filament_motion::idle;
+                bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+            }
         }
     }
 }
@@ -3536,6 +3745,8 @@ uint8_t Motion_control_get_channel_flags(uint8_t channel)
     const bool owns = (ams_state_get_loaded() == channel);
     flags.bits.loaded = owns ? 1u : 0u;
     flags.bits.tail = (owns && ams_state_is_tail()) ? 1u : 0u;
+    flags.bits.downstream =
+        ((Motion_control_downstream_mask() & (1u << channel)) != 0u) ? 1u : 0u;
     return flags.raw;
 }
 

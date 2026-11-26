@@ -55,3 +55,11 @@ void ams_state_preempt(uint8_t claiming_ch);
 void ams_state_set_tail(void);
 uint8_t ams_state_get_loaded(void);
 bool ams_state_is_tail(void);
+
+// Strand zones (src/strand_zone_policy.h, docs/strand_zone_design.md).
+// Motion_control.cpp owns the estimate; main.cpp persists it.
+void ams_downstream_changed(void);           // a zone changed: persist
+uint8_t Motion_control_zone_pack(void);       // 2 bits per channel
+uint8_t Motion_control_downstream_mask(void); // channels past the merger
+void Motion_control_zone_restore(uint8_t packed, bool valid, uint8_t owner);
+void Motion_control_zone_claimed(uint8_t ch); // merger acquired by ch

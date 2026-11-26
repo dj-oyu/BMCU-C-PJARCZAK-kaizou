@@ -11,6 +11,8 @@
 #include "Debug_log.h"
 #include "bmcu_link.h"
 #include "ams_merger_policy.h"
+#include "strand_zone_policy.h"
+#include "app_api.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -71,6 +73,9 @@ void RGB_update()
 static uint8_t g_fil_dirty = 0;
 static ams_merger::State g_merger = { ams_merger::kNoChannel, 0u };
 static uint8_t g_state_dirty = 0;
+static uint8_t g_down_dirty = 0;
+// Packed strand zones read at boot, applied once Motion_control_init has run.
+static uint8_t g_stored_zones = 0u;
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -144,6 +149,10 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
 void ams_state_set_loaded(uint8_t filament_ch)
 {
     if (ams_merger::acquire(g_merger, filament_ch)) g_state_dirty = 1u;
+    // The owner is using the tube, so its strand is downstream by definition.
+    // A before_on_use straight onto a parked channel, with no send_out first,
+    // drives it there through hold_load without ever entering send.
+    if (ams_merger::owns(g_merger, filament_ch)) Motion_control_zone_claimed(filament_ch);
 }
 
 // Refused wildcard releases, saturating, and whether this TAIL episode has
@@ -226,6 +235,23 @@ bool ams_state_is_tail(void)
     return ams_merger::is_tail(g_merger);
 }
 
+// Called where a channel enters send. Another channel still marked downstream
+// is the collision the bit exists to witness: report it, then record this one
+// regardless -- this commit observes, it does not gate.
+// A strand zone changed (Motion_control.cpp): persist the packed zones.
+void ams_downstream_changed(void)
+{
+    g_down_dirty = 1u;
+}
+
+static void ams_downstream_save_run()
+{
+    if (!g_down_dirty) return;
+
+    if (Flash_AMS_downstream_write(Motion_control_zone_pack()))
+        g_down_dirty = 0u;
+}
+
 static void ams_state_save_run()
 {
     if (!g_state_dirty) return;
@@ -259,7 +285,7 @@ void ams_datas_save_run()
 
 static void persistence_save_run()
 {
-    if (!g_state_dirty && !g_fil_dirty) return;
+    if (!g_state_dirty && !g_down_dirty && !g_fil_dirty) return;
     if (!bus_port_to_host.quiet_for_us(5000u)) return;
 
     static uint32_t last_save_tick = 0u;
@@ -267,8 +293,18 @@ static void persistence_save_run()
     const uint32_t min_gap = time_hw_tpms * 10u;
     if (last_save_tick != 0u && static_cast<uint32_t>(now - last_save_tick) < min_gap) return;
 
+    // One flash write per call, merger first: it is what a reboot restores
+    // motion from. The downstream mask is next, then filament metadata.
     if (g_state_dirty) ams_state_save_run();
+    else if (g_down_dirty) ams_downstream_save_run();
     else ams_datas_save_run();
+    // A page erase in the shared ring may have taken the other kind's newest
+    // record with it; write both again.
+    if (Flash_AMS_state_take_page_erased())
+    {
+        g_state_dirty = 1u;
+        g_down_dirty = 1u;
+    }
     last_save_tick = time_ticks32();
 }
 int main(void)
@@ -333,7 +369,7 @@ int main(void)
     {
         uint8_t stored = 0xFFu;
         bool stored_tail = false;
-        if (Flash_AMS_state_read(&stored, &stored_tail))
+        if (Flash_AMS_state_read(&stored, &stored_tail, &g_stored_zones))
         {
             ams_merger::restore(g_merger, stored, stored_tail);
             const uint8_t ch = g_merger.owner;
@@ -355,6 +391,11 @@ int main(void)
     }
 
     Motion_control_init();
+    // Owner implies downstream. Without a zone record (first boot after this
+    // change, a downgrade round trip, a page erase) a strand found at a switch
+    // is assumed to reach the head.
+    Motion_control_zone_restore(g_stored_zones, Flash_AMS_downstream_valid(),
+                                ams_state_get_loaded());
     bambubus_init();
     bus_init();
 

@@ -66,7 +66,16 @@ union BmcuChannelFlags
         // afterwards, which are the two cases a reader most needs to tell
         // apart. Misdiagnosing this area has already cost a day.
         uint8_t tail : 1;
-        uint8_t reserved : 1;
+        // This channel's strand may be past the merger: its estimated zone
+        // (src/strand_zone_policy.h) is DOWNSTREAM or TAIL. Estimated from
+        // AS5600 travel, not from commands -- so it is set however the strand
+        // got there and clears only when measured travel brings it back, or
+        // when another channel's strand has filled the tube to the head.
+        // Not ownership: the merger owner is released at command time,
+        // before the strand moves, so bit 5 cannot say whether filament was
+        // left in the head. Flash-backed. More than one channel set is the
+        // collision it exists to show. See docs/strand_zone_design.md.
+        uint8_t downstream : 1;
     } bits;
 };
 static_assert(sizeof(BmcuChannelFlags) == 1u, "BmcuChannelFlags must stay one byte");
@@ -128,6 +137,16 @@ void bmcu_link_merger_tail_refused(uint32_t count);
 // Not edge-latched: one emission per preempt, and a preempt ends the TAIL
 // episode that produced it, so there is nothing here to storm.
 void bmcu_link_merger_tail_preempted(uint8_t claiming_ch);
+// Observe-only: a motion/stu_motion frame for any AMS on the bus. Emits a
+// record only when the command for that unit changes. See printer_motion_watch.h.
+void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel,
+                                  uint8_t statu_flag, uint8_t motion_flag);
+
+// `sending_ch` started pushing towards the head (send, or a load taking the
+// merger) while the channels in `others_mask` were estimated downstream of the
+// merger. Latched per (channel, others) pair in Motion_control.cpp and
+// re-armed on any zone change, so a repeating send edge reports once.
+void bmcu_link_downstream_occupied(uint8_t sending_ch, uint8_t others_mask);
 uint32_t bmcu_link_tx_drop_count(void);
 bool bmcu_link_reset_pending(void);
 

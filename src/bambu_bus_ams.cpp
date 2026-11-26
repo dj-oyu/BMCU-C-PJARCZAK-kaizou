@@ -7,6 +7,7 @@
 #include "_bus_hardware.h"
 #include "crc_bus.h"
 #include "bmcu_link.h"
+#include "printer_motion_watch.h"
 #include "bmcu_link_protocol.h"
 #include "bmcu_ams_service_watch.h"
 #include "printer_bus_result.h"
@@ -604,6 +605,8 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
     // apparent printer silence. See docs/HMS_0500_409D_CAPTURE_RUNBOOK.md.
     if (package_recv->ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
         bmcu_link_ams_service_frame(bmcu_ams_service::kServiceMotion);
+    bmcu_link_printer_motion_cmd(printer_motion_watch::kKindMotion, package_recv->ams_num, package_recv->filamnet_channel,
+                                 package_recv->statu_flag, package_recv->motion_flag);
 
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();
@@ -786,6 +789,8 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     // Observe-only; same placement rationale as get_package_motion.
     if (package_recv->ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
         bmcu_link_ams_service_frame(bmcu_ams_service::kServiceStuMotion);
+    bmcu_link_printer_motion_cmd(printer_motion_watch::kKindStuMotion, package_recv->ams_num, package_recv->filamnet_channel,
+                                 package_recv->statu_flag, package_recv->motion_flag);
 
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t *out = bus_port_to_host.tx_build_buf();

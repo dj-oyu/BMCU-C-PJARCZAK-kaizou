@@ -57,6 +57,14 @@ jobs:
         run: npm ci
         working-directory: web
 
+      # ci/test_quint_replay.py simulates spec/bmcu_merger.qnt and
+      # spec/strand_zone.qnt and replays their traces against the firmware
+      # policies. Pinned, and run on the typescript backend, so nothing is
+      # downloaded at test time. The
+      # exhaustive Apalache check needs Java and lives in quint.yml.
+      - name: Install Quint
+        run: npm install --global @informalsystems/quint@0.34.0
+
       - name: Firmware configuration table
         run: |
           python ci/firmware_matrix.py validate

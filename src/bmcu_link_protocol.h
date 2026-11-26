@@ -170,6 +170,18 @@ enum DmTeardownCause : uint8_t
 // the collision happens regardless, because the printer is master, so the
 // record is the only thing the BMCU can contribute.
 //
+// PRINTER_MOTION_CMD: the printer changed the motion command it is sending to
+// an AMS, ours or another unit on the same bus. The value packs ams_num,
+// channel, statu_flag and motion_flag; see src/printer_motion_watch.h.
+//
+// DOWNSTREAM_OCCUPIED: a channel started pushing towards the head while
+// another channel's strand was estimated past the merger
+// (src/strand_zone_policy.h). The value packs the pushing channel in bits 0-7
+// and the mask of the channels downstream in bits 8-11. Unlike
+// MERGER_TAIL_PREEMPTED this does not depend on the merger still being owned:
+// it also fires when ownership was released by an unload command whose retract
+// had not finished, or the other strand was never retracted at all.
+//
 // Keep this block comment-free. tools/generate_bmcu_enum_registry.py splits the
 // body on commas and does not strip comments, so a comment between entries
 // makes the registry build fail.
@@ -177,6 +189,8 @@ enum DiagCounter : uint8_t
 {
     DIAG_COUNTER_AMS_SERVICE_GAP_MS = 1u, DIAG_COUNTER_AMS_WOULD_REOFFER = 2u,
     DIAG_COUNTER_MERGER_TAIL_HELD = 3u, DIAG_COUNTER_MERGER_TAIL_PREEMPTED = 4u,
+    DIAG_COUNTER_PRINTER_MOTION_CMD = 5u,
+    DIAG_COUNTER_DOWNSTREAM_OCCUPIED = 6u,
 };
 
 enum ResetState : uint8_t
