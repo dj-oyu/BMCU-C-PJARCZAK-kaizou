@@ -13,6 +13,7 @@
 #include "signal_hold_policy.h"
 #include "on_use_jam_policy.h"
 #include "empty_unload_policy.h"
+#include "pull_back_end_policy.h"
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 #include "unload_hold_policy.h"
@@ -312,6 +313,9 @@ enum : uint8_t
     DM_AUTO_S2_RETRACT,
     DM_AUTO_S2_FAIL_RETRACT,
     DM_AUTO_S2_FAIL_EXTRA,
+    // Push back to the inner switch after S2_RETRACT ran the key to none; see
+    // pull_back_end::reseat_after_retract. Survives the ks == 0 sweep.
+    DM_AUTO_RESEAT,
 };
 
 static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
@@ -355,6 +359,7 @@ static uint32_t dm_loaded_drop_t0_ms[4] = {0u,0u,0u,0u};
 // nothing is time-critical about forgiving a fault. Narrow it once teardown
 // events make excursion widths measurable.
 static constexpr uint32_t DM_FAIL_CLEAR_MS = 500u;
+static_assert(pull_back_end::kReseatMaxMs < DM_FAIL_CLEAR_MS, "reseat must end inside the withdrawn window");
 static uint32_t dm_fail_clear_t0_ms[4] = {0u,0u,0u,0u};
 #endif
 
@@ -1870,6 +1875,40 @@ public:
                                 }
                                 break;
 
+                            case DM_AUTO_RESEAT:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0xFF, 0x00);
+
+                                if (ks != 0u)
+                                {
+                                    // Back at a switch: the same insertion, so
+                                    // dm_auto_try is kept. IDLE re-enters Stage
+                                    // 1 or 2 from here if the reading asks for it.
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_remain_counts[CHx] = 0;
+                                    dm_auto_t0_ms[CHx]    = 0u;
+                                    dm_autoload_x = 0;
+                                }
+                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= pull_back_end::kReseatMaxMs)
+                                {
+                                    // Nothing came back to the switch: the
+                                    // strand is gone, and the next pass's sweep
+                                    // ends the insertion as it always did.
+                                    bmcu_link_dm_teardown(CHx, DM_AUTO_RESEAT,
+                                                          proto::TEARDOWN_TIMEOUT, ks,
+                                                          now_ms - dm_auto_t0_ms[CHx]);
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_counts[CHx] = 0;
+                                    dm_auto_t0_ms[CHx]    = 0u;
+                                    dm_autoload_x = 0;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = apply_motor_polarity(-DM_AUTO_PWM_PUSH);
+                                }
+                                break;
+
                             default:
                                 dm_auto_state[CHx]    = DM_AUTO_IDLE;
                                 dm_auto_try[CHx]      = 0u;
@@ -2790,11 +2829,13 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 static_cast<uint32_t>(distance_m_to_counts(0.050f));
             constexpr uint32_t PULL_NO_PROGRESS_TIMEOUT_MS = 3000u;
 
-            // One empty reading must not end the pull back early; see
+            // One reading must not end the pull back early; see
             // unload_hold::kPullBackEmptyConfirmMs. Evaluated on every pass so
-            // a reading with filament restarts the window.
+            // a reading with the inner switch pressed restarts the window.
+            // "Released" is none or outer only; see pull_back_end_policy.h.
             const bool empty_confirmed = signal_hold::held_for(
-                pull_back_empty_t0_ms[i], MC_ONLINE_key_stu[i] == 0,
+                pull_back_empty_t0_ms[i],
+                pull_back_end::inner_released(MC_ONLINE_key_stu[i]),
                 time_now, unload_hold::kPullBackEmptyConfirmMs);
 
             if (target_counts <= 0 || progress_counts >= target_counts)
@@ -3245,6 +3286,19 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
             // only the fault latch is protected. Widening that is a separate
             // change and needs the excursion widths this one does not.
             if (withdrawn) dm_fail_latch[ch] = 0u;
+            // A buffer-abort retract that ran the key to none may have left
+            // the tip in the gear, short of the inner switch: push it back
+            // rather than end the insertion here. See
+            // pull_back_end::reseat_after_retract. The reseat bounds itself,
+            // so it is left running on the passes that follow.
+            if (pull_back_end::reseat_after_retract(
+                    dm_auto_state[ch] == DM_AUTO_S2_RETRACT, ks))
+            {
+                dm_auto_state[ch] = DM_AUTO_RESEAT;
+                dm_auto_t0_ms[ch] = time_now ? time_now : 1u;
+                continue;
+            }
+            if (dm_auto_state[ch] == DM_AUTO_RESEAT) continue;
             // This is the teardown the state machine never sees: it happens in
             // the sweep, above and outside the machine, so from inside there is
             // simply no state any more. Reporting it only when something was
@@ -3404,11 +3458,17 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                 }
                 else
                 {
-                    // ks == 1 is the channel still reading filament, which both
-                    // resets the empty window and is where the operation's own
+                    // Filament at the inner switch (ks 1 or 3) is the channel
+                    // still reading filament, which both resets the empty
+                    // window and is where the operation's own
                     // AUTO_UNLOAD_MAX_MS timeout is checked. held_for does the
                     // reset, so the branch below only has to keep the split.
-                    const bool empty = (ks != 1u);
+                    // It used to be ks != 1, which on a loader that rests at
+                    // inner only (3) counted as empty from the start and ended
+                    // the unload after AUTO_UNLOAD_EMPTY_MS of pulling. The
+                    // window after inner release is kept: this is the user's
+                    // eject gesture, so the strand is meant to leave the gear.
+                    const bool empty = !pull_back_end::inner_present(ks);
                     const bool empty_held =
                         signal_hold::held_for(auto_unload_empty_t0_ms[i], empty,
                                               time_now, AUTO_UNLOAD_EMPTY_MS);
