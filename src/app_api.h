@@ -61,5 +61,5 @@ bool ams_state_is_tail(void);
 void ams_downstream_changed(void);           // a zone changed: persist
 uint8_t Motion_control_zone_pack(void);       // 2 bits per channel
 uint8_t Motion_control_downstream_mask(void); // channels past the merger
-void Motion_control_zone_restore(uint8_t packed, uint8_t owner);
+void Motion_control_zone_restore(uint8_t packed, bool valid, uint8_t owner);
 void Motion_control_zone_claimed(uint8_t ch); // merger acquired by ch

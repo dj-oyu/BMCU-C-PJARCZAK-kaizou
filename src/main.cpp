@@ -391,10 +391,11 @@ int main(void)
     }
 
     Motion_control_init();
-    // Owner implies downstream: also covers zones that were never written
-    // (first boot after this change, a downgrade round trip) or whose record
-    // a page erase took.
-    Motion_control_zone_restore(g_stored_zones, ams_state_get_loaded());
+    // Owner implies downstream. Without a zone record (first boot after this
+    // change, a downgrade round trip, a page erase) a strand found at a switch
+    // is assumed to reach the head.
+    Motion_control_zone_restore(g_stored_zones, Flash_AMS_downstream_valid(),
+                                ams_state_get_loaded());
     bambubus_init();
     bus_init();
 

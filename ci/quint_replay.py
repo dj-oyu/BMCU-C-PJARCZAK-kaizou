@@ -93,7 +93,8 @@ def zone_lines(path: Path) -> list[str]:
             e = est[c]
             fields += [_int(e["zone"]), _int(e["front"]), int(e["known"]),
                        int(e["tailKnown"]), int(e["remnant"]), int(e["exact"]),
-                       int(e["reachedHead"]), _int(e["lastDir"]), int(e["key"])]
+                       int(e["reachedHead"]), _int(e["lastDir"]), int(e["key"]),
+                       int(e["keyValid"])]
         lines.append(" ".join(str(x) for x in fields))
     return lines
 

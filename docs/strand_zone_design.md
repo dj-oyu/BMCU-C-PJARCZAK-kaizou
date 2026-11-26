@@ -15,7 +15,9 @@ evidence:
 
 The physical fact is how far the strand has travelled, and the AS5600 measures
 exactly that. So the firmware keeps an estimate of the strand's position and
-derives the zone from it.
+derives the zone from it. The rule throughout is to **over-report rather than
+under-report**: where the estimate cannot know, it assumes the strand is
+further downstream.
 
 ## Geometry
 
@@ -26,63 +28,85 @@ inner online switch (`ks` 1 or 3; the only switch on single-switch builds).
 |---|---|---|
 | `0` | | inner switch |
 | `park` | `DM_AUTO_S2_TARGET_COUNTS` (120 mm) | merger entrance, where autoload parks |
-| `down_set` | `park + 30 mm` | front beyond this: past the merger |
+| `down_set` | `park + 30 mm` | front beyond this: past the merger (the junction, E4) |
 | `down_clear` | `park + 10 mm` | front below this: back upstream (hysteresis) |
 | `head` | `park + AMS_RETRACT_LEN` | the nozzle; travel beyond it is filament consumed |
+| `dir_band` | 1 mm | net travel that decides a direction |
+| `consume` | 10 mm, or 0 | travel past `head`, while the printer feeds, that proves passage |
 
 `head` is derived from the retract length because that setting is what a user
-tunes so that an unload brings the tip back to the merger. `-DBMCU_KEY_TO_HEAD_MM`
-overrides it where the real geometry is known.
+tunes so that an unload brings the tip back to the merger. That makes the
+default circular (a nominal retract always lands on `park`), so it is a guess:
+`-DBMCU_KEY_TO_HEAD_MM` gives the real distance, and only then is the passage
+proof on (`consume` = 10 mm; `-DBMCU_ZONE_PROOF=1` accepts the guess).
 
 ## Estimate per channel
 
 - `front`: position of the strand's downstream end. Saturates at `head`: once
   the tip is in the nozzle, more travel is filament being melted, not the tip
-  moving. Valid once the front has crossed the switch at least once
-  (`front_known`).
+  moving. Valid once known (`front_known`); `exact` when it was measured from a
+  switch edge rather than assumed.
 - `tail_known`: the strand's upstream end has passed the switch going forward,
-  so the spool ran out and what is left will leave the BMCU. Once the tail
-  clears the drive gear nothing more is measured, so a tail piece past the
-  merger is a **remnant** until proven gone.
+  so the spool ran out and what is left will leave the BMCU. A piece left past
+  the switch, even short of the merger, is pushed into the tube by the next
+  strand, so it counts as a **tail piece** from then on; once the next strand
+  arrives behind it, it is a **remnant** until proven gone.
+- `last_dir`: the direction of the last sustained motion. A travel integrator
+  clamped to `±dir_band` flips it only after `2 × dir_band` of net travel, so a
+  count of AS5600 jitter at rest never decides an edge.
 
-Updated every AS5600 sample with the signed forward delta:
+Updated every AS5600 sample with the signed forward delta and the debounced
+(50 ms) switch reading:
 
 1. `front += delta`, clamped to `[-head, head]`.
-2. Switch rising edge: the front is at the switch, so `front = 0`. If a tail
-   piece was downstream, it becomes a remnant (a new strand behind an old tail).
-3. Switch falling edge, last motion forward: the tail passed the switch, so
-   `tail_known = 1`.
-   Last motion backward: the front passed the switch going upstream, so
-   `front = min(front, 0)`.
-   No motion: a lever float; nothing changes.
-4. AS5600 not good while the motor drives forward: the travel is unseen, so
-   `front = max(front, down_set + 1)`. Unseen backward travel never clears.
+2. Switch rising edge with the front at or behind the switch: the front
+   arrived, `front = 0`, exact. With a tail known, a piece left past the switch
+   becomes a remnant. With the front known past the switch: the end of a float;
+   nothing moves.
+3. Switch falling edge, last motion forward: the tail passed, `tail_known = 1`.
+   Last motion backward and the front at or behind the switch: the front passed
+   going back, `front = key_back` (0), exact. Otherwise a lever float: nothing
+   changes.
+4. AS5600 not good: nothing measured holds (`exact = 0`, no passage). If the
+   motor drives forward the travel is unseen, so the front is put one
+   hysteresis band past the merger. Unseen backward travel never clears.
 
 ## Zone
 
 | zone | when | downstream? |
 |---|---|---|
 | `NONE` | no front known, switch empty | no |
-| `UPSTREAM` | front known, below the band | no |
-| `DOWNSTREAM` | front past `down_set` (hysteresis to `down_clear`) | yes |
-| `TAIL` | tail passed the switch, front was past the merger, or remnant set | yes |
+| `UPSTREAM` | front known, short of the merger | no |
+| `DOWNSTREAM` | front past `down_set` (hysteresis to `down_clear`), or owning the merger | yes |
+| `TAIL` | a tail piece past the switch, or a remnant | yes |
 
 The wire flag (BmcuChannelFlags bit 7) is `zone ∈ {DOWNSTREAM, TAIL}`.
 
 ## Clearing a strand the BMCU cannot see: proof by passage
 
-The output tube is a single bore. If channel Y's front has travelled to `head`,
-Y's strand fills the tube from the merger to the nozzle, so no other strand and
-no remnant is anywhere in it. Pushing a remnant ahead is fine too: Y reaching
-the head means it went through the nozzle first.
+The output tube is a single bore. If channel Y's strand has gone through the
+nozzle, Y's strand fills the tube from the merger to the nozzle, so no other
+strand and no remnant is anywhere in it.
 
-So when Y's front reaches `head` by measured travel (a front restored there at
-boot does not count), every other channel's estimate is pulled back to the
-junction: `front = min(front, down_set)`, `tail_known = 0`, remnant cleared.
-Not to `park`: a strand may sit anywhere in its own branch up to the junction,
-and pulling the estimate behind the real front would under-report it later.
-This is the only way a remnant or a hand-removed strand gets cleared, and it
-happens on the next ordinary load of any channel.
+Passage is accepted only when all of these hold:
+
+- Y's front was measured from a switch edge (`exact`) and travelled, measured,
+  to `head`;
+- it then travelled `consume` further **while the printer feeds from Y** (Y owns
+  the merger, in on_use). A push against a blocked junction can count travel
+  too if the wheel slips (E1); the printer pulling filament through cannot;
+- no backward or unmeasured sample in between.
+
+The proof fires **once**, on that arrival, never again while the front stays at
+the head. A front left at the head by an unmeasured pull would otherwise keep
+clearing every other channel on every sample, and the zones flipping would
+write flash at the save loop's rate.
+
+When it fires, every other channel's estimate is pulled back to the junction:
+`front = min(front, down_set)`, not exact, remnant cleared. Not to `park`: a
+strand may sit anywhere in its own branch up to the junction, and pulling the
+estimate behind the real front would under-report it later. A known tail piece
+stays known: it is out of the tube but may still be in its own branch.
 
 ## Collision report
 
@@ -95,31 +119,67 @@ AS5600, bus error) reports once.
 ## Persistence
 
 Zones are 2 bits per channel, and 4 channels fit the low byte of the existing
-0xA7 record in the merger ring. A record is written only when a zone changes,
-which is a few times per load/unload, not per sample. On boot:
+0xA7 record in the merger ring. A record is written only when it changes, a
+few times per load/unload, and it is **written ahead**: a measured front
+climbing into the hysteresis band (above `down_clear`) is stored as
+`DOWNSTREAM` before it reads so. The write (which waits for bus quiet) then has
+the band's 20 mm of travel to land before the strand can be past the merger. A
+ring-page erase re-marks the record dirty, so it is rewritten at once.
 
-- `DOWNSTREAM`: `front = head`. The worst case is a needless retract later.
-- `TAIL`: `tail_known = 1`, so the channel is treated as a remnant.
-- `UPSTREAM` / `NONE`: `front = down_set` (the junction, the furthest an
-  upstream strand can be) if the switch reads filament, else unknown.
+On boot each switch is read only once it has read the same for 200 ms (the
+ADC filter starts at 0); that first reading is taken as it is, never as an
+edge. Then:
+
+- `DOWNSTREAM`: `front = head`, not exact.
+- `TAIL`: the channel is a remnant.
+- `UPSTREAM` / `NONE` with a strand at the switch: `front = down_set`, the
+  furthest an upstream strand can be.
+- **No record** (first boot of this firmware, a downgrade round trip, a
+  page erase that lost it) with a strand at the switch: `front = head`. The
+  strand may be anywhere.
 - The merger owner is forced to `DOWNSTREAM`, since owning the tube means
   using it.
 
 ## Assumptions
 
-- **E1.** The AS5600 measures filament travel, not just gear rotation: no slip
-  between the measuring wheel and the strand. If the wheel can turn on a
-  strand the extruder is holding, a measured retract can be false and the zone
-  can clear early. Not verified on hardware.
-- **E2.** `head` is right. A wrong value moves the clear point by the error.
+Each one fails in a direction; the ones that can under-report are marked.
+
+- **E1.** The AS5600 measures filament travel: no slip between the measuring
+  wheel and the strand. If the wheel can turn on a strand the extruder holds,
+  a measured retract can be false and the zone clears early
+  (**under-reports**). The consumption condition on the passage proof is there
+  because of this. Not verified on hardware.
+- **E2.** `head` is right. Too long: the proof needs more travel to fire (it may
+  never fire; over-reports). Too short: the proof fires while a remnant is
+  still in the tube, and a retract shorter than the real tube reads as upstream
+  after every unload (**under-reports**). Hence no proof without a measured
+  `BMCU_KEY_TO_HEAD_MM`.
 - **E3.** The tube is a single bore with no bypass, so passage is proof.
-- **E4.** `down_set` sits above every parking position. A channel that parks
-  deeper than `park + 30 mm` reads as downstream: a spurious report, not a
-  missed one.
+- **E4.** The junction is at `down_set`. A junction further than that: a
+  channel that parks or rests between them reads as downstream (over-reports).
+  A junction closer: a strand past it but short of `down_set` reads as upstream
+  (**under-reports**). The 50 ms debounce lag on a rising edge (a few mm) eats
+  into the same margin.
+- **A5.** A record is written before power can be lost. Written ahead for
+  travel into the merger, so only a power loss within one save of a runout or a
+  claim loses a zone change (**under-reports** that change).
+- **A6.** A lost record loses any tail piece it held: with the switch empty
+  there is nothing to find it by (**under-reports**).
+
+## Not covered
+
+- AS5600 bad and the strand moving without the motor (the extruder pulling, a
+  hand pushing) is unseen forward travel that is not assumed. The owner is
+  covered by the claim; other channels are not.
+- Travel during the 200 ms settle after boot is not counted. Nothing moves
+  before the printer talks.
 
 ## What this does not do
 
-It is still observe-only: nothing gates on the zone. The first consumer would
-be accepting the printer's unload for a channel whose zone is downstream but
-whose AMS motion is idle (an orphan or a faulted pull), which the firmware
-refuses today.
+It is still observe-only: nothing gates on the zone. A future consumer, such as
+accepting the printer's unload for a channel whose zone is downstream but
+whose AMS motion is idle, must bear in mind that `DOWNSTREAM` often means
+"position unknown": claim, restore and the unmeasured guess all put the front
+at the head or just past the merger. Such a consumer must bound its pull by the
+switch and by measured travel, never by the zone alone, and would want an
+"assumed vs measured" bit on the wire.

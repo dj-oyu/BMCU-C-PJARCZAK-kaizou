@@ -86,7 +86,7 @@ jobs:
         run: |
           check() {
             if quint run "spec/$1.qnt" --invariant="$2" \
-                 --max-samples=5000 --max-steps=40 > witness.log 2>&1; then
+                 --max-samples=5000 --max-steps=80 > witness.log 2>&1; then
               echo "::error::$1 $2 was not violated - the model no longer reaches it"
               tail -20 witness.log
               exit 1

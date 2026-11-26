@@ -50,14 +50,14 @@ class QuintSpecTests(unittest.TestCase):
                 with self.subTest(spec=spec.name, witness=witness):
                     result = _quint("run", str(spec), "--backend=typescript",
                                     f"--invariant={witness}", "--max-samples=3000",
-                                    "--max-steps=40", "--seed=7")
+                                    "--max-steps=80", "--seed=7")
                     self.assertNotEqual(result.returncode, 0, f"{witness} was not reached")
                     self.assertIn("violation", result.stdout)
 
     @unittest.skipIf(shutil.which("zig") is None, "zig compiler is not installed")
     def test_firmware_policies_replay_spec_traces(self):
         import quint_replay
-        self.assertEqual(quint_replay.main(["--traces", "200", "--steps", "50",
+        self.assertEqual(quint_replay.main(["--traces", "200", "--steps", "80",
                                             "--seed", "11"]), 0)
 
     @unittest.skipIf(shutil.which("zig") is None, "zig compiler is not installed")
@@ -66,7 +66,7 @@ class QuintSpecTests(unittest.TestCase):
         # drop the remnant a new strand behind an old tail must leave.
         import quint_replay
         header = (ROOT / "src" / "strand_zone_policy.h").read_text(encoding="utf-8")
-        planted = "if (derive_zone(s, c) == kTail) s.remnant = 1u;"
+        planted = "if (s.front_known && s.front > 0) s.remnant = 1u;"
         self.assertIn(planted, header)
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "strand_zone_policy.h").write_text(header.replace(planted, ""),

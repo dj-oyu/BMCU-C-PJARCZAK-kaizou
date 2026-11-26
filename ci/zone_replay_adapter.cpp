@@ -13,11 +13,15 @@
 // edges are already debounced), and channel 3 (the spec has three channels;
 // the header's fourth stays empty, which passage_proof leaves alone).
 //
+// Units: one spec unit is kScale counts here. The spec moves whole units and
+// takes the sign of the last move as the direction; with dir_band 1 below a
+// unit, the header's travel integrator agrees with it on every move.
+//
 // Input, one event per line (whitespace separated):
 //   <trace> <step> <action> <ch> <delta> <measured> <driving> <key> <owner>
 //   then, for each spec channel:
 //   <zone> <front> <known> <tail_known> <remnant> <exact> <reached_head>
-//   <last_dir> <key>
+//   <last_dir> <key> <key_valid>
 // `key` after <driving> is the switch reading of <ch> after the step. A line
 // "reset <trace>" starts a new trace. ci/quint_replay.py writes this format.
 
@@ -30,33 +34,42 @@ namespace
 {
 
 const int kSpecChannels = 3;
+const int32_t kScale = 4;
 
-// spec/strand_zone.qnt geometry: PARK 2, SET 4, CLEAR 3, HEAD 7, SLACK 0.
-const strand_zone::Config kConfig = {2, 4, 3, 7, 0};
+// spec/strand_zone.qnt geometry: PARK 2, SET 4, CLEAR 3, HEAD 7, KEY_BACK -1,
+// CONSUME 1.
+const strand_zone::Config kConfig = {2 * kScale, 4 * kScale, 3 * kScale, 7 * kScale, 1,
+                                     -1 * kScale, 1 * kScale};
 
 struct Machine
 {
     strand_zone::State zone[strand_zone::kChannels];
     uint8_t stored;  // packed zones as last persisted (spec assumption A5)
+    bool stored_valid;
 };
 
 void reset(Machine& m)
 {
     for (uint8_t i = 0u; i < strand_zone::kChannels; i++) strand_zone::reset(m.zone[i]);
     m.stored = 0u;
+    m.stored_valid = true;
 }
 
 // Motion_control.cpp zone_sample, without the debounce.
-void sample(Machine& m, uint8_t ch, int delta, bool measured, bool driving, bool key)
+// `consuming`: the channel owns the merger (the firmware also asks for on_use,
+// which the spec does not model apart from ownership).
+void sample(Machine& m, uint8_t ch, int delta, bool measured, bool driving, bool key,
+            bool consuming)
 {
-    strand_zone::update(m.zone[ch], kConfig, delta, measured, driving, key);
-    if (strand_zone::at_head(m.zone[ch], kConfig))
+    strand_zone::update(m.zone[ch], kConfig, delta * kScale, measured, driving, key,
+                        consuming);
+    if (strand_zone::take_passage(m.zone[ch], kConfig))
         strand_zone::passage_proof(m.zone, kConfig, ch);
 }
 
 // Returns false for an action name this adapter does not know.
 bool apply(Machine& m, const char* action, int ch, int delta, bool measured, bool driving,
-           bool key, int owner)
+           bool key, int owner, const bool* boot_keys)
 {
     const uint8_t c = static_cast<uint8_t>(ch < 0 ? 0 : ch);
 
@@ -64,34 +77,40 @@ bool apply(Machine& m, const char* action, int ch, int delta, bool measured, boo
     {
         // The AS5600 loop: one sample with the measured delta, or an
         // unmeasured one while the motor drives forward.
-        sample(m, c, delta, measured, driving, key);
+        sample(m, c, delta, measured, driving, key, owner == ch);
         return true;
     }
     if (!strcmp(action, "float"))
     {
         // The switch reads empty for one sample and back, with no travel.
-        sample(m, c, 0, true, false, false);
-        sample(m, c, 0, true, false, true);
+        sample(m, c, 0, true, false, false, owner == ch);
+        sample(m, c, 0, true, false, true, owner == ch);
         return true;
     }
     if (!strcmp(action, "claim"))
     {
         // Motion_control_zone_claimed.
-        if (!strand_zone::is_downstream(m.zone[c].zone))
-            strand_zone::restore(m.zone[c], kConfig, strand_zone::kDownstream,
-                                 m.zone[c].key != 0u, true);
+        strand_zone::claim(m.zone[c], kConfig);
         return true;
     }
     if (!strcmp(action, "reboot"))
     {
-        // Motion_control_zone_restore: the switch is assumed to read filament
-        // for any stored strand.
+        // Motion_control_zone_restore, then zone_sample's first settled
+        // reading of each switch.
         for (uint8_t i = 0u; i < strand_zone::kChannels; i++)
         {
             const uint8_t z = static_cast<uint8_t>((m.stored >> (2u * i)) & 0x03u);
-            strand_zone::restore(m.zone[i], kConfig, z, z != strand_zone::kNone,
+            strand_zone::restore(m.zone[i], kConfig, z, m.stored_valid,
                                  owner == static_cast<int>(i));
+            const bool k = i < kSpecChannels ? boot_keys[i] : false;
+            strand_zone::update(m.zone[i], kConfig, 0, true, false, k, false);
         }
+        return true;
+    }
+    if (!strcmp(action, "loseRecord"))
+    {
+        m.stored = 0u;
+        m.stored_valid = false;
         return true;
     }
 
@@ -106,25 +125,26 @@ bool apply(Machine& m, const char* action, int ch, int delta, bool measured, boo
 
 struct Expect
 {
-    int zone, front, known, tail_known, remnant, exact, reached_head, last_dir, key;
+    int zone, front, known, tail_known, remnant, exact, reached_head, last_dir, key, key_valid;
 };
 
 bool same(const strand_zone::State& s, const Expect& e)
 {
     // The front is meaningful only once known; the spec keeps it at 0 before.
     return s.zone == e.zone && s.front_known == e.known &&
-           (!e.known || s.front == e.front) && s.tail_known == e.tail_known &&
+           (!e.known || s.front == e.front * kScale) && s.tail_known == e.tail_known &&
            s.remnant == e.remnant && s.exact == e.exact &&
-           s.reached_head == e.reached_head && s.last_dir == e.last_dir && s.key == e.key;
+           s.reached_head == e.reached_head && s.last_dir == e.last_dir && s.key == e.key &&
+           s.key_valid == e.key_valid;
 }
 
 void print_state(const char* who, int ch, const strand_zone::State& s)
 {
     fprintf(stderr,
             "  %-8s ch%d zone=%d front=%d known=%d tail=%d remnant=%d exact=%d head=%d "
-            "dir=%d key=%d\n",
+            "dir=%d key=%d key_valid=%d (front in counts, %d per spec unit)\n",
             who, ch, s.zone, static_cast<int>(s.front), s.front_known, s.tail_known, s.remnant,
-            s.exact, s.reached_head, s.last_dir, s.key);
+            s.exact, s.reached_head, s.last_dir, s.key, s.key_valid, static_cast<int>(kScale));
 }
 
 }
@@ -159,9 +179,9 @@ int main(void)
         {
             Expect& e = exp[i];
             int n = 0;
-            if (sscanf(p, "%d %d %d %d %d %d %d %d %d%n", &e.zone, &e.front, &e.known,
+            if (sscanf(p, "%d %d %d %d %d %d %d %d %d %d%n", &e.zone, &e.front, &e.known,
                        &e.tail_known, &e.remnant, &e.exact, &e.reached_head, &e.last_dir,
-                       &e.key, &n) != 9)
+                       &e.key, &e.key_valid, &n) != 10)
             {
                 fprintf(stderr, "bad line: %s", line);
                 return 2;
@@ -169,13 +189,27 @@ int main(void)
             p += n;
         }
 
-        if (!apply(m, action, ch, delta, measured != 0, driving != 0, key != 0, owner))
+        bool boot_keys[kSpecChannels];
+        for (int i = 0; i < kSpecChannels; i++) boot_keys[i] = exp[i].key != 0;
+        if (!apply(m, action, ch, delta, measured != 0, driving != 0, key != 0, owner,
+                   boot_keys))
         {
             fprintf(stderr, "%s step %d: unknown action %s\n", trace, step, action);
             return 2;
         }
-        // main.cpp persists on any zone change (A5: immediately).
-        m.stored = strand_zone::pack(m.zone);
+        // main.cpp persists on any zone change (A5: immediately), and every
+        // write re-creates a lost record. The spec persists after every
+        // sample, claim and reboot; a write of unchanged zones is a no-op.
+        static const char* const kPersists[] = {"fwd", "back", "runout", "float", "claim",
+                                                "reboot"};
+        bool persists = false;
+        for (size_t i = 0; i < sizeof(kPersists) / sizeof(kPersists[0]); i++)
+            if (!strcmp(action, kPersists[i])) persists = true;
+        if (persists)
+        {
+            m.stored = strand_zone::pack(m.zone, kConfig);
+            m.stored_valid = true;
+        }
         events++;
 
         for (int i = 0; i < kSpecChannels; i++)
@@ -186,7 +220,7 @@ int main(void)
             strand_zone::State s;
             strand_zone::reset(s);
             s.zone = static_cast<uint8_t>(exp[i].zone);
-            s.front = exp[i].front;
+            s.front = exp[i].front * kScale;
             s.front_known = static_cast<uint8_t>(exp[i].known);
             s.tail_known = static_cast<uint8_t>(exp[i].tail_known);
             s.remnant = static_cast<uint8_t>(exp[i].remnant);
@@ -194,6 +228,7 @@ int main(void)
             s.reached_head = static_cast<uint8_t>(exp[i].reached_head);
             s.last_dir = static_cast<int8_t>(exp[i].last_dir);
             s.key = static_cast<uint8_t>(exp[i].key);
+            s.key_valid = static_cast<uint8_t>(exp[i].key_valid);
             print_state("spec:", i, s);
             print_state("firmware:", i, m.zone[i]);
             return 1;

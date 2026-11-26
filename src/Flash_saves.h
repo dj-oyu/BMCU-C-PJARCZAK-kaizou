@@ -63,6 +63,9 @@ bool Flash_AMS_state_read(uint8_t* loaded_channel, bool* tail,
                           uint8_t* downstream_mask = nullptr);
 bool Flash_AMS_state_write(uint8_t loaded_channel, bool tail);
 bool Flash_AMS_downstream_write(uint8_t mask);
+// After Flash_AMS_state_read: whether a zone record was found. False on the
+// first boot of a firmware that keeps one, or when a page erase took it.
+bool Flash_AMS_downstream_valid(void);
 // True once after a write had to erase a page of the shared ring, which may
 // have taken the other record kind's newest copy: the caller writes both again.
 bool Flash_AMS_state_take_page_erased(void);

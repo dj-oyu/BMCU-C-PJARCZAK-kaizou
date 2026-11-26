@@ -540,6 +540,11 @@ bool Flash_AMS_state_take_page_erased(void)
     return erased;
 }
 
+bool Flash_AMS_downstream_valid(void)
+{
+    return g_sta_have_down == 1u;
+}
+
 bool Flash_AMS_downstream_write(uint8_t mask)
 {
     // No record reads back as zero (every zone NONE), so zero needs no first
