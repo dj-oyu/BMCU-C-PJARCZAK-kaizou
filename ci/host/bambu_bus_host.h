@@ -94,6 +94,17 @@ enum MergerEventKind : uint8_t
     kMergerEventKinds = 5u,
 };
 
+// One bmcu_link_printer_motion_cmd call: the observe-only record of what the
+// printer commanded, taken for every AMS address (printer_motion_watch.h).
+struct MotionCmd
+{
+    uint8_t kind;
+    uint8_t ams_num;
+    uint8_t channel;
+    uint8_t statu_flag;
+    uint8_t motion_flag;
+};
+
 // A sample of merger ownership, taken after every run(). The sequence of these
 // is the ownership trace the routing tests assert on.
 struct OwnershipSample
@@ -104,6 +115,9 @@ struct OwnershipSample
 
 extern Transaction transactions[kMaxRecords];
 extern int transaction_count;
+
+extern MotionCmd motion_cmds[kMaxRecords];
+extern int motion_cmd_count;
 
 extern LongTransaction long_transactions[kMaxRecords];
 extern int long_transaction_count;

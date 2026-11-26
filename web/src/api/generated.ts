@@ -276,6 +276,7 @@ export const BmcuDiagCounter = {
   AmsWouldReoffer: 2,
   MergerTailHeld: 3,
   MergerTailPreempted: 4,
+  PrinterMotionCmd: 5,
 } as const
 export type BmcuDiagCounter = (typeof BmcuDiagCounter)[keyof typeof BmcuDiagCounter]
 

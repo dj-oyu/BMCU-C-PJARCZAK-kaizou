@@ -137,7 +137,8 @@
       "1": "ams_service_gap_ms",
       "2": "ams_would_reoffer",
       "3": "merger_tail_held",
-      "4": "merger_tail_preempted"
+      "4": "merger_tail_preempted",
+      "5": "printer_motion_cmd"
     },
     "reset_state": {
       "1": "scheduled",
