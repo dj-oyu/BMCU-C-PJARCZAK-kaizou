@@ -11,3 +11,4 @@ node_modules/
 pico/secrets.py
 pico/SECRETS_LOCAL.md
 pico/bambuddy.json
+_apalache-out/

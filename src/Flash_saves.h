@@ -55,8 +55,20 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx);
 // 0..3 or 0xFF -- so a downgraded firmware reading this record gets the value it
 // would have written itself. `tail` is carried by a separate record tag that
 // older firmware skips; see STA_TAIL_TAG in Flash_saves.cpp.
-bool Flash_AMS_state_read(uint8_t* loaded_channel, bool* tail);
+//
+// `downstream_mask` (optional) receives the newest packed strand-zone byte,
+// 0 when there is none; see src/strand_zone_policy.h. It shares the ring
+// with the merger records under its own tag, STA_DOWN_TAG in Flash_saves.cpp.
+bool Flash_AMS_state_read(uint8_t* loaded_channel, bool* tail,
+                          uint8_t* downstream_mask = nullptr);
 bool Flash_AMS_state_write(uint8_t loaded_channel, bool tail);
+bool Flash_AMS_downstream_write(uint8_t mask);
+// After Flash_AMS_state_read: whether a zone record was found. False on the
+// first boot of a firmware that keeps one, or when a page erase took it.
+bool Flash_AMS_downstream_valid(void);
+// True once after a write had to erase a page of the shared ring, which may
+// have taken the other record kind's newest copy: the caller writes both again.
+bool Flash_AMS_state_take_page_erased(void);
 
 // CAL: 1x 256B
 bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4]);

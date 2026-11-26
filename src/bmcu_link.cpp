@@ -1509,6 +1509,13 @@ void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel
 #endif
 }
 
+void bmcu_link_downstream_occupied(uint8_t sending_ch, uint8_t others_mask)
+{
+    const uint32_t value = (static_cast<uint32_t>(others_mask & 0x0Fu) << 8) |
+                           static_cast<uint32_t>(sending_ch);
+    emit_ams_diag_counter(DIAG_COUNTER_DOWNSTREAM_OCCUPIED, value, time_ticks32());
+}
+
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
                                    uint16_t response_length, uint8_t addressed_ams)

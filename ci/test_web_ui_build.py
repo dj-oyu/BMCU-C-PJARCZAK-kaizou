@@ -44,9 +44,9 @@ def _load_enum_registry_generator():
 # prose or the endpoint list. Changing either makes this test fail, and the
 # only correct fix is to bump revision in docs/bmcu_wire_layout.json and
 # record the new revision and digest here together.
-LAYOUT_REVISION = 11
+LAYOUT_REVISION = 12
 LAYOUT_DIGEST = \
-    "ecdc280abdda71e638f84d6ced658da41bec4fb90affea11c042a6b6cbca507d"
+    "af611e243c1be9afc6087211b273fd3bea300fac68d952f6e62760db61b251c7"
 
 # littlefs on the Pico 2 W also holds the journal (8 x 64 KB) and the modules.
 # A page beyond this is a signal that a dependency was pulled in by accident.

@@ -117,7 +117,8 @@
    "2": "ams_would_reoffer",
    "3": "merger_tail_held",
    "4": "merger_tail_preempted",
-   "5": "printer_motion_cmd"
+   "5": "printer_motion_cmd",
+   "6": "downstream_occupied"
   },
   "diagnostic_tags": {
    "1": "uptime_ms",
@@ -403,7 +404,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 11,
+ "revision": 12,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {
@@ -1109,8 +1110,8 @@
       },
       {
        "mask": 1,
-       "name": "reserved",
-       "note": "sent as zero, ignore on receive",
+       "name": "downstream",
+       "note": "this channel's strand, or a tail piece it left, may be past the merger: the firmware's travel-based estimate (docs/strand_zone_design.md) puts it in zone DOWNSTREAM or TAIL. Set by measured forward travel past the merger (or unmeasured forward drive), by a runout whose tail was past it, and by owning the merger; cleared by measured retract back short of it, or, on builds with a measured head distance, when another channel's strand is proven through the nozzle (the tube is a single bore, so nothing else can be in it). Not ownership, which is released at command time before the strand moves: idle with both switches closed reads PARKED (tip at the merger entrance) when clear and possibly ORPHAN (tip left in the tool head) when set. Over-reports rather than under-reports. Flash-backed. More than one channel set at once is the collision it exists to show. Was reserved before firmware revision 12; a decoder that ignores it reads every other bit unchanged.",
        "shift": 7
       }
      ],
