@@ -15,11 +15,14 @@
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
-static uint32_t bambubus_heartbeat_deadline = 0u;
+// 64-bit ticks: a 32-bit deadline compared with a signed difference flips sign after
+// 2^31 ticks (~119 s at 18 MHz), so a long silence would stop being reported as an
+// error and motion control would resume the last motion the printer requested.
+static uint64_t bambubus_heartbeat_deadline = 0u;
 
 void bambubus_heartbeat_seen_fast(void)
 {
-    bambubus_heartbeat_deadline = time_ticks32() + ms_to_ticks32(1000u);
+    bambubus_heartbeat_deadline = time_ticks64() + ms_to_ticks32(1000u);
 }
 
 bool package_check_crc16(uint8_t *data, int data_length)
@@ -1252,8 +1255,8 @@ bambubus_package_type bambubus_run()
 {
     bambubus_package_type stu = bambubus_package_type::none;
 
-    static uint32_t last_hb_deadline = 0u;
-    const uint32_t now = time_ticks32();
+    static uint64_t last_hb_deadline = 0u;
+    const uint64_t now = time_ticks64();
     // Observe-only: keeps the poll cadence far below the ~238 s SysTick wrap even
     // during total printer silence, which is exactly the case being measured.
     bmcu_link_ams_service_poll();
@@ -1263,7 +1266,7 @@ bambubus_package_type bambubus_run()
             ms_to_ticks32(kOnlineDetectConfirmSettleMs),
             ms_to_ticks32(kOnlineDetectServiceSilenceMs),
         };
-        ams_online_detect::poll(online_detect_state, cfg, now);
+        ams_online_detect::poll(online_detect_state, cfg, (uint32_t)now);  // policy keeps 32-bit wrap-safe ticks
     }
 
     int rx_len = 0;
@@ -1416,7 +1419,7 @@ bambubus_package_type bambubus_run()
         }
     }
 
-    uint32_t hb_deadline = 0u;
+    uint64_t hb_deadline = 0u;
     {
         const uint32_t s = irq_save_wch();
         hb_deadline = bambubus_heartbeat_deadline;
@@ -1426,11 +1429,11 @@ bambubus_package_type bambubus_run()
     if (stu == bambubus_package_type::none && hb_deadline != last_hb_deadline)
     {
         last_hb_deadline = hb_deadline;
-        if (time_diff32(hb_deadline, now) > 0)
+        if (hb_deadline > now)
             stu = bambubus_package_type::heartbeat;
     }
 
-    if (time_diff32(now, hb_deadline) > 0)
+    if (now > hb_deadline)
     {
         stu = bambubus_package_type::error;
         // Heartbeat lost: when the bus returns the printer re-runs AMS
