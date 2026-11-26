@@ -1,9 +1,10 @@
 name: Quint model check
 
-# Exhaustive bounded check of spec/bmcu_merger.qnt with Apalache. The random
-# simulation and the trace replay against the firmware policies run in
-# host-tests.yml on every PR; this adds the symbolic check, which needs Java and
-# takes minutes, so it runs only when the spec or the policies it mirrors move.
+# Exhaustive bounded check of spec/bmcu_merger.qnt and spec/strand_zone.qnt
+# with Apalache. The random simulation and the trace replay against the
+# firmware policies run in host-tests.yml on every PR; this adds the symbolic
+# check, which needs Java and takes minutes, so it runs only when a spec or a
+# policy it mirrors moves.
 on:
   push:
     branches:
@@ -13,17 +14,19 @@ on:
       - ".github/workflows/quint.yml"
       - "spec/**"
       - "src/ams_merger_policy.h"
-      - "src/downstream_strand_policy.h"
+      - "src/strand_zone_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
+      - "ci/zone_replay_adapter.cpp"
   pull_request:
     paths:
       - ".github/workflows/quint.yml"
       - "spec/**"
       - "src/ams_merger_policy.h"
-      - "src/downstream_strand_policy.h"
+      - "src/strand_zone_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
+      - "ci/zone_replay_adapter.cpp"
   workflow_dispatch:
     inputs:
       max_steps:
@@ -66,28 +69,36 @@ jobs:
           key: quint-apalache-0.34.0
 
       - name: Typecheck
-        run: quint typecheck spec/bmcu_merger.qnt
+        run: |
+          quint typecheck spec/bmcu_merger.qnt
+          quint typecheck spec/strand_zone.qnt
 
       - name: Simulate safety (rust backend, many samples)
-        run: >-
-          quint run spec/bmcu_merger.qnt --invariant=safety
-          --max-samples=20000 --max-steps=40
+        run: |
+          for s in bmcu_merger strand_zone; do
+            quint run spec/$s.qnt --invariant=safety --max-samples=20000 --max-steps=50
+          done
 
       # Expected to be violated: each witness is a behaviour the firmware does
-      # not prevent. A witness that stops being reachable means the model lost
-      # it, which is a model bug.
-      - name: Known races stay reachable
+      # not prevent (or an over-report the estimate is allowed). A witness that
+      # stops being reachable means the model lost it, which is a model bug.
+      - name: Known behaviours stay reachable
         run: |
-          for w in witnessNoCollision witnessNoParkedOrphan; do
-            if quint run spec/bmcu_merger.qnt --invariant=$w \
-                 --max-samples=5000 --max-steps=30 > witness.log 2>&1; then
-              echo "::error::$w was not violated - the model no longer reaches it"
+          check() {
+            if quint run "spec/$1.qnt" --invariant="$2" \
+                 --max-samples=5000 --max-steps=40 > witness.log 2>&1; then
+              echo "::error::$1 $2 was not violated - the model no longer reaches it"
               tail -20 witness.log
               exit 1
             fi
-          done
+          }
+          check bmcu_merger witnessNoCollision
+          check bmcu_merger witnessNoParkedOrphan
+          check strand_zone witnessNeverSpurious
+          check strand_zone witnessNoProofClear
+          check strand_zone witnessNoDoubleDown
 
       - name: Bounded symbolic check (Apalache)
-        run: >-
-          quint verify spec/bmcu_merger.qnt --invariant=safety
-          --max-steps="$MAX_STEPS"
+        run: |
+          quint verify spec/bmcu_merger.qnt --invariant=safety --max-steps="$MAX_STEPS"
+          quint verify spec/strand_zone.qnt --invariant=safety --max-steps="$MAX_STEPS"

@@ -1,16 +1,19 @@
-"""Replay Quint traces of spec/bmcu_merger.qnt against the firmware policies.
+"""Replay Quint traces against the firmware policies.
 
-    python ci/quint_replay.py [--traces N] [--steps N] [--seed S] [--itf-dir DIR]
+    python ci/quint_replay.py [--spec merger|zone|all] [--traces N] [--steps N]
+                              [--seed S] [--itf-dir DIR]
 
-Generates N random traces with `quint run --mbt` (or reads existing ITF files
-from --itf-dir), converts each step into the line format documented in
-ci/quint_replay_adapter.cpp, builds that adapter with zig c++ and feeds it the
-lot. Exit status is the adapter's: 0 no divergence, 1 a divergence (printed),
-2 a harness error.
+For each spec, generates N random traces with `quint run --mbt` (or reads
+existing ITF files from --itf-dir, which then needs a single --spec), converts
+each step into the line format its adapter documents, builds the adapter with
+zig c++ and feeds it the lot. Exit status: 0 no divergence, 1 a divergence
+(printed), 2 a harness error.
 
-The spec is the oracle for owner, TAIL, the downstream mask and the
-DOWNSTREAM_OCCUPIED report; the adapter drives ams_merger_policy.h and
-downstream_strand_policy.h the way the firmware's call sites do.
+    merger  spec/bmcu_merger.qnt  -> ci/quint_replay_adapter.cpp
+            (owner and TAIL, through ams_merger_policy.h)
+    zone    spec/strand_zone.qnt  -> ci/zone_replay_adapter.cpp
+            (every field of every channel's estimate, through
+            strand_zone_policy.h)
 """
 
 from __future__ import annotations
@@ -25,12 +28,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = ROOT / "spec" / "bmcu_merger.qnt"
-ADAPTER = ROOT / "ci" / "quint_replay_adapter.cpp"
 
 # Phases whose AMS-side motion is on_use / before_on_use / stop_on_use: the
 # 0xFF idle handler returns early for these (bambu_bus_ams.cpp).
-IN_USE_PHASES = {"PURGE", "PRINT", "PAUSE", "RUNOUT", "TAIL"}
+IN_USE_PHASES = {"PURGE", "PRINT", "PAUSE", "JAM", "RUNOUT", "TAIL"}
+
+ZONE_CHANNELS = 3
 
 
 def _int(v):
@@ -40,12 +43,11 @@ def _int(v):
 
 
 def _map(v):
-    return {_int(k): val["tag"] if isinstance(val, dict) and "tag" in val else val
-            for k, val in v["#map"]}
+    return {_int(k): val for k, val in v["#map"]}
 
 
-def _set(v):
-    return {_int(x) for x in v["#set"]}
+def _tag(v):
+    return v["tag"] if isinstance(v, dict) and "tag" in v else v
 
 
 def _picked_channel(state) -> int:
@@ -55,33 +57,62 @@ def _picked_channel(state) -> int:
     return -1
 
 
-def itf_to_lines(path: Path) -> list[str]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    states = data["states"]
+def merger_lines(path: Path) -> list[str]:
+    states = json.loads(path.read_text(encoding="utf-8"))["states"]
     name = path.name
     lines = [f"reset {name}"]
     for i in range(1, len(states)):
         prev, cur = states[i - 1], states[i]
-        action = cur["mbt::actionTaken"]
-        ch = _picked_channel(cur)
+        # lastAction refines the action name where one spec action stands for
+        # two firmware paths (pullBack / jamPullBack, redetectFound /
+        # redetectFoundShort).
         prev_owner = _int(prev["owner"])
-        prev_phase = _map(prev["phase"])
+        prev_phase = {k: _tag(v) for k, v in _map(prev["phase"]).items()}
         owner_in_use = int(prev_owner >= 0 and prev_phase[prev_owner] in IN_USE_PHASES)
-        mask = sum(1 << c for c in _set(cur["down"]))
-        occupied = int(action == "sendOut" and ch in _set(cur["reported"]))
         lines.append(" ".join(str(x) for x in (
-            name, i, action, ch, owner_in_use, _int(cur["owner"]),
-            int(bool(cur["inTail"])), mask, occupied)))
+            name, i, cur["lastAction"], _picked_channel(cur), owner_in_use,
+            _int(cur["owner"]), int(bool(cur["inTail"])))))
     return lines
 
 
-def generate(itf_dir: Path, traces: int, steps: int, seed: str | None) -> None:
+def zone_lines(path: Path) -> list[str]:
+    states = json.loads(path.read_text(encoding="utf-8"))["states"]
+    name = path.name
+    lines = [f"reset {name}"]
+    for i in range(1, len(states)):
+        cur = states[i]
+        ch = _int(cur["lastCh"])
+        has, front = _map(cur["has"]), _map(cur["front"])
+        # The switch reading after the step (strand_zone.qnt keyOf).
+        key = int(ch >= 0 and bool(has[ch]) and _int(front[ch]) >= 0)
+        fields = [name, i, cur["lastAction"], ch, _int(cur["lastDelta"]),
+                  int(bool(cur["lastMeasured"])), int(bool(cur["lastDriving"])), key,
+                  _int(cur["owner"])]
+        est = _map(cur["est"])
+        for c in range(ZONE_CHANNELS):
+            e = est[c]
+            fields += [_int(e["zone"]), _int(e["front"]), int(e["known"]),
+                       int(e["tailKnown"]), int(e["remnant"]), int(e["exact"]),
+                       int(e["reachedHead"]), _int(e["lastDir"]), int(e["key"])]
+        lines.append(" ".join(str(x) for x in fields))
+    return lines
+
+
+SPECS = {
+    "merger": (ROOT / "spec" / "bmcu_merger.qnt", ROOT / "ci" / "quint_replay_adapter.cpp",
+               merger_lines),
+    "zone": (ROOT / "spec" / "strand_zone.qnt", ROOT / "ci" / "zone_replay_adapter.cpp",
+             zone_lines),
+}
+
+
+def generate(spec: Path, itf_dir: Path, traces: int, steps: int, seed: str | None) -> None:
     quint = shutil.which("quint")
     if quint is None:
         raise SystemExit("quint is not installed (npm i -g @informalsystems/quint)")
     # The typescript backend needs nothing downloaded at run time.
     command = [
-        quint, "run", str(SPEC), "--backend=typescript", "--mbt",
+        quint, "run", str(spec), "--backend=typescript", "--mbt",
         f"--max-samples={traces}", f"--n-traces={traces}", f"--max-steps={steps}",
         "--invariant=safety", f"--out-itf={itf_dir}/trace_{{seq}}.itf.json",
     ]
@@ -90,50 +121,63 @@ def generate(itf_dir: Path, traces: int, steps: int, seed: str | None) -> None:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout[-4000:] + result.stderr[-2000:])
-        raise SystemExit("quint run failed (safety violated or spec error)")
+        raise SystemExit(f"quint run {spec.name} failed (safety violated or spec error)")
 
 
-def build_adapter(out: Path) -> None:
+def build_adapter(source: Path, out: Path, defines: list[str] = ()) -> None:
     zig = shutil.which("zig")
     if zig is None:
         raise SystemExit("zig is not installed")
     env = os.environ.copy()
     env["ZIG_GLOBAL_CACHE_DIR"] = str(ROOT / ".pio" / "zig-global")
     env["ZIG_LOCAL_CACHE_DIR"] = str(ROOT / ".pio" / "zig-local")
-    subprocess.run([zig, "c++", "-x", "c++", "-std=c++11", "-Isrc", str(ADAPTER),
+    subprocess.run([zig, "c++", "-x", "c++", "-std=c++11", *defines, "-Isrc", str(source),
                     "-o", str(out)], cwd=ROOT, env=env, check=True)
 
 
-def main(argv=None) -> int:
+def replay(kind: str, args, tmp_path: Path, defines: list[str] = ()) -> int:
+    spec, adapter, to_lines = SPECS[kind]
+    itf_dir = args.itf_dir
+    if itf_dir is None:
+        itf_dir = tmp_path / f"itf-{kind}"
+        itf_dir.mkdir()
+        generate(spec, itf_dir, args.traces, args.steps, args.seed)
+    files = sorted(itf_dir.glob("*.itf.json"))
+    if not files:
+        raise SystemExit(f"no ITF traces in {itf_dir}")
+
+    script = []
+    for f in files:
+        script.extend(to_lines(f))
+
+    exe = tmp_path / f"{adapter.stem}.exe"
+    build_adapter(adapter, exe, defines)
+    result = subprocess.run([str(exe)], input="\n".join(script) + "\n",
+                            capture_output=True, text=True)
+    sys.stdout.write(f"[{kind}] " + result.stdout)
+    sys.stderr.write(result.stderr)
+    return result.returncode
+
+
+def main(argv=None, defines: list[str] = ()) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--spec", choices=["merger", "zone", "all"], default="all")
     parser.add_argument("--traces", type=int, default=200)
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--seed")
     parser.add_argument("--itf-dir", type=Path)
     args = parser.parse_args(argv)
+    kinds = ["merger", "zone"] if args.spec == "all" else [args.spec]
+    if args.itf_dir is not None and len(kinds) != 1:
+        parser.error("--itf-dir needs --spec merger or --spec zone")
 
+    status = 0
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        itf_dir = args.itf_dir
-        if itf_dir is None:
-            itf_dir = tmp_path / "itf"
-            itf_dir.mkdir()
-            generate(itf_dir, args.traces, args.steps, args.seed)
-        files = sorted(itf_dir.glob("*.itf.json"))
-        if not files:
-            raise SystemExit(f"no ITF traces in {itf_dir}")
-
-        script = []
-        for f in files:
-            script.extend(itf_to_lines(f))
-
-        exe = tmp_path / "quint_replay_adapter.exe"
-        build_adapter(exe)
-        result = subprocess.run([str(exe)], input="\n".join(script) + "\n",
-                                capture_output=True, text=True)
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
-        return result.returncode
+        for kind in kinds:
+            rc = replay(kind, args, Path(tmp), defines)
+            if rc != 0:
+                return rc
+    return status
 
 
 if __name__ == "__main__":

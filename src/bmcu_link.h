@@ -66,16 +66,15 @@ union BmcuChannelFlags
         // afterwards, which are the two cases a reader most needs to tell
         // apart. Misdiagnosing this area has already cost a day.
         uint8_t tail : 1;
-        // This channel's strand may still be past the merger: it has entered
-        // send since it was last known to be back upstream (a finished retract,
-        // or an auto-unload that emptied the key). Not ownership -- the merger
-        // owner is released at command time, before the strand moves, and a
-        // send on another channel preempts it outright, so bit 5 cannot say
-        // whether filament was left in the head. This one can: a channel
-        // reading idle with both switches closed has its tip at the merger
-        // entrance when this is clear, and possibly in the tool head when it
-        // is set. Flash-backed. More than one channel may set it, and that is
-        // the condition it exists to show. See src/downstream_strand_policy.h.
+        // This channel's strand may be past the merger: its estimated zone
+        // (src/strand_zone_policy.h) is DOWNSTREAM or TAIL. Estimated from
+        // AS5600 travel, not from commands -- so it is set however the strand
+        // got there and clears only when measured travel brings it back, or
+        // when another channel's strand has filled the tube to the head.
+        // Not ownership: the merger owner is released at command time,
+        // before the strand moves, so bit 5 cannot say whether filament was
+        // left in the head. Flash-backed. More than one channel set is the
+        // collision it exists to show. See docs/strand_zone_design.md.
         uint8_t downstream : 1;
     } bits;
 };
@@ -139,9 +138,10 @@ void bmcu_link_merger_tail_refused(uint32_t count);
 // episode that produced it, so there is nothing here to storm.
 void bmcu_link_merger_tail_preempted(uint8_t claiming_ch);
 
-// `sending_ch` entered send while the channels in `others_mask` were still
-// marked downstream of the merger. One emission per send entry, which is an
-// edge, so there is nothing here to storm either.
+// `sending_ch` started pushing towards the head (send, or a load taking the
+// merger) while the channels in `others_mask` were estimated downstream of the
+// merger. Latched per (channel, others) pair in Motion_control.cpp and
+// re-armed on any zone change, so a repeating send edge reports once.
 void bmcu_link_downstream_occupied(uint8_t sending_ch, uint8_t others_mask);
 uint32_t bmcu_link_tx_drop_count(void);
 bool bmcu_link_reset_pending(void);

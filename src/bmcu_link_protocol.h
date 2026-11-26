@@ -170,13 +170,13 @@ enum DmTeardownCause : uint8_t
 // the collision happens regardless, because the printer is master, so the
 // record is the only thing the BMCU can contribute.
 //
-// DOWNSTREAM_OCCUPIED: a channel entered send while another channel's strand
-// was still marked downstream of the merger (src/downstream_strand_policy.h).
-// The value packs the sending channel in bits 0-7 and the mask of the channels
-// still marked in bits 8-11. Unlike MERGER_TAIL_PREEMPTED this does not depend
-// on the merger still being owned: it also fires when the previous channel's
-// ownership was already released by an unload command whose retract had not
-// finished, or was never retracted at all.
+// DOWNSTREAM_OCCUPIED: a channel started pushing towards the head while
+// another channel's strand was estimated past the merger
+// (src/strand_zone_policy.h). The value packs the pushing channel in bits 0-7
+// and the mask of the channels downstream in bits 8-11. Unlike
+// MERGER_TAIL_PREEMPTED this does not depend on the merger still being owned:
+// it also fires when ownership was released by an unload command whose retract
+// had not finished, or the other strand was never retracted at all.
 //
 // Keep this block comment-free. tools/generate_bmcu_enum_registry.py splits the
 // body on commas and does not strip comments, so a comment between entries

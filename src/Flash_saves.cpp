@@ -247,10 +247,9 @@ static constexpr uint32_t STA_TAG = 0xA5u;
 // channels and every motion command but send_out would be refused until a
 // fresh load cleared it. A resumed job continues with on_use, not send_out.
 static constexpr uint32_t STA_TAIL_TAG = 0xA6u;
-// Downstream-strand mask (src/downstream_strand_policy.h): bit ch set means
-// channel ch's strand may still be past the merger. Same slot ring and the same
-// sequence counter as the merger records, its own tag, and w0's low byte holds
-// the 4-bit mask where the merger records hold the channel.
+// Strand zones (src/strand_zone_policy.h): two bits per channel, channel 0 in
+// bits 0-1, in w0's low byte where the merger records hold the channel. Same
+// slot ring and the same sequence counter as the merger records, its own tag.
 //
 // A separate tag keeps the merger record exactly as it was -- the merger
 // answer is still the newest A5/A6 record, chosen the same way, so this cannot
@@ -262,7 +261,7 @@ static constexpr uint32_t STA_TAIL_TAG = 0xA6u;
 // write after its own newest A5/A6 record. That slot may hold an A7 record, in
 // which case its program fails and it erases that page before retrying -- the
 // same path it already takes on a full page. What is lost is the downstream
-// mask, which that firmware does not read.
+// zone byte, which that firmware does not read.
 static constexpr uint32_t STA_DOWN_TAG = 0xA7u;
 static constexpr uint32_t STA_PAGE_FIRST = 6u;
 static constexpr uint32_t STA_PAGE_COUNT = 10u;
@@ -277,6 +276,7 @@ static uint8_t g_sta_saved_loaded = 0xFFu;
 static uint8_t g_sta_saved_tail = 0u;
 static uint8_t g_sta_have_down = 0u;
 static uint8_t g_sta_saved_down = 0u;
+static uint8_t g_sta_page_erased = 0u;
 
 static void flash_runtime_cache_clear(void)
 {
@@ -429,7 +429,7 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch, bool* tail, uint8_t* downstream_ma
             {
                 have_down = 1u;
                 down_seq = seq;
-                down_mask = (uint8_t)(low & 0x0Fu);
+                down_mask = low;
             }
             continue;
         }
@@ -500,6 +500,14 @@ static bool sta_ring_write(uint32_t tag, uint8_t low)
     {
         const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
         if (!flash256_erase(sta_page_addr(page_i))) return false;
+        // The page may have held the other kind's newest record. Make both
+        // caches disagree with anything a caller can ask for, so the next
+        // write of either kind is not skipped as unchanged; the caller of
+        // this write re-establishes its own cache afterwards.
+        g_sta_have_saved = 1u;
+        g_sta_saved_loaded = 0xFEu;
+        g_sta_have_down = 2u;   // unknown: never skip the next write
+        g_sta_page_erased = 1u;
         if (!flash_prog_words(addr, buf, 2u)) return false;
     }
 
@@ -525,12 +533,19 @@ bool Flash_AMS_state_write(uint8_t loaded_ch, bool tail)
     return true;
 }
 
+bool Flash_AMS_state_take_page_erased(void)
+{
+    const bool erased = (g_sta_page_erased != 0u);
+    g_sta_page_erased = 0u;
+    return erased;
+}
+
 bool Flash_AMS_downstream_write(uint8_t mask)
 {
-    mask = (uint8_t)(mask & 0x0Fu);
-
-    // No record reads back as zero, so a zero mask needs no first write.
-    if (g_sta_have_down ? (g_sta_saved_down == mask) : (mask == 0u))
+    // No record reads back as zero (every zone NONE), so zero needs no first
+    // write.
+    if (g_sta_have_down == 1u ? (g_sta_saved_down == mask)
+                              : (g_sta_have_down == 0u && mask == 0u))
         return true;
 
     if (!sta_ring_write(STA_DOWN_TAG, mask)) return false;

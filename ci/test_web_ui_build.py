@@ -46,7 +46,7 @@ def _load_enum_registry_generator():
 # record the new revision and digest here together.
 LAYOUT_REVISION = 12
 LAYOUT_DIGEST = \
-    "8f5608043fa7e3856d36355136bd10ccc11eba21461746646c7bbaf1b232c18d"
+    "24051bdefdecde41e4aec7e91d78b93d3543310bfa926f20699af8611b2f343d"
 
 # littlefs on the Pico 2 W also holds the journal (8 x 64 KB) and the modules.
 # A page beyond this is a signal that a dependency was pulled in by accident.

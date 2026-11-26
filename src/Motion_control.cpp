@@ -8,6 +8,7 @@
 #include "hal/time_hw.h"
 #include "bmcu_link.h"
 #include "bmcu_link_protocol.h"
+#include "strand_zone_policy.h"
 #include "ams_loaded_latch_policy.h"
 #include "signal_hold_policy.h"
 #include "on_use_jam_policy.h"
@@ -501,13 +502,120 @@ static uint32_t g_last_on_use_exit_ms[4] = {0u,0u,0u,0u};
 #endif
 static unload_hold::State g_unload_hold[4] = {{0u, 0u}, {0u, 0u}, {0u, 0u}, {0u, 0u}};
 
-// Downstream-strand witness: which channels may still have filament past the
-// merger. See src/downstream_strand_policy.h. Observe-only -- the bit is
-// recorded, persisted and reported, and nothing gates on it. Build with
-// -DBMCU_DOWNSTREAM_STRAND=0 to never set it; the flag then always reads 0.
-#ifndef BMCU_DOWNSTREAM_STRAND
-#define BMCU_DOWNSTREAM_STRAND 1
+// ===== Strand zones =====
+// Where each channel's strand is, estimated from AS5600 travel; see
+// docs/strand_zone_design.md and src/strand_zone_policy.h. Observe-only:
+// persisted, reported as BmcuChannelFlags bit 7, and nothing gates on it.
+//
+// Geometry, in counts from the inner switch. Park is where DM autoload's
+// Stage 2 leaves the tip. The head is derived from this build's retract
+// length -- the value chosen so an unload brings the tip back to the merger --
+// unless -DBMCU_KEY_TO_HEAD_MM gives the real distance.
+#ifndef BMCU_KEY_TO_HEAD_MM
+#define BMCU_KEY_TO_HEAD_MM (120.0f + AMS_RETRACT_LEN * 1000.0f)
 #endif
+static constexpr strand_zone::Config kZoneConfig = {
+    distance_m_to_counts(0.120f),
+    distance_m_to_counts(0.150f),
+    distance_m_to_counts(0.130f),
+    distance_m_to_counts(BMCU_KEY_TO_HEAD_MM / 1000.0f),
+    distance_m_to_counts(0.030f),
+};
+static_assert(kZoneConfig.down_clear < kZoneConfig.down_set, "zone hysteresis");
+static_assert(kZoneConfig.down_set < kZoneConfig.head, "head must be past the merger");
+
+// The switch reading the estimate sees is debounced: a lever float during
+// printing would otherwise read as the tail passing (falling edge while
+// moving forward). Short enough to keep the edge within a few mm of travel.
+static constexpr uint32_t ZONE_KEY_DEBOUNCE_MS = 50u;
+
+static strand_zone::State g_zone[4];
+static uint8_t g_zone_key[4] = {0u,0u,0u,0u};          // debounced reading
+static uint32_t g_zone_key_change_ms[4] = {0u,0u,0u,0u};
+// Report latch for DOWNSTREAM_OCCUPIED: the last (channel, others) pair
+// emitted, re-armed whenever any zone changes. A send edge can repeat every
+// pass when something forces the motor out of send and motor_motion_switch
+// puts it back (a bad AS5600, a bus error); it reports once.
+static uint8_t g_zone_rep_ch = 0xFFu;
+static uint8_t g_zone_rep_others = 0u;
+
+static void zone_changed()
+{
+    g_zone_rep_ch = 0xFFu;
+    ams_downstream_changed();
+    bmcu_link_status_changed(BMCU_STATUS_CHANGE_MOTION);
+}
+
+// One AS5600 sample of channel `ch`. `fwd_delta` is forward travel in counts.
+static void zone_sample(uint8_t ch, int32_t fwd_delta, bool measured, bool driving_fwd,
+                        uint32_t now_ms)
+{
+    if (!BMCU_DOWNSTREAM_STRAND) return;
+
+    // ks 1 (both) and 3 (inner only) have filament at the inner switch;
+    // single-switch builds only ever report 0 or 1.
+    const uint8_t raw = (MC_ONLINE_key_stu[ch] == 1u || MC_ONLINE_key_stu[ch] == 3u) ? 1u : 0u;
+    if (raw == g_zone_key[ch]) g_zone_key_change_ms[ch] = now_ms;
+    else if ((now_ms - g_zone_key_change_ms[ch]) >= ZONE_KEY_DEBOUNCE_MS) g_zone_key[ch] = raw;
+
+    bool changed = strand_zone::update(g_zone[ch], kZoneConfig, fwd_delta, measured,
+                                       driving_fwd, g_zone_key[ch] != 0u);
+    if (strand_zone::at_head(g_zone[ch], kZoneConfig) &&
+        strand_zone::passage_proof(g_zone, kZoneConfig, ch) != 0u)
+        changed = true;
+    if (changed) zone_changed();
+}
+
+void Motion_control_zone_send_started(uint8_t ch)
+{
+    if (!BMCU_DOWNSTREAM_STRAND || ch >= 4u) return;
+    const uint8_t others = static_cast<uint8_t>(
+        strand_zone::downstream_mask(g_zone) & static_cast<uint8_t>(~(1u << ch)) & 0x0Fu);
+    if (others == 0u || (g_zone_rep_ch == ch && g_zone_rep_others == others)) return;
+    g_zone_rep_ch = ch;
+    g_zone_rep_others = others;
+    bmcu_link_downstream_occupied(ch, others);
+}
+
+// The merger owner is using the tube, so its strand counts as downstream even
+// if no travel says so yet (before_on_use straight onto a parked strand).
+void Motion_control_zone_claimed(uint8_t ch)
+{
+    if (!BMCU_DOWNSTREAM_STRAND || ch >= 4u) return;
+    Motion_control_zone_send_started(ch);
+    if (strand_zone::is_downstream(g_zone[ch].zone)) return;
+    strand_zone::restore(g_zone[ch], kZoneConfig, strand_zone::kDownstream,
+                         g_zone[ch].key != 0u, true);
+    zone_changed();
+}
+
+uint8_t Motion_control_zone_pack(void)
+{
+    return strand_zone::pack(g_zone);
+}
+
+uint8_t Motion_control_downstream_mask(void)
+{
+    return BMCU_DOWNSTREAM_STRAND ? strand_zone::downstream_mask(g_zone) : 0u;
+}
+
+void Motion_control_zone_restore(uint8_t packed, uint8_t owner)
+{
+    for (uint8_t i = 0u; i < 4u; i++)
+    {
+        const uint8_t z = static_cast<uint8_t>((packed >> (2u * i)) & 0x03u);
+        // A stored strand is assumed still at the switch, so a switch that
+        // reads empty at the first sample is a falling edge with no motion,
+        // which changes nothing -- never a rising edge that would reset a
+        // downstream front to the switch.
+        const bool key = BMCU_DOWNSTREAM_STRAND && z != strand_zone::kNone;
+        strand_zone::restore(g_zone[i], kZoneConfig, BMCU_DOWNSTREAM_STRAND ? z : 0u, key,
+                             BMCU_DOWNSTREAM_STRAND && owner == i);
+        g_zone_key[i] = key ? 1u : 0u;
+    }
+    if (BMCU_DOWNSTREAM_STRAND && strand_zone::pack(g_zone) != packed) ams_downstream_changed();
+}
+
 
 extern void RGB_update();
 
@@ -1078,10 +1186,9 @@ public:
         pwm_zeroed = 0;
 
         if (_motion == filament_motion_enum::filament_motion_send) {
-            // The one motion that drives a strand from the merger entrance
-            // towards the head; an edge, since an unchanged motion returned
-            // above.
-            if (BMCU_DOWNSTREAM_STRAND) ams_downstream_mark_sent(CHx);
+            // Pushing towards the head: report any other strand still past
+            // the merger. An edge, since an unchanged motion returned above.
+            Motion_control_zone_send_started(static_cast<uint8_t>(CHx));
             send_start_ms = time_now;
             send_stop_latch = false;
             send_len_abort = 0;
@@ -2413,6 +2520,12 @@ void AS5600_distance_updata(uint32_t now_ticks)
             was_ok[i] = 0u;
             speed_as5600_q[i] = 0;
             g_as5600_last_delta[i] = 0;
+            // Unmeasured: any drive that is not a pull may be moving the
+            // strand forward, and the zone assumes it did.
+            zone_sample(i, 0, false,
+                        g_motor_pwm[i] != 0 &&
+                            MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pull,
+                        time_ms_fast_from_ticks32(now_ticks));
             continue;
         }
 
@@ -2435,6 +2548,9 @@ void AS5600_distance_updata(uint32_t now_ticks)
         as5600_distance_save[i] = now;
         g_as5600_last_delta[i] = static_cast<int16_t>(diff);
         g_filament_position_counts[i] += diff;
+        // Raw counts grow on a retract (send negates them for its progress),
+        // so forward travel is -diff.
+        zone_sample(i, -diff, true, false, time_ms_fast_from_ticks32(now_ticks));
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=
@@ -2703,9 +2819,6 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
                 // The printer unload completed: hold this channel until it is
                 // used again.
                 unload_hold_start(i);
-                // The key found the tip again, so the strand is back upstream
-                // of the merger.
-                ams_downstream_mark_returned(i);
             }
             else if (redetect_t0_ms[i] != 0u &&
                      (time_now - redetect_t0_ms[i]) >= REDETECT_TIMEOUT_MS)
@@ -3231,9 +3344,6 @@ static void motor_motion_run(int error, uint32_t time_now, uint32_t now_ticks)
                     }
                     else if (empty_held)
                     {
-                        // Pulled out of the loader: nothing of it is left at
-                        // or past the merger.
-                        ams_downstream_mark_returned(i);
                         auto_unload_active[i]       = 0u;
                         auto_unload_active_t0_ms[i] = 0u;
                         auto_unload_empty_t0_ms[i]  = 0u;
@@ -3555,7 +3665,7 @@ uint8_t Motion_control_get_channel_flags(uint8_t channel)
     flags.bits.loaded = owns ? 1u : 0u;
     flags.bits.tail = (owns && ams_state_is_tail()) ? 1u : 0u;
     flags.bits.downstream =
-        (BMCU_DOWNSTREAM_STRAND && (ams_downstream_mask() & (1u << channel)) != 0u) ? 1u : 0u;
+        ((Motion_control_downstream_mask() & (1u << channel)) != 0u) ? 1u : 0u;
     return flags.raw;
 }
 

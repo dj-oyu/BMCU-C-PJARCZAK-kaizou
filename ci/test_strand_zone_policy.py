@@ -9,17 +9,17 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class DownstreamStrandPolicyTests(unittest.TestCase):
+class StrandZonePolicyTests(unittest.TestCase):
     def test_policy_vectors(self):
         zig = shutil.which("zig")
         if zig is None:
             self.skipTest("zig compiler is not installed")
 
         with tempfile.TemporaryDirectory() as directory:
-            executable = Path(directory) / "downstream_strand_policy_test.exe"
+            executable = Path(directory) / "strand_zone_policy_test.exe"
             command = [
                 zig, "c++", "-x", "c++", "-std=c++11", "-Isrc",
-                "ci/downstream_strand_policy_test.cpp", "-o", str(executable),
+                "ci/strand_zone_policy_test.cpp", "-o", str(executable),
             ]
             environment = os.environ.copy()
             environment["ZIG_GLOBAL_CACHE_DIR"] = str(ROOT / ".pio" / "zig-global")
