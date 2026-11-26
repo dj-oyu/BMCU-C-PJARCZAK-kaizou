@@ -9,7 +9,20 @@
 // code it cites. Phases are the composite states of that section; the autoload
 // internals (INS_CHECK .. AUTO_FAIL) collapse into one `autoload` step because
 // nothing in them touches the merger or the strand past it. LOW_STOP is left
-// out for the same reason; JAM is kept because it shortens the next pull.
+// out for the same reason; JAM is kept because a jam latch that outlives the
+// printer's recovery blocks the channel (docs/FEED_RESISTANCE_DESIGN.md).
+//
+// Jam latch (g_on_use_jam_latch), as of 346783f. It is set in on_use and
+// cleared by:
+//   - before_pull_back on the channel: the printer has acted on the jam;
+//   - send_out on the channel, unconditionally: the printer deciding to feed
+//     again is the confirmation (it used to need the buffer above 85 % with
+//     the motor braked, which a normal print near 55 % never reaches);
+//   - the key reading empty: the strand is out.
+// A 0xFF pull reached without before_pull_back still pulls 100 mm only while
+// latched (A2). A forward command (send_out / before_on_use / on_use) on a
+// channel that is pulling back ends the pull: the sequencer no longer holds
+// the channel against the printer's reload.
 //
 // Two kinds of variable:
 //   controller  what the firmware holds: phase, owner, inTail, jammed and
@@ -27,7 +40,8 @@
 //       design review; they are not modelled.
 //   A2  A full-length pull (AMS_RETRACT_LEN) brings the tip back upstream of
 //       the merger; the build setting is chosen for this. The jam-shortened
-//       100 mm pull does not.
+//       100 mm pull does not. Since before_pull_back clears the latch, only
+//       a 0xFF pull that skips before_pull_back can still be short.
 //   A3  A tail piece left past the merger leaves only by the printer or a
 //       human (`remnantCleared`), never by a BMCU motion.
 //   A4  Timers are nondeterministic: any timeout may fire whenever its state
@@ -114,18 +128,24 @@ module bmcu_merger {
   pure def allowAny(own: int, x: int): bool = own == NO_CH or own == x
   pure def allowStop(own: int, x: int): bool = own == x
 
+  // Where a send_out on the channel is accepted. PULL since 346783f: a
+  // forward command ends a pull back instead of waiting for its full length.
+  pure val SEND_FROM: Set[Phase] =
+    Set(PARKED, HELD, FAULT, ORPHAN, JAM, PRINT, PAUSE, PURGE, PULL)
+
   // send_out(x): preempts whoever holds the merger, the channel itself
   // included. From an empty channel only the AMS-side value changes: the key
   // reads empty, so motor_motion_switch never enters send.
   action sendOut(x: int): bool = all {
-    phase.get(x).in(Set(PARKED, HELD, FAULT, ORPHAN, JAM, PRINT, PAUSE, PURGE)),
+    phase.get(x).in(SEND_FROM),
     phase' = CHANNELS.mapBy(c =>
       if (c == x) SEND else deselected(c, x, phase.get(c), owner)),
     pos' = pos.set(x, if (pos.get(x) == Up) Down else pos.get(x)),
     owner' = NO_CH,
     inTail' = false,
     markSent(x),
-    // send_out clears the jam latch (buffer above 85 %).
+    // send_out clears the jam latch, unconditionally (346783f). A jam that
+    // is still there latches again in the next on_use.
     jammed' = jammed.exclude(Set(x)),
     pullClears' = pullClears,
     lastAction' = "sendOut",
@@ -150,7 +170,7 @@ module bmcu_merger {
   // without any send (A1).
   action beforeOnUse(x: int): bool = all {
     allowAny(owner, x),
-    phase.get(x).in(Set(SEND, SEND_HOLD, SEND_ABORT, PARKED, HELD, FAULT, TAIL, ORPHAN)),
+    phase.get(x).in(Set(SEND, SEND_HOLD, SEND_ABORT, PARKED, HELD, FAULT, TAIL, ORPHAN, PULL)),
     nondet pushed = Set(true, false).oneOf()
     pos' = pos.set(x,
       if (pos.get(x) == Up and pushed and phase.get(x).in(Set(PARKED, HELD))) Down
@@ -166,7 +186,7 @@ module bmcu_merger {
 
   action onUse(x: int): bool = all {
     allowAny(owner, x),
-    phase.get(x).in(Set(PURGE, PAUSE, SEND_HOLD, TAIL, ORPHAN)),
+    phase.get(x).in(Set(PURGE, PAUSE, SEND_HOLD, TAIL, ORPHAN, PULL)),
     phase' = CHANNELS.mapBy(c =>
       if (c == x) PRINT else deselected(c, x, phase.get(c), owner)),
     pos' = pos,
@@ -188,7 +208,9 @@ module bmcu_merger {
   }
 
   // before_pull_back(x): releases the merger at command time, before the
-  // strand has moved. In TAIL nothing moves at all.
+  // strand has moved. In TAIL nothing moves at all. Clears the jam latch
+  // (346783f): the printer has stopped the channel and is unloading it, so
+  // the pull that follows is full length.
   action beforePullBack(x: int): bool = all {
     allowStop(owner, x),
     phase.get(x).in(Set(PURGE, PRINT, PAUSE, JAM, TAIL)),
@@ -196,12 +218,15 @@ module bmcu_merger {
     pos' = pos,
     owner' = NO_CH,
     inTail' = false,
-    keepMask, keepLatches,
+    keepMask,
+    jammed' = jammed.exclude(Set(x)),
+    pullClears' = pullClears,
     lastAction' = "beforePullBack",
   }
 
   // 0xFF 03/00 on the selected channel. A jam-latched channel pulls 100 mm
   // only, which leaves the tip in the tube (A2), so that pull may not clear.
+  // After before_pull_back (ASSIST) the latch is gone and the pull is full.
   action pullBack(x: int): bool = all {
     phase.get(x).in(Set(ASSIST, PURGE, PRINT, PAUSE, JAM, TAIL)),
     val short = jammed.contains(x)
@@ -297,7 +322,9 @@ module bmcu_merger {
     phase.get(x) == PRINT,
     pos.get(x) == Down,
     phase' = phase.set(x, RUNOUT),
-    pos' = pos, owner' = owner, inTail' = inTail, keepMask, keepLatches,
+    pos' = pos, owner' = owner, inTail' = inTail, keepMask,
+    // the key reads empty: the jam latch clears
+    jammed' = jammed.exclude(Set(x)), pullClears' = pullClears,
     lastAction' = "keyEmptyWhilePrinting",
   }
 
@@ -345,7 +372,7 @@ module bmcu_merger {
     pos' = pos.set(x, None),
     owner' = owner, inTail' = inTail,
     markReturned(x),
-    keepLatches,
+    jammed' = jammed.exclude(Set(x)), pullClears' = pullClears,
     lastAction' = "autoUnloadEmpty",
   }
 
@@ -362,7 +389,8 @@ module bmcu_merger {
     phase.get(x).in(Set(PARKED, HELD)),
     phase' = phase.set(x, EMPTY),
     pos' = pos.set(x, None),
-    owner' = owner, inTail' = inTail, keepMask, keepLatches,
+    owner' = owner, inTail' = inTail, keepMask,
+    jammed' = jammed.exclude(Set(x)), pullClears' = pullClears,
     lastAction' = "handRemoved",
   }
 
@@ -432,8 +460,30 @@ module bmcu_merger {
   val singleUser: bool =
     CHANNELS.filter(c => phase.get(c).in(USING)).size() <= 1
 
+  // ---- jam latch (346783f)
+
+  // The pull the printer prepares with before_pull_back is never the
+  // jam-shortened one.
+  val assistNotJammed: bool =
+    CHANNELS.forall(c => phase.get(c) == ASSIST implies not(jammed.contains(c)))
+
+  // A send that was accepted is not held back by a jam latch.
+  val sendNotJammed: bool =
+    CHANNELS.forall(c =>
+      phase.get(c).in(Set(SEND, SEND_HOLD, SEND_ABORT)) implies not(jammed.contains(c)))
+
+  // A jam latch never blocks the channel for good: wherever a latched channel
+  // is, the printer's send_out is accepted there (and clears it), or the phase
+  // moves on by itself (a pull or a redetect ends, an unload gesture settles)
+  // to one where it is. Before 346783f a running pull ignored the send_out,
+  // and the latch vetoed it everywhere unless the buffer read above 85 %.
+  val jamEscapable: bool =
+    CHANNELS.forall(c => jammed.contains(c) implies
+      phase.get(c).in(SEND_FROM.union(Set(PULL_FROZEN, REDETECT, UNLOADING))))
+
   val safety: bool = all {
     tailHasOwner, ownerIsUsing, singleUser,
+    assistNotJammed, sendNotJammed, jamEscapable,
   }
 
   // ---------------------------------------------------------------- witnesses
@@ -453,4 +503,52 @@ module bmcu_merger {
   // strand zones (strand_zone.qnt) can tell it apart.
   val witnessNoParkedOrphan: bool =
     not(CHANNELS.exists(c => phase.get(c) == PARKED and pos.get(c) == Down))
+
+  // A jam-shortened pull is still reachable: a 0xFF pull with no
+  // before_pull_back in front of it.
+  val witnessNoJamPull: bool =
+    lastAction != "jamPullBack"
+
+  // ---------------------------------------------------------------- scenarios
+
+  // init with every channel empty, so a scenario starts from a known state.
+  action initEmpty = all {
+    phase' = CHANNELS.mapBy(c => EMPTY),
+    pos' = CHANNELS.mapBy(c => None),
+    owner' = NO_CH,
+    inTail' = false,
+    jammed' = Set(),
+    pullClears' = Set(),
+    lastAction' = "init",
+  }
+
+  // AMS-A ch3, 2026-11-27 (sim/recordings/2026-11-27_ams_a_ch3_anchored_spool_jam.log,
+  // sim/scenarios/anchored_spool_jam_ch3.json): the spool end held at the
+  // core in on_use, the jam latched, the printer stopped and unloaded the
+  // channel and, once the end was freed, reloaded it. The unload must be full
+  // length, and a send_out that arrives while the pull is still running must
+  // take the channel back to printing. (Channel 2 here: the model has three.)
+  run anchoredSpoolJamTest =
+    initEmpty.then(autoload(2))
+      .then(sendOut(2)).then(beforeOnUse(2)).then(onUse(2))
+      .then(jam(2))
+      .expect(jammed.contains(2) and phase.get(2) == JAM)
+      .then(beforePullBack(2))
+      .expect(not(jammed.contains(2)) and phase.get(2) == ASSIST)
+      .then(pullBack(2))
+      .expect(lastAction == "pullBack" and pullClears.contains(2))
+      .then(sendOut(2))
+      .expect(phase.get(2) == SEND and not(jammed.contains(2)))
+      .then(beforeOnUse(2)).then(onUse(2))
+      .expect(phase.get(2) == PRINT and safety)
+
+  // The printer pulls without before_pull_back while latched: the short pull
+  // is still possible, and the send_out that follows still gets through.
+  run jamPullThenSendTest =
+    initEmpty.then(autoload(1))
+      .then(sendOut(1)).then(beforeOnUse(1)).then(onUse(1))
+      .then(jam(1)).then(pullBack(1))
+      .expect(lastAction == "jamPullBack" and jammed.contains(1) and jamEscapable)
+      .then(sendOut(1))
+      .expect(not(jammed.contains(1)) and safety)
 }

@@ -27,6 +27,11 @@
 //   E4  The junction is at or beyond down_set: J == SET.
 //   A5  Persistence is immediate (a reboot restores the last zones).
 //   A6  A zone record is lost (loseRecord) only with no tail piece anywhere.
+//
+// A second module at the end of this file, outlet_guard, specifies the
+// open-outlet guard and its interaction with jam detection
+// (docs/FEED_RESISTANCE_DESIGN.md); not implemented, not replayed. Select it
+// with --main=outlet_guard.
 module strand_zone {
 
   // ---------------------------------------------------------------- geometry
@@ -562,4 +567,421 @@ module strand_zone {
       .then(fwd(1)).then(fwd(1)).then(fwd(1))
       .then(float(0)).then(back(0))
       .expect(isDown(est.get(1).zone) and safety)
+}
+
+// ==========================================================================
+//
+// Open outlet and jam, one channel (docs/FEED_RESISTANCE_DESIGN.md). NOT
+// IMPLEMENTED in the firmware yet: this is the design, checked before it is
+// written. A module of its own so that the strand_zone traces, which
+// ci/quint_replay.py replays against the firmware header, are unchanged:
+//
+//   quint run spec/strand_zone.qnt --main=outlet_guard --invariant=safety
+//   quint test spec/strand_zone.qnt --main=outlet_guard
+//
+// The physical fact: a PTFE tube can come off the filament hub. The BMCU
+// then feeds into nothing, and bare filament comes out of the open end. The
+// firmware cannot see the tube. What it can see is that forward travel meets
+// no back-pressure. That is normal on exactly one stretch, the send path from
+// rest to the extruder, whose length is known (AMS_RETRACT_LEN); anywhere
+// else a few mm of push raises the buffer. So the guard counts forward travel
+// since the last back-pressure (`free`), and when it exceeds the budget for
+// the current mode it stops pushing, latched. Back-pressure coming back is
+// the only release, besides a retract that winds the count back to zero.
+// "Not taken by the extruder" and "tube off" are the same state to the
+// firmware, and the guard does not try to tell them apart.
+//
+// Jam detection is the resistance-based design of the same document: a jam
+// is forward drive that produces (almost) no travel, sustained. Its hazard
+// here is the resume: when the guard has stopped the motor and the printer
+// consumes the slack, the buffer is stretched at the moment back-pressure
+// returns. A detector on the buffer reading (today's < 40 % for 300 ms)
+// would read that as a jam; one on drive vs travel cannot, because nothing is
+// driven while stopped and the first drive after the resume moves freely.
+//
+// Positions are abstract units along the path from the channel's rest
+// position: 0 rest, HUB the filament hub (where the tube can come off), PATH
+// the extruder. Travel past HUB with the outlet open goes into `spill`
+// (filament outside the tube) instead of moving the front.
+//
+// Assumptions:
+//   G1  Back-pressure is sensed only when the strand is coupled to something
+//       downstream: the extruder holds the tip (front == PATH) and the outlet
+//       is closed. Pushing a coupled strand raises the buffer; the extruder
+//       pulling a coupled strand stretches it (`tension`). Either is contact.
+//   G2  With the AS5600 good, `free` counts real forward travel. With it bad,
+//       it counts time x commanded speed, which is at least the real travel
+//       (it also counts while stuck): the guard trips early, never late.
+//   G3  The printer consumes only a strand its extruder holds. With the
+//       outlet open it first takes up the spill; once that is gone the tube
+//       may be drawn back onto the hub (`reseat`, nondeterministic: it may
+//       never happen).
+//   G4  A retract unit removes spill first, then moves the front back.
+//   G5  One firmware sample per action; a trip is evaluated on every sample
+//       and on every mode change.
+module outlet_guard {
+
+  // ---------------------------------------------------------------- geometry
+
+  pure val HUB: int = 1
+  pure val PATH: int = 6          // AMS_RETRACT_LEN: rest -> extruder
+  pure val MARGIN: int = 2        // send path tolerance
+  pure val USE_FREE: int = 1      // on_use and every other forward motion
+  pure val JAM_N: int = 2         // drive samples with no travel that latch a jam
+
+  type Mode = IDLE | SEND | USE | PULL
+
+  // The budget of free travel a forward mode allows. IDLE and PULL feed
+  // nothing forward (an idle feed, a DM re-push or hold_load is USE here).
+  pure def budget(m: Mode): int = match m {
+    | SEND => PATH + MARGIN
+    | USE => USE_FREE
+    | IDLE => USE_FREE
+    | PULL => USE_FREE
+  }
+  pure val MAX_BUDGET: int = PATH + MARGIN
+
+  // ---------------------------------------------------------------- state
+
+  // physical
+  var front: int          // 0 .. PATH
+  var spill: int          // filament pushed out of an open outlet
+  var outletOpen: bool    // tube off the hub (or: tip not taken, same thing)
+  var stuck: bool         // the strand is held upstream (spool clamped)
+  var tension: bool       // the extruder pulled since the BMCU last fed
+  var asGood: bool
+  // firmware
+  var mode: Mode          // the printer's command for this channel
+  var free: int           // forward travel since the last back-pressure
+  var tripped: bool       // open-outlet latch: forward drive stopped
+  var jam: bool           // jam latch: forward drive stopped
+  var jamEv: int          // consecutive drive samples with no travel
+  var jamWasStuck: bool   // the strand was held when the jam latched
+  var lastAction: str
+
+  pure def coupledOf(f: int, open: bool): bool = f == PATH and not(open)
+  val coupled: bool = coupledOf(front, outletOpen)
+
+  action keepPhys: bool = all {
+    front' = front, spill' = spill, outletOpen' = outletOpen, stuck' = stuck,
+    tension' = tension, asGood' = asGood,
+  }
+
+  // ---------------------------------------------------------------- init
+
+  action init = all {
+    front' = 0, spill' = 0, outletOpen' = false, stuck' = false, tension' = false,
+    asGood' = true,
+    mode' = IDLE, free' = 0, tripped' = false, jam' = false, jamEv' = 0,
+    jamWasStuck' = false, lastAction' = "init",
+  }
+
+  // ---------------------------------------------------------------- printer
+
+  // send_out: clears the jam latch unconditionally (346783f). The guard
+  // latch stays: a repeated send_out must not buy another budget.
+  action cmdSend: bool = all {
+    mode' = SEND,
+    jam' = false, jamEv' = 0,
+    tripped' = (tripped or free > budget(SEND)),
+    free' = free, jamWasStuck' = false,
+    keepPhys,
+    lastAction' = "cmdSend",
+  }
+
+  // before_on_use / on_use: the budget drops to USE_FREE at once. A load that
+  // was never taken (no contact since the send) trips here. Not while a jam
+  // holds: nothing travels then, and the jam is the better explanation; the
+  // count is judged again once the printer's recovery clears the jam.
+  action cmdUse: bool = all {
+    mode' = USE,
+    tripped' = (tripped or (not(jam) and free > budget(USE))),
+    free' = free, jam' = jam, jamEv' = jamEv, jamWasStuck' = jamWasStuck,
+    keepPhys,
+    lastAction' = "cmdUse",
+  }
+
+  // before_pull_back / pull_back: clears the jam latch (346783f).
+  action cmdPull: bool = all {
+    mode' = PULL,
+    jam' = false, jamEv' = 0,
+    tripped' = tripped, free' = free, jamWasStuck' = false,
+    keepPhys,
+    lastAction' = "cmdPull",
+  }
+
+  action cmdIdle: bool = all {
+    mode' = IDLE,
+    tripped' = tripped, free' = free, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    keepPhys,
+    lastAction' = "cmdIdle",
+  }
+
+  // ---------------------------------------------------------------- firmware
+
+  // Forward drive is allowed only in SEND / USE, never while a latch holds.
+  val driveEnabled: bool = (mode == SEND or mode == USE) and not(tripped) and not(jam)
+
+  // One forward drive sample.
+  action drive: bool = all {
+    driveEnabled,
+    if (stuck) all {
+      // no travel; the encoder sees it, time x speed does not (G2)
+      front' = front, spill' = spill, tension' = tension,
+      val f2 = if (asGood) free else free + 1
+      val ev = if (asGood) jamEv + 1 else 0
+      all {
+        free' = f2,
+        jamEv' = ev,
+        jam' = (ev >= JAM_N),
+        jamWasStuck' = if (ev >= JAM_N) stuck else jamWasStuck,
+        tripped' = (f2 > budget(mode)),
+      },
+      lastAction' = if (asGood and jamEv + 1 >= JAM_N) "jamLatch" else "driveStuck",
+    }
+    else if (coupledOf(front, outletOpen)) all {
+      // pushing a coupled strand: the buffer rises, contact
+      front' = front, spill' = spill, tension' = false,
+      free' = 0, jamEv' = 0, jam' = false, jamWasStuck' = jamWasStuck, tripped' = false,
+      lastAction' = "drivePressed",
+    }
+    else all {
+      // free travel: along the path, or out of the open outlet
+      val toSpill = outletOpen and front >= HUB
+      all {
+        front' = if (toSpill) front else front + 1,
+        spill' = if (toSpill) spill + 1 else spill,
+      },
+      tension' = false,
+      free' = free + 1, jamEv' = 0, jam' = false, jamWasStuck' = jamWasStuck,
+      tripped' = (free + 1 > budget(mode)),
+      lastAction' = if (free + 1 > budget(mode)) "trip" else "driveFree",
+    },
+    outletOpen' = outletOpen, stuck' = stuck, asGood' = asGood,
+    mode' = mode,
+  }
+
+  // A sample with the motor not pushing: the extruder pulling a coupled
+  // strand is contact too. That is the resume: the latch clears and the jam
+  // detector starts from nothing.
+  action sense: bool = all {
+    coupled, tension,
+    free' = 0, tripped' = false, jamEv' = 0,
+    jam' = jam, jamWasStuck' = jamWasStuck,
+    keepPhys, mode' = mode,
+    lastAction' = if (tripped) "resume" else "contact",
+  }
+
+  // One retract unit (G4). Winding the count back to zero clears the latch:
+  // the strand is where the count started, and the next send has its budget.
+  action retract: bool = all {
+    mode == PULL,
+    front > 0 or spill > 0,
+    spill' = if (spill > 0) spill - 1 else spill,
+    front' = if (spill > 0) front else front - 1,
+    tension' = false,
+    val f2 = if (free > 0) free - 1 else 0
+    all { free' = f2, tripped' = (tripped and f2 > 0) },
+    jam' = jam, jamEv' = jamEv, jamWasStuck' = jamWasStuck,
+    outletOpen' = outletOpen, stuck' = stuck, asGood' = asGood, mode' = mode,
+    lastAction' = "retract",
+  }
+
+  // ---------------------------------------------------------------- physics
+
+  // The tube comes off the hub.
+  action detach: bool = all {
+    not(outletOpen),
+    outletOpen' = true,
+    front' = front, spill' = spill, stuck' = stuck, tension' = tension, asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "detach",
+  }
+
+  // The printer extrudes one unit (G3).
+  action consume: bool = all {
+    mode == USE, front == PATH,
+    if (outletOpen) all {
+      spill > 0,
+      spill' = spill - 1, outletOpen' = true, tension' = tension,
+      lastAction' = "consumeSpill",
+    } else all {
+      spill' = spill, outletOpen' = false, tension' = true,
+      lastAction' = "consume",
+    },
+    front' = front, stuck' = stuck, asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+  }
+
+  // With the spill taken up, consumption draws the tube back onto the hub;
+  // the extruder is now pulling against the BMCU (G3).
+  action reseat: bool = all {
+    outletOpen, spill == 0, mode == USE, front == PATH,
+    outletOpen' = false, tension' = true,
+    front' = front, spill' = spill, stuck' = stuck, asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "reseat",
+  }
+
+  // A human puts the tube back (the send-path case: nothing is consumed).
+  action reattach: bool = all {
+    outletOpen, spill == 0,
+    outletOpen' = false,
+    front' = front, spill' = spill, stuck' = stuck, tension' = tension, asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "reattach",
+  }
+
+  action stick: bool = all {
+    not(stuck), stuck' = true,
+    front' = front, spill' = spill, outletOpen' = outletOpen, tension' = tension,
+    asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "stick",
+  }
+
+  action unstick: bool = all {
+    stuck, stuck' = false,
+    front' = front, spill' = spill, outletOpen' = outletOpen, tension' = tension,
+    asGood' = asGood,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "unstick",
+  }
+
+  action asToggle: bool = all {
+    asGood' = not(asGood),
+    front' = front, spill' = spill, outletOpen' = outletOpen, stuck' = stuck,
+    tension' = tension,
+    mode' = mode, free' = free, tripped' = tripped, jam' = jam, jamEv' = jamEv,
+    jamWasStuck' = jamWasStuck,
+    lastAction' = "asToggle",
+  }
+
+  // ---------------------------------------------------------------- step
+
+  action step = {
+    nondet dice = 0.to(19).oneOf()
+    any {
+      all { dice < 3, cmdSend }, all { dice < 4, cmdUse },
+      all { dice < 2, cmdPull }, all { dice < 1, cmdIdle },
+      drive, drive, sense, retract,
+      all { dice < 2, detach }, consume, reseat,
+      all { dice < 2, reattach },
+      all { dice < 1, stick }, all { dice < 3, unstick },
+      all { dice < 1, asToggle },
+    }
+  }
+
+  // ---------------------------------------------------------------- invariants
+
+  // Free feed never grows past the budget: unlatched in a forward mode, the
+  // count is within that mode's budget; latched, nothing feeds, so it is
+  // never more than one sample past the largest budget.
+  val freeBounded: bool = all {
+    (not(tripped) and not(jam) and (mode == SEND or mode == USE)) implies free <= budget(mode),
+    free <= MAX_BUDGET + 1,
+  }
+
+  // The count never under-reads what came out of the open outlet (G2), so
+  // the spill is bounded by the same budget.
+  val spillCounted: bool = spill <= free
+
+  // The two latches are disjoint: a jam means no travel, an open outlet means
+  // travel with nothing against it. Neither can latch while the other holds
+  // the motor.
+  val latchesDisjoint: bool = not(jam and tripped)
+
+  // A jam never latches without a held strand, in particular not at the
+  // resume, where the buffer is stretched by the printer's pull.
+  val jamSound: bool = jam implies jamWasStuck
+
+  // The printer's send_out / pull releases a jam (346783f), whatever the
+  // buffer reads.
+  val jamReleasedByCommand: bool =
+    (lastAction == "cmdSend" or lastAction == "cmdPull") implies not(jam)
+
+  // Contact always clears the guard: resume needs no human.
+  val resumeOnContact: bool =
+    (lastAction == "resume" or lastAction == "contact" or lastAction == "drivePressed")
+      implies (not(tripped) and free == 0)
+
+  val safety: bool = all {
+    freeBounded, spillCounted, latchesDisjoint, jamSound, jamReleasedByCommand,
+    resumeOnContact,
+  }
+
+  // ---------------------------------------------------------------- witnesses
+  // Expected to be VIOLATED.
+
+  // The guard trips.
+  val witnessNoTrip: bool = not(tripped)
+
+  // It resumes on contact, with no human step.
+  val witnessNoResume: bool = lastAction != "resume"
+
+  // At the resume the buffer is stretched: a detector on the buffer reading
+  // would latch a jam here, on a strand that is not held.
+  val witnessNoStretchedResume: bool =
+    not(lastAction == "resume" and tension and not(stuck))
+
+  // A real jam still latches.
+  val witnessNoJam: bool = not(jam)
+
+  // On the send path the spill reaches past the on_use budget: the price of
+  // the one stretch where free travel is normal.
+  val witnessSmallSpill: bool = spill <= USE_FREE + 1
+
+  // ---------------------------------------------------------------- scenarios
+
+  // The tube comes off mid-print: the guard stops within the on_use budget,
+  // the printer eats the slack, the tube reseats and feeding resumes with no
+  // jam.
+  run detachMidPrintTest =
+    init.then(cmdSend)
+      .then(drive).then(drive).then(drive).then(drive).then(drive).then(drive)
+      .then(drive)
+      .expect(lastAction == "drivePressed" and free == 0)
+      .then(cmdUse).then(detach)
+      .then(drive).then(drive)
+      .expect(tripped and spill == 2 and lastAction == "trip")
+      .expect(not(driveEnabled))
+      .then(consume).then(consume).then(reseat).then(sense)
+      .expect(lastAction == "resume" and not(tripped) and not(jam) and tension)
+      .then(drive)
+      .expect(lastAction == "drivePressed" and not(jam) and safety)
+
+  // A load the extruder never takes (or a tube off before the send): the
+  // spill stops at the send budget, a retract winds it back, and after the
+  // tube is put back the next send has its full budget.
+  run notTakenTest =
+    init.then(detach).then(cmdSend)
+      .then(drive).then(drive).then(drive).then(drive).then(drive).then(drive)
+      .then(drive).then(drive).then(drive)
+      .expect(tripped and spill == PATH + MARGIN and free == PATH + MARGIN + 1)
+      .then(cmdSend).expect(tripped and not(driveEnabled))
+      .then(cmdPull)
+      .then(retract).then(retract).then(retract).then(retract).then(retract)
+      .then(retract).then(retract).then(retract).then(retract)
+      .expect(not(tripped) and free == 0 and spill == 0 and front == 0)
+      .then(reattach).then(cmdSend)
+      .then(drive).then(drive).then(drive).then(drive).then(drive).then(drive)
+      .then(drive)
+      .expect(lastAction == "drivePressed" and safety)
+
+  // A held spool: the jam latches with no travel, the guard does not; the
+  // printer's send_out clears it.
+  run jamIsNotOpenTest =
+    init.then(cmdSend)
+      .then(drive).then(drive).then(drive).then(drive).then(drive).then(drive)
+      .then(drive).then(cmdUse).then(stick).then(drive).then(drive)
+      .expect(jam and not(tripped) and free == 0)
+      .then(unstick).then(cmdSend)
+      .expect(not(jam) and safety)
 }
