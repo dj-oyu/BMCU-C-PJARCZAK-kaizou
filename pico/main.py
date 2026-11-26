@@ -74,8 +74,8 @@ bridge_id = getattr(
 monotonic_us = MonotonicMicros()
 boot_id = next_boot_id(os.urandom(8))
 link_configs = getattr(config, "BMCU_LINKS", None) or ({
-    "id": "bmcu-a", "uart": config.UART_ID,
-    "tx": config.UART_TX_PIN, "rx": config.UART_RX_PIN,
+    "id": "bmcu-a", "uart": getattr(config, "UART_ID", 0),
+    "tx": getattr(config, "UART_TX_PIN", 0), "rx": getattr(config, "UART_RX_PIN", 1),
 },)
 journal_path = getattr(config, "BMCU_BINARY_JOURNAL_PATH", "bmcu_history")
 outbox = BMB1Outbox(
@@ -130,7 +130,7 @@ dma_readers = []
 for link_index, item in enumerate(link_configs):
     rxbuf = item.get("rxbuf", getattr(config, "UART_RXBUF", 2048))
     uart = UART(
-        item["uart"], baudrate=item.get("baudrate", config.UART_BAUDRATE),
+        item["uart"], baudrate=item.get("baudrate", getattr(config, "UART_BAUDRATE", 115200)),
         bits=8, parity=0, stop=1, tx=Pin(item["tx"]), rx=Pin(item["rx"]),
         rxbuf=rxbuf)
     source, capacity = uart, rxbuf
