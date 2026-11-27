@@ -13,6 +13,10 @@ static const Config kCfg = {
     40,     // slip budget
     12,     // consumption ceiling: 12 counts/s
     5500, 4700, 4000, 3000u,
+    5,      // unpowered travel that clears a slip
+    500u,   // spin-down after a slip trip
+    10000u, // a slip not recovered by then is escalated
+    2,      // recoveries per printer command
 };
 
 static const uint32_t kDt = 100000u;  // 100 ms samples
@@ -190,7 +194,8 @@ static int test_unmeasured_never_trips(void)
 
 // Gear slip on a held strand (spool clamped): the gear turns, the extruder
 // keeps pulling, the buffer stays stretched. A slip, braked, raised to the
-// printer; never resumed by the tension that is its signature.
+// printer once it will not clear; never resumed by the tension that is its
+// signature.
 static int test_slip_trips_and_holds(void)
 {
     State s; reset(s); uint32_t t = 1000u;
@@ -287,6 +292,82 @@ static int test_use_pull_cycles_keep_count(void)
     return 0;
 }
 
+// Trip a slip: the gear turns 50 mm/s with the buffer stretched.
+static void slip_now(State& s, uint32_t& t)
+{
+    while (!slipping(s)) run(s, MODE_USE, 1, 5, 3000, true, t);
+}
+
+// The extruder works the tangle loose: with the motor coasting it draws the
+// strand through and turns the gear. That clears the slip, once the motor has
+// spun down; and the jam window is disarmed, the buffer still being low.
+static int test_slip_recovers_on_unpowered_travel(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    slip_now(s, t);
+    run(s, MODE_USE, 3, 5, 3000, false, t);         // spinning down: not the strand
+    CHECK(slipping(s), 201);
+    run(s, MODE_USE, 5, 0, 3000, false, t);
+    CHECK(slipping(s) && !slip_escalated(s, kCfg, t), 202);
+    run(s, MODE_USE, 1, 3, 3000, false, t);         // 3 mm drawn through
+    CHECK(slipping(s), 203);
+    run(s, MODE_USE, 1, 3, 3000, false, t);         // 6 mm: the strand moves
+    CHECK(!blocks_push(s), 204);
+    CHECK(s.resumes == 1u, 205);
+    CHECK(jam_disarmed(s, kCfg, 3000, t + 1u), 206);
+    return 0;
+}
+
+// Travel while pushing proves nothing: that is the slip itself.
+static int test_pushed_travel_does_not_recover(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    slip_now(s, t);
+    run(s, MODE_USE, 6, 0, 3000, false, t);
+    run(s, MODE_USE, 20, 5, 3000, true, t);
+    CHECK(slipping(s), 211);
+    return 0;
+}
+
+// A slip that keeps coming back is escalated: after max_resumes recoveries
+// the next one is the printer's at once, and travel no longer clears it.
+static int test_slip_recovery_is_limited(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    for (int k = 0; k < 2; k++)
+    {
+        slip_now(s, t);
+        CHECK(!slip_escalated(s, kCfg, t), 221);
+        run(s, MODE_USE, 6, 0, 3000, false, t);
+        run(s, MODE_USE, 2, 4, 3000, false, t);
+        CHECK(!blocks_push(s), 222);
+    }
+    slip_now(s, t);
+    CHECK(slip_escalated(s, kCfg, t), 223);
+    run(s, MODE_USE, 6, 0, 3000, false, t);
+    run(s, MODE_USE, 4, 4, 3000, false, t);
+    CHECK(slipping(s), 224);
+    // The printer's next command starts the allowance over.
+    run(s, MODE_PULL, 1, -5, 3000, false, t);
+    CHECK(!blocks_push(s) && s.resumes == 0u, 225);
+    return 0;
+}
+
+// A strand that stays held does not move: after slip_wait_ms it is escalated,
+// and late travel does not clear it.
+static int test_slip_escalates_after_wait(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    slip_now(s, t);
+    run(s, MODE_USE, 99, 0, 3000, false, t);
+    CHECK(!slip_escalated(s, kCfg, t), 231);
+    run(s, MODE_USE, 2, 0, 3000, false, t);
+    CHECK(slip_escalated(s, kCfg, t), 232);
+    run(s, MODE_USE, 4, 4, 3000, false, t);
+    CHECK(slipping(s), 233);
+    return 0;
+}
+
 int main(void)
 {
     int r;
@@ -309,5 +390,9 @@ int main(void)
     if ((r = test_send_through_pull_resets())) return r;
     if ((r = test_use_pull_cycles_keep_count())) return r;
     if ((r = test_resume_on_a_held_strand_ends_in_slip())) return r;
+    if ((r = test_slip_recovers_on_unpowered_travel())) return r;
+    if ((r = test_pushed_travel_does_not_recover())) return r;
+    if ((r = test_slip_recovery_is_limited())) return r;
+    if ((r = test_slip_escalates_after_wait())) return r;
     return 0;
 }

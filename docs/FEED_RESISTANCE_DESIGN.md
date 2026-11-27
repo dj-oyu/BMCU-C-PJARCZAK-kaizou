@@ -338,17 +338,37 @@ pulled buffer, never tripped.
 - A slip brakes every push like an open outlet (`blocks_push`), but it is
   never an open-outlet trip, and tension does not resume it: tension is what
   a slip looks like.
-- It does not recover by itself, so in on_use `Motion_control.cpp` raises
-  the jam (`g_on_use_low_latch`, `g_on_use_jam_latch`, `0xF06F`): the printer
-  stops the channel, and a human reseats the filament.
+- While it is held, the PIDs are cleared every cycle, so a resume starts
+  from zero and not from the PWM that was grinding (the feedback loop that
+  turns a slip into a grind).
+- The motor coasts instead of braking (`g_outlet_coast`, both bridge inputs
+  low). If the hold lets go (a tangle the extruder works loose), the
+  extruder draws the strand through and back-drives the gear. With the motor
+  unpowered, gear travel is strand travel. After `BMCU_SLIP_SETTLE_MS`
+  (500 ms of spin-down) the policy counts that forward travel. Past
+  `BMCU_SLIP_RECOVER_MM` (3 mm), the slip clears, and the jam window is
+  disarmed as on an open-outlet resume (§2.6). Travel while pushing proves
+  nothing, because that is the slip itself.
+- Escalation: if the slip is not cleared within `BMCU_SLIP_WAIT_MS` (10 s),
+  or after `BMCU_SLIP_RESUMES` (2) clears in one printer command, the slip
+  is escalated (`slip_escalated`). An escalated slip brakes, and in on_use
+  `Motion_control.cpp` raises the jam (`g_on_use_low_latch`,
+  `g_on_use_jam_latch`, `0xF06F`), so a human reseats the filament.
 - The printer's next command (pull, send_out) ends it, as it ends the jam
-  latch (§1.2); key empty does as well.
+  latch (§1.2), and starts the allowance over. Key empty ends it as well.
 
 ### 3.4 Checked
 
-- Host: `ci/outlet_guard_policy_test.cpp` (slip trips and holds, a refill
-  is not a slip, feed-limited printing is not a slip, a slip is not an open
-  outlet, send_out ends it, a resume on a held strand ends in a slip).
+- Host: `ci/outlet_guard_policy_test.cpp` covers:
+  - a slip trips and holds;
+  - a refill is not a slip, nor is feed-limited printing;
+  - a slip is not an open outlet;
+  - send_out ends it;
+  - a resume on a held strand ends in a slip;
+  - unpowered travel clears it, after the spin-down;
+  - pushed travel does not clear it;
+  - recoveries are limited per command;
+  - it escalates after the wait.
 - Simulator: `GearSlip` in `sim/tests/test_firmware_sensors.py`, extruder at
   1 mm/s, 30 mm stroke, the gear slipping from t = 8 s:
 
@@ -356,14 +376,22 @@ pulled buffer, never tripped.
   |---|---|---|
   | `64b5c7c` (deployed) | 166 mm | 11.2 s |
   | `406d143` | 617 mm | never |
-  | this | 108 mm | 10.3 s |
+  | `fc0edd2` | 108 mm | 10.3 s |
+  | this | 108 mm | 20.2 s (after the 10 s wait) |
+
+  `GearSlipFreed` is the same slip with the hold released at t = 14 s:
+  feeding resumes by itself, and nothing is raised to the printer.
 
 - Quint: `grindBounded`: gear travel into a held strand, net of the
   consumption ceiling, is bounded per fault and printer command. At most it
   covers three stretches: pressed (a slip count short of its trip), at rest
   (the open-outlet count), and pulled (a slip count to its trip).
-  `slipNotOpen`: a slip never sets the open-outlet latch. The witness
-  `witnessNoSlip` keeps a slip trip reachable.
+  `slipNotOpen`: a slip never sets the open-outlet latch.
+  `recoverOnFree`: a slip clears only on a strand that moves.
+  `resumesBounded`: recoveries per command are at most `MAX_RES`.
+  `escalationRaised`: an escalated slip in on_use raises the jam. The
+  witnesses `witnessNoSlip`, `witnessNoRecover` and `witnessNoEscalation`
+  keep a slip trip, a recovery and an escalation reachable.
 
 ### 3.5 Not covered
 
@@ -375,3 +403,10 @@ pulled buffer, never tripped.
   ceiling for that reason.
 - The 40 mm budget, the 47 / 55 % thresholds and the buffer's real stroke
   are from the simulator and one printing reading, not hardware.
+- Recovery assumes that both bridge inputs low coast this driver, and that
+  the extruder can back-drive the gearmotor through the spring-loaded idler.
+  Neither is measured. If the gearmotor does not back-drive, a freed strand
+  never clears the slip, and it escalates after the 10 s wait: the same as
+  `fc0edd2`, 10 s later.
+- The 3 mm / 500 ms / 10 s / 2 values are chosen on the simulator (1 mm/s
+  extruder). A slip cannot be made on demand on hardware.

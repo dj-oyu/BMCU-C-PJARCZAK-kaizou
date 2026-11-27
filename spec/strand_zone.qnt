@@ -605,10 +605,14 @@ module strand_zone {
 // DISARM_N samples: the resume is a pulled buffer, and not a jam.
 //
 // Gear slip: forward gear travel while the buffer is pulled or pressed is
-// counted on its own (`slipCnt`), drained at CONS outside send_out; past SLIP_BUD it latches a slip
-// (`slipped`), which brakes the push, raises the on_use jam, is not resumed
-// by tension and ends at the printer's next command into another mode. A
-// pulled buffer is a coupled strand, so it zeroes the open-outlet count.
+// counted on its own (`slipCnt`), drained at CONS outside send_out; past
+// SLIP_BUD it latches a slip (`slipped`), which stops the push and is not
+// resumed by tension. The motor coasts while it waits: travel with the motor
+// unpowered is the strand's own (G2), and past REC_N of it the slip clears
+// (`recover`). After MAX_RES recoveries per printer command, or WAIT_N
+// samples without one, it is escalated: braked, and the on_use jam raised. A
+// command into another mode ends it. A pulled buffer is a coupled strand, so
+// it zeroes the open-outlet count.
 //
 // Abstract units: one sample is one step of time. A push moves the strand up
 // to FEED per sample, the extruder takes at most CONS per sample (`credit`).
@@ -623,7 +627,10 @@ module strand_zone {
 //       tip (front == PATH) and the outlet is closed.
 //   G2  The AS5600, when good, measures the drive gear's travel: the
 //       strand's, unless the gear slips on a held strand (`slips`), when it
-//       reads FEED per push and the strand does not move.
+//       reads FEED per push and the strand does not move. Unpowered, the
+//       gear turns only with the strand: a coasting motor is back-driven by
+//       an extruder pulling a free strand (the motor's spin-down, settle_ms,
+//       is not modelled).
 //   G3  The printer consumes only a strand its extruder holds. With the
 //       outlet open it first takes up the spill; once that is gone the tube
 //       may be drawn back onto the hub (`reseat`, nondeterministic).
@@ -646,6 +653,9 @@ module outlet_guard {
   pure val CONS: int = 1          // BMCU_OUTLET_CONSUME_MM_S per sample
   pure val JAM_N: int = 2         // BMCU_ON_USE_JAM_HOLD_MS in samples
   pure val DISARM_N: int = 3      // the 3 s jam disarm after a resume, in samples
+  pure val REC_N: int = 2         // BMCU_SLIP_RECOVER_MM: unpowered travel that clears a slip
+  pure val WAIT_N: int = 8        // BMCU_SLIP_WAIT_MS in samples
+  pure val MAX_RES: int = 2       // BMCU_SLIP_RESUMES
 
   // The guard's modes are the motor's (outlet_sample): send, pull, and every
   // other motion that can feed forward (on_use, before_on_use, idle feed).
@@ -681,20 +691,24 @@ module outlet_guard {
 
   type Fw = {
     excess: int, tripped: bool, judged: bool, fromSend: bool,
-    slipCnt: int, slipped: bool,
+    slipCnt: int, slipped: bool, resumes: int, slipAge: int, recover: int,
     jam: bool, jamEv: int, disarm: int, jamWasStuck: bool,
   }
 
   pure val FW0: Fw = {
     excess: 0, tripped: false, judged: true, fromSend: false,
-    slipCnt: 0, slipped: false,
+    slipCnt: 0, slipped: false, resumes: 0, slipAge: 0, recover: 0,
     jam: false, jamEv: 0, disarm: -1, jamWasStuck: false,
   }
+
+  // outlet_guard::slip_escalated: a slip that will not clear by itself.
+  pure def escalated(fw: Fw): bool =
+    fw.slipped and (fw.resumes >= MAX_RES or fw.slipAge >= WAIT_N)
 
   // A command into a different mode ends a slip (outlet_guard::sample on a
   // mode change).
   pure def endSlip(fw: Fw, m0: Mode, m1: Mode): Fw =
-    if (m0 != m1) { ...fw, slipped: false, slipCnt: 0 } else fw
+    if (m0 != m1) { ...fw, slipped: false, slipCnt: 0, resumes: 0, slipAge: 0, recover: 0 } else fw
 
   // outlet_guard::sample, then the on_use jam check of
   // pressure_ctrl_on_use. `pressed` / `pulledNow` are the buffer at the
@@ -713,12 +727,22 @@ module outlet_guard {
     val drainOf = if (m != SEND) CONS else 0
     // the counts
     val t =
-      if (not(measured)) { ...bp, excess: 0, slipCnt: 0 }
+      if (not(measured)) { ...bp, excess: 0, slipCnt: 0,
+                           slipAge: if (bp.slipped) bp.slipAge + 1 else bp.slipAge }
+      else if (bp.slipped) {
+        // latched: unpowered forward travel is the strand moving
+        val r = if (not(pushing) and fwd > 0 and not(escalated(bp))) bp.recover + fwd else bp.recover
+        if (r > REC_N)
+          { ...bp, slipped: false, resumes: bp.resumes + 1, slipCnt: 0, recover: 0, excess: 0,
+                   slipAge: 0, disarm: 0 }
+        else { ...bp, recover: r, slipAge: bp.slipAge + 1 }
+      }
       else if (deflected) {
         val s1 = bp.slipCnt + (if (fwd > 0) fwd else 0) - drainOf
         val s2 = if (s1 < 0) 0 else s1
-        { ...bp, slipCnt: s2,
-          slipped: bp.slipped or (not(bp.tripped) and s2 > SLIP_BUD) }
+        val trip = not(bp.tripped) and s2 > SLIP_BUD
+        { ...bp, slipCnt: s2, slipped: trip,
+          slipAge: if (trip) 0 else bp.slipAge, recover: if (trip) 0 else bp.recover }
       }
       else {
         val e1 = bp.excess + fwd
@@ -732,14 +756,14 @@ module outlet_guard {
     val dActive = t.disarm >= 0 and pulledNow and t.disarm < DISARM_N
     val held = t.tripped or t.slipped or dActive
     val ev = if (m != USE or held or not(pulledNow) or t.jam) 0 else t.jamEv + 1
-    // a slip in on_use raises the jam (outlet_sample)
-    val latches = ev >= JAM_N or (m == USE and t.slipped and not(t.jam))
+    // an escalated slip in on_use raises the jam (outlet_sample)
+    val latches = ev >= JAM_N or (m == USE and escalated(t) and not(t.jam))
     { ...t,
       judged: true,
       disarm: if (dActive) t.disarm + 1 else -1,
       jamEv: if (latches) 0 else ev,
       jam: t.jam or latches,
-      jamWasStuck: if (latches) stuck else t.jamWasStuck }
+      jamWasStuck: if (latches) (stuck or escalated(t)) else t.jamWasStuck }
   }
 
   // ---------------------------------------------------------------- state
@@ -883,7 +907,10 @@ module outlet_guard {
   action idleSample: bool = all {
     not(driveEnabled) or buf == BUF,
     not(mode == PULL),                    // PULL samples are retracts
-    val fw2 = fwSample(fw, mode, asGood, 0, false, buf == BUF, pulled > 0, stuck)
+    // A latched slip coasts: the extruder draws a free strand through (G2).
+    val drawn = fw.slipped and not(escalated(fw)) and not(stuck) and mode == USE and
+                coupledOf(front, outletOpen) and pulled > 0
+    val fw2 = fwSample(fw, mode, asGood, if (drawn) CONS else 0, false, buf == BUF, pulled > 0, stuck)
     val reset = restarted(fw2)
     all {
       fw' = fw2,
@@ -891,6 +918,7 @@ module outlet_guard {
       faultFed' = if (reset) false else faultFed,
       grind' = grindNet(grind, mode),
       lastAction' = if (fw.tripped and not(fw2.tripped)) "resume"
+                    else if (fw.slipped and not(fw2.slipped)) "recover"
                     else if (fw2.jam and not(fw.jam)) "jamLatch"
                     else "idle",
     },
@@ -1046,6 +1074,16 @@ module outlet_guard {
   // A slip is never taken for an open outlet that tension may resume.
   val slipNotOpen: bool = fw.slipped implies not(fw.tripped)
 
+  // A slip clears only on a strand that moves: never while it is held.
+  val recoverOnFree: bool = lastAction == "recover" implies not(stuck)
+
+  // Recoveries are bounded per printer command.
+  val resumesBounded: bool = fw.resumes <= MAX_RES
+
+  // An escalated slip in on_use is raised to the printer once sampled.
+  val escalationRaised: bool =
+    (mode == USE and fw.judged and escalated(fw)) implies fw.jam
+
   // A jam latches only on a held strand: in particular not at the resume,
   // where the buffer is pulled by the printer.
   val jamSound: bool = fw.jam implies fw.jamWasStuck
@@ -1056,7 +1094,7 @@ module outlet_guard {
 
   val safety: bool = all {
     freeBounded, spillBounded, noFalseTrip, latchBrakes, jamSound, jamReleasedByCommand,
-    grindBounded, slipNotOpen,
+    grindBounded, slipNotOpen, recoverOnFree, resumesBounded, escalationRaised,
   }
 
   // ---------------------------------------------------------------- witnesses
@@ -1074,6 +1112,10 @@ module outlet_guard {
   val witnessNoBlindSpill: bool = spill <= SPILL_CAP
   // The slip verdict is reached.
   val witnessNoSlip: bool = not(fw.slipped)
+  // A slip clears by itself once the hold lets go.
+  val witnessNoRecover: bool = lastAction != "recover"
+  // A slip that will not clear is raised.
+  val witnessNoEscalation: bool = not(escalated(fw) and fw.jam)
 
   // ---------------------------------------------------------------- scenarios
 
@@ -1127,6 +1169,31 @@ module outlet_guard {
       .then(retract).then(retract).then(retract).then(retract).then(retract)
       .then(retract).then(retract).then(retract).then(retract).then(retract)
       .expect(lastAction == "unwound" and not(fw.tripped) and fw.excess == 0 and safety)
+
+  // The gear slips on a held strand at the extruder: a slip. The hold lets
+  // go, the extruder pulls, and the coasting gear turns with the strand: the
+  // slip clears by itself, with no jam raised.
+  run slipRecoverTest =
+    init.then(cmdSend).then(drive).then(drive).then(drive).then(drive)
+      .then(cmdUse).then(stickSlip)
+      .then(drive).then(drive).then(drive).then(drive).then(drive)
+      .expect(fw.slipped and not(fw.jam) and not(driveEnabled))
+      .then(unstick)
+      .then(consume).then(idleSample).then(consume).then(idleSample).then(consume)
+      .expect(pulled > 0 and fw.slipped)
+      .then(idleSample).then(idleSample).then(idleSample)
+      .expect(lastAction == "recover" and not(fw.slipped) and fw.resumes == 1 and
+              not(fw.jam) and driveEnabled and safety)
+
+  // The same slip with the hold never letting go: escalated, and raised.
+  run slipEscalateTest =
+    init.then(cmdSend).then(drive).then(drive).then(drive).then(drive)
+      .then(cmdUse).then(stickSlip)
+      .then(drive).then(drive).then(drive).then(drive).then(drive)
+      .then(consume).then(idleSample).then(consume).then(idleSample).then(consume)
+      .then(idleSample).then(idleSample).then(idleSample).then(idleSample)
+      .then(idleSample).then(idleSample)
+      .expect(escalated(fw) and fw.jam and fw.slipped and safety)
 
   // A held spool: the jam latches on the buffer, the guard does not; the
   // printer's send_out clears it.

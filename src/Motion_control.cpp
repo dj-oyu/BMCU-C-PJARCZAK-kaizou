@@ -612,6 +612,23 @@ static inline strand_zone::State& zone_state(uint8_t ch)
 #ifndef BMCU_OUTLET_SLIP_MM
 #define BMCU_OUTLET_SLIP_MM 40.0f
 #endif
+// A slip clears by itself once the strand is seen to move with the motor
+// coasting (docs/FEED_RESISTANCE_DESIGN.md §3.3): this much forward travel,
+// counted after the motor has spun down. Not recovered within the wait, or
+// back more than the allowed number of times per printer command, it is
+// raised to the printer.
+#ifndef BMCU_SLIP_RECOVER_MM
+#define BMCU_SLIP_RECOVER_MM 3.0f
+#endif
+#ifndef BMCU_SLIP_SETTLE_MS
+#define BMCU_SLIP_SETTLE_MS 500u
+#endif
+#ifndef BMCU_SLIP_WAIT_MS
+#define BMCU_SLIP_WAIT_MS 10000u
+#endif
+#ifndef BMCU_SLIP_RESUMES
+#define BMCU_SLIP_RESUMES 2u
+#endif
 static constexpr outlet_guard::Config kOutletConfig = {
     // A send starts with the strand at or past the key switch, so the
     // switch-to-head distance bounds the free stretch.
@@ -623,8 +640,15 @@ static constexpr outlet_guard::Config kOutletConfig = {
     4700,   // pulled
     on_use_jam::kLowPctQ,
     3000u,  // longest jam disarm after a resume
+    distance_m_to_counts(BMCU_SLIP_RECOVER_MM / 1000.0f),
+    BMCU_SLIP_SETTLE_MS,
+    BMCU_SLIP_WAIT_MS,
+    BMCU_SLIP_RESUMES,
 };
 static outlet_guard::State g_outlet[4];
+// A latched slip still waiting to clear by itself: the motor coasts instead of
+// braking, so that the extruder can draw the strand through the gear.
+static uint8_t g_outlet_coast[4];
 
 static inline bool outlet_blocks_push(uint8_t ch)
 {
@@ -2498,10 +2522,18 @@ public:
             {
                 // Key empty; or the outlet guard holds the motor (the 20 s
                 // high-PWM timer would latch LOW on a push that is braked),
-                // or has just resumed on tension, which is a stretched buffer
-                // and not a jam.
+                // or has just resumed, on a buffer still stretched, which is
+                // not a jam.
                 g_on_use_hi_pwm_us[CHx] = 0u;
                 on_use_jam::reset(g_on_use_low_since_ms[CHx]);
+                // Held, the controller must not wind up against a buffer the
+                // push is not allowed to restore: a resume starts from zero,
+                // not from the PWM that was grinding.
+                if (outlet_blocks_push(CHx))
+                {
+                    PID_pressure.clear();
+                    PID_speed.clear();
+                }
             }
             else
             {
@@ -2589,10 +2621,12 @@ static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t
                          motor.to_logical_pwm(g_motor_pwm[ch]) < 0;
     outlet_guard::sample(g_outlet[ch], kOutletConfig, mode, measured, fwd_delta, dt_us,
                          MC_PULL_pct_q[ch], pushing, MC_ONLINE_key_stu[ch] != 0u, now_ms);
-    // A slip does not recover by itself (an open outlet does, on tension):
-    // latch the on_use jam, so the motor stays braked and the printer gets
-    // 0xF06F and stops the channel for a human.
-    if (outlet_guard::slipping(g_outlet[ch]) &&
+    // A slip waits, coasting, to clear by itself (outlet_guard_policy.h). One
+    // that will not is the printer's: latch the on_use jam, so the motor
+    // brakes and the printer gets 0xF06F and stops the channel for a human.
+    const bool escalated = outlet_guard::slip_escalated(g_outlet[ch], kOutletConfig, now_ms);
+    g_outlet_coast[ch] = (outlet_guard::slipping(g_outlet[ch]) && !escalated) ? 1u : 0u;
+    if (escalated &&
         motor.motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
     {
         g_on_use_low_latch[ch] = 1u;
@@ -2606,8 +2640,9 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
     if (CHx >= kChCount) return;
     if (PWM > PWM_lim) PWM = PWM_lim;
     if (PWM < -PWM_lim) PWM = -PWM_lim;
-    // Open outlet: no push on this channel, whoever asks for it (run(), DM
-    // autoload, the idle feed). Retracts pass. Logical push is negative.
+    // Open outlet or slip: no push on this channel, whoever asks for it
+    // (run(), DM autoload, the idle feed). Retracts pass. Logical push is
+    // negative.
     if (PWM != 0 && outlet_blocks_push(CHx) &&
         MOTOR_CONTROL[CHx].to_logical_pwm(PWM) < 0)
         PWM = 0;
@@ -2617,6 +2652,7 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
 
     if (PWM > 0)       set1 = (uint16_t)PWM;
     else if (PWM < 0)  set2 = (uint16_t)(-PWM);
+    else if (BMCU_OUTLET_GUARD && g_outlet_coast[CHx]) { /* coast: both low */ }
     else { set1 = 1000; set2 = 1000; }
 
     switch (CHx)

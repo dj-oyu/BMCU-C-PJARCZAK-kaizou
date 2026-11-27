@@ -18,7 +18,10 @@ The AS5600 model follows the ams-OSRAM AS5600 datasheet (7-bit address
 0x36, STATUS 0x0B with MD/ML/MH, RAW ANGLE 0x0C-0x0D, ANGLE 0x0E-0x0F,
 AGC 0x1A, MAGNITUDE 0x1B-0x1C, auto-incrementing register pointer).  The
 H-bridge follows the usual two-input PWM driver truth table: IN1 drives
-forward, IN2 reverse, both high brakes.
+forward, IN2 reverse, both high brakes, both low coasts.  A coasting motor
+can be back-driven: an extruder pulling a free strand draws it through the
+gear and turns it once the buffer is stretched by coast_backdrive_mm (an
+assumption: the real gearmotor's back-drive torque is not measured).
 """
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ class Params:
     pull_center_v: float = 1.65
     pull_swing_v: float = 1.10             # buffer fully compressed / stretched
     buffer_travel_mm: float = 12.0         # spring travel of the buffer slider
+    coast_backdrive_mm: float = 2.0        # buffer stretch at which a coasting gear is back-driven
     pull_polarity: int = 1                 # +1: compression raises the voltage
     # Key levels: none and both are fitted to Pico DM_KEY snapshot records
     # (2026-11-25/26, AMS-A: 8-13 mV with no filament, 1845-1868 mV loaded).
@@ -312,6 +316,19 @@ class World:
         d = a - b
         return d if self.p.forward_is_positive_drive else -d
 
+    def coasting(self, ch: int) -> bool:
+        name, ca, cb = MOTOR_PWM[ch]
+        tim = self.m.tim[name]
+        return tim.duty(ca) < 0.05 and tim.duty(cb) < 0.05
+
+    def _drawn_through(self, c: "Channel") -> bool:
+        """The extruder can pull this strand through a coasting gear."""
+        p = self.p
+        return (c.tip_mm is not None and c.tip_mm >= p.head_mm and
+                (c.tail_mm is None or c.tail_mm <= p.gear_mm) and
+                not c.slip and not c.anchored and not c.outlet_open and
+                self.extruder_mm_s > 0.0 and c.buffer_mm <= -p.coast_backdrive_mm)
+
     def _tick(self):
         now = self.m.cycles
         dt = (now - self._last) / HCLK_HZ
@@ -323,6 +340,8 @@ class World:
             c.speed_mm_s += (target - c.speed_mm_s) * min(1.0, dt / p.motor_tau_s)
             if c.overrides.get("motor_stalled"):
                 c.speed_mm_s = 0.0
+            if self.coasting(c.index) and self._drawn_through(c):
+                c.speed_mm_s = max(c.speed_mm_s, self.extruder_mm_s)
             if c.tip_mm is not None and c.tip_mm < p.gear_mm and now / HCLK_HZ < c.push_until_s:
                 # The hand pushes the front up to the gear; once it bites the motor takes over.
                 c.tip_mm = min(p.gear_mm, c.tip_mm + p.user_push_mm_s * dt)

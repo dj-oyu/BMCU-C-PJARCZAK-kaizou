@@ -65,11 +65,24 @@
 // it at once, and each resume disarmed the jam detector: the gear could
 // grind on indefinitely.
 //
-// A slip does not recover by itself. It brakes the push like an open outlet,
-// but is not resumed by tension (tension is what it looks like), and
-// Motion_control.cpp raises the on_use jam for it, so the printer stops the
-// channel and a human can deal with the strand. It ends when the printer
-// commands another motion, or the key reads empty.
+// A slip stops the push like an open outlet, but is not resumed by tension
+// (tension is what it looks like). What breaks the loop it would otherwise
+// be in -- the pressure controller pushing harder on a buffer the push
+// cannot restore -- is that nothing pushes while it is latched.
+//
+// It may still clear by itself: a tangle the extruder's pull works loose.
+// The one reading that proves the strand moves is travel with the motor
+// unpowered. Motion_control.cpp coasts the motor while a slip is latched
+// (both bridge inputs low, not the brake), so the extruder can draw the
+// strand through and the gear turns only because the strand does. Past
+// settle_ms (the motor spinning down) forward travel without a push counts
+// toward recover_counts; once it passes, the slip clears and the push
+// resumes from a cleared controller, with the jam window disarmed as after
+// an open-outlet resume (the buffer is still pulled). A slip that comes back
+// is allowed max_resumes such recoveries per printer command; after that, or
+// once slip_wait_ms pass with no recovery, it is escalated: Motion_control
+// brakes and raises the on_use jam (0xF06F) for a human. It ends when the
+// printer commands another motion, or the key reads empty.
 //
 // Header-only so it is host-testable; Motion_control.cpp is not.
 
@@ -100,6 +113,10 @@ struct Config
     int32_t  tension_q;           // buffer below, not pushing: pulled
     int32_t  jam_low_q;           // the jam detector's threshold
     uint32_t disarm_ms;           // longest jam disarm after a resume
+    int32_t  recover_counts;      // unpowered forward travel that clears a slip
+    uint32_t settle_ms;           // after a slip trip, travel that is the motor spinning down
+    uint32_t slip_wait_ms;        // a slip not recovered by then is escalated
+    uint8_t  max_resumes;         // recoveries allowed per printer command
 };
 
 struct State
@@ -109,7 +126,10 @@ struct State
     uint8_t  tripped;             // Trip
     uint8_t  mode;
     uint8_t  from_send;           // the count started in send_out (kept through retracts)
+    uint8_t  resumes;             // slip recoveries since the last command
     uint32_t disarm_t0_ms;        // 0: jam detector armed
+    uint32_t slip_t0_ms;          // when the slip latched
+    int64_t  recover_q8;          // counts * 256, unpowered forward travel while slipped
 };
 
 inline void reset(State& s)
@@ -119,7 +139,10 @@ inline void reset(State& s)
     s.tripped = TRIP_NONE;
     s.mode = MODE_USE;
     s.from_send = 0u;
+    s.resumes = 0u;
     s.disarm_t0_ms = 0u;
+    s.slip_t0_ms = 0u;
+    s.recover_q8 = 0;
 }
 
 inline int32_t budget_counts(const Config& c, uint8_t mode)
@@ -135,6 +158,13 @@ inline bool blocks_push(const State& s)
 inline bool slipping(const State& s)
 {
     return s.tripped == TRIP_SLIP;
+}
+
+// A slip that will not clear by itself: the printer and a human have it.
+inline bool slip_escalated(const State& s, const Config& c, uint32_t now_ms)
+{
+    return s.tripped == TRIP_SLIP &&
+           (s.resumes >= c.max_resumes || (now_ms - s.slip_t0_ms) >= c.slip_wait_ms);
 }
 
 // One AS5600 sample. fwd_counts is forward travel since the last sample,
@@ -170,6 +200,8 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
         // A slip is the printer's to handle; its next command ends it.
         if (s.tripped == TRIP_SLIP) s.tripped = TRIP_NONE;
         s.slip_q8 = 0;
+        s.recover_q8 = 0;
+        s.resumes = 0u;
         s.mode = mode;
     }
 
@@ -200,6 +232,26 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
     const int64_t drain = (mode != MODE_SEND)
         ? (static_cast<int64_t>(c.consume_cps) * 256 * dt_us) / 1000000 : 0;
 
+    if (s.tripped == TRIP_SLIP)
+    {
+        // Travel with the motor unpowered is the strand's own.
+        if (!pushing && fwd_counts > 0 && (now_ms - s.slip_t0_ms) >= c.settle_ms &&
+            !slip_escalated(s, c, now_ms))
+        {
+            s.recover_q8 += static_cast<int64_t>(fwd_counts) * 256;
+            if (s.recover_q8 > static_cast<int64_t>(c.recover_counts) * 256)
+            {
+                s.tripped = TRIP_NONE;
+                s.resumes++;
+                s.slip_q8 = 0;
+                s.recover_q8 = 0;
+                s.excess_q8 = 0;
+                s.disarm_t0_ms = now_ms ? now_ms : 1u;
+            }
+        }
+        return was != s.tripped;
+    }
+
     if (deflected)
     {
         if (fwd_counts > 0) s.slip_q8 += static_cast<int64_t>(fwd_counts) * 256;
@@ -207,7 +259,11 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
         if (s.slip_q8 < 0) s.slip_q8 = 0;
         if (s.tripped == TRIP_NONE &&
             s.slip_q8 > static_cast<int64_t>(c.slip_budget_counts) * 256)
+        {
             s.tripped = TRIP_SLIP;
+            s.slip_t0_ms = now_ms;
+            s.recover_q8 = 0;
+        }
         return was != s.tripped;
     }
 

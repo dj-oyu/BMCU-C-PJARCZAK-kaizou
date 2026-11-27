@@ -145,6 +145,9 @@ class FilamentPath(unittest.TestCase):
         self.w = World(self.m)
         self.duty = [0.0] * 4
         self.w.drive = lambda ch: self.duty[ch]
+        # The timers are not driven here: a stopped motor is braked, as the
+        # firmware stops it, not coasting.
+        self.w.coasting = lambda ch: False
 
     def run_s(self, s):
         # Only world time matters here: fire the scheduled events without

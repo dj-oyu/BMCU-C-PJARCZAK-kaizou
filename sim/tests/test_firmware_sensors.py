@@ -263,12 +263,25 @@ class OpenOutlet(unittest.TestCase):
 # slip verdict ~617 mm and never stops (its resume on tension disarmed the jam
 # detector), and the slip verdict ~108 mm (an open-outlet stretch, the
 # resume on the held strand's tension, then the slip).
-GEAR_SLIP = {"seconds": 20, "params": {"buffer_travel_mm": 30.0}, "events": [
+GEAR_SLIP = {"seconds": 26, "params": {"buffer_travel_mm": 30.0}, "events": [
     {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
     {"t": 0.3, "do": "extruder", "mm_s": 1.0},
     {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 7f", "every": 0.25, "until": 1.5},   # before_on_use
-    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 20.0},  # on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 26.0},  # on_use
     {"t": 8.0, "do": "set", "ch": 3, "slip": True},
+]}
+
+# The same slip, but the hold lets go at t = 14 (a tangle the extruder works
+# loose). With the motor coasting the extruder draws the strand through and
+# turns the gear: that is the strand moving, and the push resumes by itself,
+# without a jam and without the printer.
+GEAR_SLIP_FREED = {"seconds": 26, "params": {"buffer_travel_mm": 30.0}, "events": [
+    {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
+    {"t": 0.3, "do": "extruder", "mm_s": 1.0},
+    {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 7f", "every": 0.25, "until": 1.5},   # before_on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 26.0},  # on_use
+    {"t": 8.0, "do": "set", "ch": 3, "slip": True},
+    {"t": 14.0, "do": "set", "ch": 3, "slip": False},
 ]}
 
 
@@ -301,6 +314,42 @@ class GearSlip(unittest.TestCase):
     def test_the_printer_is_told(self):
         flags = [d["channel_flags"][3] for t, d in self.status if t > 8.0]
         self.assertTrue(any(f["jam_latch"] for f in flags), "no jam was raised for the slip")
+
+    def test_it_waits_before_telling(self):
+        # The slip waits, coasting, for the strand to move; only then the jam.
+        first = next(t for t, d in self.status if t > 8.0 and d["channel_flags"][3]["jam_latch"])
+        self.assertGreater(first, 15.0, "the jam came before the recovery wait")
+
+
+@unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
+class GearSlipFreed(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from sim.run import run
+        with open(IMAGE, "rb") as f:
+            image = f.read()
+        nvm = bytes(run(image, 0, scenario=CALIBRATE)[0].flash.raw)
+        cls.m, cls.pico = run(image, 0, scenario=GEAR_SLIP_FREED, nvm=nvm)[:2]
+        cls.status = [(msg["sim_ms"] / 1000, msg["data"]) for msg in cls.pico.messages
+                      if msg.get("type") == "status"]
+        cls.world = [(t / HCLK_HZ, s[3]) for t, s in cls.m.world.snapshots]
+
+    def test_the_grinding_is_bounded(self):
+        self.assertIsNone(self.m.fault)
+        ground = max(c["slipped_mm"] for t, c in self.world)
+        self.assertGreater(ground, 1.0, "the scenario never slipped")
+        self.assertLess(ground, 130.0, "the gear kept grinding")
+
+    def test_it_resumes_by_itself(self):
+        drive = [c["drive"] for t, c in self.world if 15.0 < t < 26.0]
+        self.assertTrue(any(d > 0.1 for d in drive), "feeding never resumed")
+        bufs = [c["buffer_mm"] for t, c in self.world if 23.0 < t < 26.0]
+        self.assertGreater(min(bufs), -6.0, "the resumed print is starved")
+
+    def test_the_printer_is_not_told(self):
+        flags = [d["channel_flags"][3] for t, d in self.status if t > 1.5]
+        self.assertFalse(any(f["jam_latch"] or f["low_latch"] for f in flags),
+                         "a slip that cleared by itself latched LOW/JAM")
 
 
 if __name__ == "__main__":

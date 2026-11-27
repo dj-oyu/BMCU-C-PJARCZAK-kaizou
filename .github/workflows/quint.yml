@@ -96,7 +96,7 @@ jobs:
         run: |
           check() {
             if quint run "spec/$1.qnt" --invariant="$2" ${3:+--main=$3} \
-                 --max-samples=5000 --max-steps=80 > witness.log 2>&1; then
+                 --max-samples=${4:-5000} --max-steps=80 > witness.log 2>&1; then
               echo "::error::$1${3:+/$3} $2 was not violated - the model no longer reaches it"
               tail -20 witness.log
               exit 1
@@ -115,6 +115,9 @@ jobs:
           check strand_zone witnessSmallSpill outlet_guard
           check strand_zone witnessNoBlindSpill outlet_guard
           check strand_zone witnessNoSlip outlet_guard
+          # A recovery needs a hold, its release and three draws in the wait.
+          check strand_zone witnessNoRecover outlet_guard 50000
+          check strand_zone witnessNoEscalation outlet_guard
 
       - name: Bounded symbolic check (Apalache)
         run: |
