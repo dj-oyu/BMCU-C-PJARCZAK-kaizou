@@ -7,7 +7,9 @@ evidence:
 
 - other motions push a parked strand past the merger without entering send:
   hold_load under before_on_use, the DM Stage-2 re-push, the idle feed;
-- a jam-latched unload pulls 100 mm and still reaches redetect, which clears;
+- a jam-latched unload pulls 100 mm and still reaches redetect, which clears
+  (since `346783f` before_pull_back clears the latch, so only a 0xFF pull
+  without it is still short; `FEED_RESISTANCE_DESIGN.md` §1.2);
 - after a full-length pull the key never went empty, so "found the key" is not
   evidence of anything;
 - nothing clears the bit for a strand a human pulled out, or a tail piece the
@@ -116,7 +118,12 @@ When it fires, every other channel's estimate is pulled back to the junction:
 `front = min(front, down_set)`, not exact, remnant cleared. Not to `park`: a
 strand may sit anywhere in its own branch up to the junction, and pulling the
 estimate behind the real front would under-report it later. A known tail piece
-stays known: it is out of the tube but may still be in its own branch.
+stays known: it is out of the tube but may still be in its own branch. So
+does a remnant restored from the zone record without a front: it may have been
+in the tube or in its branch, and the proof only rules out the tube. It becomes
+a known tail piece at the junction, and the next strand inserted behind it
+reads it as pushed in. Quint found this gap: before, the proof dropped the
+remnant, and that strand read as parked with the piece ahead of it in the tube.
 
 ## Collision report
 
@@ -193,3 +200,16 @@ whose AMS motion is idle, must bear in mind that `DOWNSTREAM` often means
 at the head or just past the merger. Such a consumer must bound its pull by the
 switch and by measured travel, never by the zone alone, and would want an
 "assumed vs measured" bit on the wire.
+
+## Open outlet
+
+The zone assumes the tube is attached: travel past the merger is travel into
+the tube. A tube off the hub breaks that silently; the strand's travel then
+goes out of the open end and the front estimate runs ahead of a strand that
+is not in the tube (an over-report, so the zone stays sound). Detecting that
+state, stopping the push and resuming on back-pressure is the open-outlet
+guard of `FEED_RESISTANCE_DESIGN.md` §2 (`src/outlet_guard_policy.h`,
+`4b552c9`), specified in the `outlet_guard` module of `spec/strand_zone.qnt`.
+It uses the same geometry: the send path, the switch-to-head distance
+(`BMCU_KEY_TO_HEAD_MM`, `head` here), is the one stretch where free travel
+is normal.

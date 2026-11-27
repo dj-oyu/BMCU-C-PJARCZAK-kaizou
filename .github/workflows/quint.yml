@@ -1,7 +1,7 @@
 name: Quint model check
 
 # Exhaustive bounded check of spec/bmcu_merger.qnt and spec/strand_zone.qnt
-# with Apalache. The random simulation and the trace replay against the
+# with Apalache, split over parallel jobs. The random simulation and the trace replay against the
 # firmware policies run in host-tests.yml on every PR; this adds the symbolic
 # check, which needs Java and takes minutes, so it runs only when a spec or a
 # policy it mirrors moves.
@@ -15,6 +15,7 @@ on:
       - "spec/**"
       - "src/ams_merger_policy.h"
       - "src/strand_zone_policy.h"
+      - "src/outlet_guard_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
       - "ci/zone_replay_adapter.cpp"
@@ -24,6 +25,7 @@ on:
       - "spec/**"
       - "src/ams_merger_policy.h"
       - "src/strand_zone_policy.h"
+      - "src/outlet_guard_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
       - "ci/zone_replay_adapter.cpp"
@@ -44,7 +46,84 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install Quint
+        run: npm install --global @informalsystems/quint@0.34.0
+
+      - name: Typecheck
+        run: |
+          quint typecheck spec/bmcu_merger.qnt
+          quint typecheck spec/strand_zone.qnt
+
+      - name: Simulate safety (rust backend, many samples)
+        run: |
+          for s in bmcu_merger strand_zone; do
+            quint run spec/$s.qnt --invariant=safety --max-samples=20000 --max-steps=50
+          done
+          # Weighted towards loads that reach the head (the passage proof).
+          quint run spec/strand_zone.qnt --step=stepFeed --invariant=safety \
+            --max-samples=20000 --max-steps=80
+          quint test spec/strand_zone.qnt
+          # outlet_guard is a second module in the same file.
+          quint test spec/strand_zone.qnt --main=outlet_guard
+          quint run spec/strand_zone.qnt --main=outlet_guard --invariant=safety \
+            --max-samples=20000 --max-steps=80
+
+      # Expected to be violated: each witness is a behaviour the firmware does
+      # not prevent (or an over-report the estimate is allowed). A witness that
+      # stops being reachable means the model lost it, which is a model bug.
+      - name: Known behaviours stay reachable
+        run: |
+          check() {
+            if quint run "spec/$1.qnt" --invariant="$2" ${3:+--main=$3} \
+                 --max-samples=${4:-5000} --max-steps=80 > witness.log 2>&1; then
+              echo "::error::$1${3:+/$3} $2 was not violated - the model no longer reaches it"
+              tail -20 witness.log
+              exit 1
+            fi
+          }
+          check bmcu_merger witnessNoCollision
+          check bmcu_merger witnessNoParkedOrphan
+          check strand_zone witnessNeverSpurious
+          check strand_zone witnessNoProofClear
+          check strand_zone witnessNoDoubleDown
+          check strand_zone witnessNoTrip outlet_guard
+          check strand_zone witnessNoResume outlet_guard
+          check strand_zone witnessNoUnwind outlet_guard
+          check strand_zone witnessNoPulledResume outlet_guard
+          check strand_zone witnessNoJam outlet_guard
+          check strand_zone witnessSmallSpill outlet_guard
+          check strand_zone witnessNoBlindSpill outlet_guard
+          check strand_zone witnessNoSlip outlet_guard
+          # A recovery needs a hold, its release and three draws in the wait;
+          # an escalation, a hold that outlasts it.
+          check strand_zone witnessNoRecover outlet_guard 50000
+          check strand_zone witnessNoEscalation outlet_guard 50000
+
+  # Bounded symbolic check, one job per invariant group. An invariant holds on
+  # its own, so checking safety's conjuncts apart is the same check; each job
+  # unrolls the steps again (about 3 min for bmcu_merger). On fc0edd2 the one
+  # sequential run took 38 min: singleUser 15, ownerIsUsing 11, the rest 7,
+  # strand_zone 2, unrolling 3.
+  apalache:
+    name: apalache (${{ matrix.spec }} ${{ matrix.invariant }})
+    runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { spec: bmcu_merger, invariant: singleUser }
+          - { spec: bmcu_merger, invariant: ownerIsUsing }
+          - { spec: bmcu_merger, invariant: safetyRest }
+          - { spec: strand_zone, invariant: safety }
     env:
       MAX_STEPS: ${{ inputs.max_steps || '6' }}
     steps:
@@ -68,41 +147,7 @@ jobs:
           path: ~/.quint
           key: quint-apalache-0.34.0
 
-      - name: Typecheck
-        run: |
-          quint typecheck spec/bmcu_merger.qnt
-          quint typecheck spec/strand_zone.qnt
-
-      - name: Simulate safety (rust backend, many samples)
-        run: |
-          for s in bmcu_merger strand_zone; do
-            quint run spec/$s.qnt --invariant=safety --max-samples=20000 --max-steps=50
-          done
-          # Weighted towards loads that reach the head (the passage proof).
-          quint run spec/strand_zone.qnt --step=stepFeed --invariant=safety \
-            --max-samples=20000 --max-steps=80
-          quint test spec/strand_zone.qnt
-
-      # Expected to be violated: each witness is a behaviour the firmware does
-      # not prevent (or an over-report the estimate is allowed). A witness that
-      # stops being reachable means the model lost it, which is a model bug.
-      - name: Known behaviours stay reachable
-        run: |
-          check() {
-            if quint run "spec/$1.qnt" --invariant="$2" \
-                 --max-samples=5000 --max-steps=80 > witness.log 2>&1; then
-              echo "::error::$1 $2 was not violated - the model no longer reaches it"
-              tail -20 witness.log
-              exit 1
-            fi
-          }
-          check bmcu_merger witnessNoCollision
-          check bmcu_merger witnessNoParkedOrphan
-          check strand_zone witnessNeverSpurious
-          check strand_zone witnessNoProofClear
-          check strand_zone witnessNoDoubleDown
-
       - name: Bounded symbolic check (Apalache)
-        run: |
-          quint verify spec/bmcu_merger.qnt --invariant=safety --max-steps="$MAX_STEPS"
-          quint verify spec/strand_zone.qnt --invariant=safety --max-steps="$MAX_STEPS"
+        run: >-
+          quint verify "spec/${{ matrix.spec }}.qnt"
+          --invariant="${{ matrix.invariant }}" --max-steps="$MAX_STEPS"

@@ -182,10 +182,13 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
         s.consumed = 0;
         if (driving_fwd)
         {
-            // Unseen forward travel: assume it went past the merger, by one
-            // hysteresis band. Unseen backward travel never clears anything.
-            const int32_t past = c.down_set + (c.down_set - c.down_clear);
-            if (!s.front_known || s.front < past) s.front = past;
+            // Unseen forward travel: assume it went as far as it can, to the
+            // head. Assuming less (down_set plus one band, as before) under-
+            // reports once the AS5600 recovers: the strand can be at the head,
+            // so measured travel back from the assumed front reads it upstream
+            // while it is still past the merger. Unseen backward travel never
+            // clears anything.
+            s.front = c.head;
             s.front_known = 1u;
             s.dir_acc = static_cast<int16_t>(c.dir_band);
             s.last_dir = 1;
@@ -275,8 +278,10 @@ inline bool take_passage(State& s, const Config& c)
 // other strand and no remnant can be in it: pull every other estimate back to
 // the junction (down_set, design assumption E4). A tail piece whose tail
 // passed the switch is out of the tube but may still be in its own branch, so
-// it stays known: the next strand will push it in. Returns the mask of
-// channels whose zone changed.
+// it stays known: the next strand will push it in. A remnant restored from
+// the zone record has no front: it was in the tube or in its branch, and the
+// proof only rules out the tube, so it becomes such a branch piece, up to the
+// junction. Returns the mask of channels whose zone changed.
 inline uint8_t passage_proof(State* all, const Config& c, uint8_t ch)
 {
     uint8_t changed = 0u;
@@ -286,6 +291,13 @@ inline uint8_t passage_proof(State* all, const Config& c, uint8_t ch)
         State& s = all[i];
         const uint8_t before = s.zone;
         const bool in_tube = s.front_known && s.front > c.down_set;
+        if (s.remnant && !s.front_known)
+        {
+            s.tail_known = 1u;
+            s.front_known = 1u;
+            s.exact = 0u;
+            s.front = c.down_set;
+        }
         s.remnant = 0u;
         s.reached_head = 0u;
         s.passage = 0u;

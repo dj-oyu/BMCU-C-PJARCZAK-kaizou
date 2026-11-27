@@ -18,7 +18,10 @@ The AS5600 model follows the ams-OSRAM AS5600 datasheet (7-bit address
 0x36, STATUS 0x0B with MD/ML/MH, RAW ANGLE 0x0C-0x0D, ANGLE 0x0E-0x0F,
 AGC 0x1A, MAGNITUDE 0x1B-0x1C, auto-incrementing register pointer).  The
 H-bridge follows the usual two-input PWM driver truth table: IN1 drives
-forward, IN2 reverse, both high brakes.
+forward, IN2 reverse, both high brakes, both low coasts.  A coasting motor
+can be back-driven: an extruder pulling a free strand draws it through the
+gear and turns it once the buffer is stretched by coast_backdrive_mm (an
+assumption: the real gearmotor's back-drive torque is not measured).
 """
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ class Params:
     pull_center_v: float = 1.65
     pull_swing_v: float = 1.10             # buffer fully compressed / stretched
     buffer_travel_mm: float = 12.0         # spring travel of the buffer slider
+    coast_backdrive_mm: float = 2.0        # buffer stretch at which a coasting gear is back-driven
     pull_polarity: int = 1                 # +1: compression raises the voltage
     # Key levels: none and both are fitted to Pico DM_KEY snapshot records
     # (2026-11-25/26, AMS-A: 8-13 mV with no filament, 1845-1868 mV loaded).
@@ -80,6 +84,22 @@ class Channel:
     angle: float = 1000.0                  # AS5600 angle, counts (0..4096)
     buffer_mm: float = 0.0                 # + compressed, - stretched
     jam_at_mm: float | None = None         # filament cannot pass this point
+    # The spool end is fixed to the core and holds: nothing more pays out, so
+    # the strand cannot move toward the printer (motor or extruder), while a
+    # retract still winds it back.  The 2026-11-27 AMS-A ch3 "runout".
+    anchored: bool = False
+    # The PTFE tube is off the filament hub: past the hub, a push goes out of
+    # the gap instead of compressing the buffer, and the extruder takes up the
+    # spilled slack before it pulls on the strand again.  Once the slack is
+    # gone the tube is drawn back onto the hub (outlet_open clears itself).
+    outlet_open: bool = False
+    spill_mm: float = 0.0
+    spilled: bool = False                  # slack has come out since the detach
+    # The drive gear slips on a held strand (a spool clamped at its core):
+    # a push turns the gear -- the AS5600 is on its shaft and reads it -- but
+    # the strand does not move, and the extruder keeps pulling on it.
+    slip: bool = False
+    slipped_mm: float = 0.0                # gear travel ground into the strand
     as5600_present: bool = True
     magnet_ok: bool = True
     overrides: dict = field(default_factory=dict)   # name -> value (forced reading)
@@ -296,6 +316,19 @@ class World:
         d = a - b
         return d if self.p.forward_is_positive_drive else -d
 
+    def coasting(self, ch: int) -> bool:
+        name, ca, cb = MOTOR_PWM[ch]
+        tim = self.m.tim[name]
+        return tim.duty(ca) < 0.05 and tim.duty(cb) < 0.05
+
+    def _drawn_through(self, c: "Channel") -> bool:
+        """The extruder can pull this strand through a coasting gear."""
+        p = self.p
+        return (c.tip_mm is not None and c.tip_mm >= p.head_mm and
+                (c.tail_mm is None or c.tail_mm <= p.gear_mm) and
+                not c.slip and not c.anchored and not c.outlet_open and
+                self.extruder_mm_s > 0.0 and c.buffer_mm <= -p.coast_backdrive_mm)
+
     def _tick(self):
         now = self.m.cycles
         dt = (now - self._last) / HCLK_HZ
@@ -307,6 +340,8 @@ class World:
             c.speed_mm_s += (target - c.speed_mm_s) * min(1.0, dt / p.motor_tau_s)
             if c.overrides.get("motor_stalled"):
                 c.speed_mm_s = 0.0
+            if self.coasting(c.index) and self._drawn_through(c):
+                c.speed_mm_s = max(c.speed_mm_s, self.extruder_mm_s)
             if c.tip_mm is not None and c.tip_mm < p.gear_mm and now / HCLK_HZ < c.push_until_s:
                 # The hand pushes the front up to the gear; once it bites the motor takes over.
                 c.tip_mm = min(p.gear_mm, c.tip_mm + p.user_push_mm_s * dt)
@@ -325,7 +360,40 @@ class World:
         if c.jam_at_mm is not None and c.tip_mm + dx > c.jam_at_mm and dx > 0:
             dx = max(0.0, c.jam_at_mm - c.tip_mm)     # stalls against the jam
             c.speed_mm_s = 0.0
-        if at_head or c.tip_mm + dx > p.head_mm:
+        if c.slip and dx > 0:
+            c.slipped_mm += dx
+            c.angle = self._turn(c.angle, dx)
+            if at_head:
+                c.buffer_mm = max(-p.buffer_travel_mm, c.buffer_mm - consume)
+            return
+        if c.anchored and dx > 0:
+            dx = 0.0                                  # the spool gives nothing
+            c.speed_mm_s = 0.0
+        if c.outlet_open and (at_head or c.tip_mm + dx > p.head_mm):
+            room = max(0.0, p.head_mm - c.tip_mm)
+            advance = max(0.0, min(dx, room)) if dx > 0 else 0.0
+            c.tip_mm += advance
+            if dx > 0 and dx > advance:
+                c.spill_mm += dx - advance              # out of the gap
+                if c.spill_mm > 5.0:
+                    c.spilled = True                    # a loop, not one tick's push
+            take = min(consume, c.spill_mm)
+            c.spill_mm -= take
+            consume -= take
+            if dx < 0:
+                back = min(-dx, c.spill_mm)             # a retract winds the loop in first
+                c.spill_mm -= back
+                c.tip_mm += dx + back
+            c.buffer_mm *= 0.9                          # nothing pushes back
+            if consume > 0.0:
+                # No slack to take: the extruder pulls on the strand. Once
+                # slack has come out and been taken up, that pull draws the
+                # tube back onto the hub.
+                c.buffer_mm = max(-p.buffer_travel_mm, c.buffer_mm - consume)
+                if c.spilled:
+                    c.outlet_open = False
+                    c.spilled = False
+        elif at_head or c.tip_mm + dx > p.head_mm:
             # The strand is held at the extruder: feeding compresses the
             # buffer, the extruder pulling stretches it.
             room = p.head_mm - c.tip_mm
@@ -391,6 +459,8 @@ class World:
         return [{"ch": c.index, "tip_mm": None if c.tip_mm is None else round(c.tip_mm, 2),
                  "tail_mm": None if c.tail_mm is None else round(c.tail_mm, 2),
                  "speed_mm_s": round(c.speed_mm_s, 2), "buffer_mm": round(c.buffer_mm, 2),
+                 "outlet_open": c.outlet_open, "spill_mm": round(c.spill_mm, 2),
+                 "slipped_mm": round(c.slipped_mm, 2),
                  "angle": int(c.angle), "drive": round(self.drive(c.index), 3),
                  "pull_v": round(self.pull_volts(c.index), 3), "key_v": round(self.key_volts(c.index), 3),
                  "overrides": dict(c.overrides)} for c in self.channels]

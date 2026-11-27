@@ -17,6 +17,7 @@
 #include "motion_fault_policy.h"
 #include "dm_autoload_retry_policy.h"
 #include "unload_hold_policy.h"
+#include "outlet_guard_policy.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -584,6 +585,78 @@ static inline strand_zone::State& zone_state(uint8_t ch)
     __asm__("" : "+r"(p));
     return *p;
 }
+
+// ===== open-outlet guard (outlet_guard_policy.h) =====
+#ifndef BMCU_OUTLET_GUARD
+#define BMCU_OUTLET_GUARD 1
+#endif
+// Consumption ceiling. A1 mini hotends top out near 25-28 mm3/s, about
+// 11 mm/s of 1.75 mm filament; printing measured 1.1 mm/s (AMS-B ch3,
+// 2026-11-27, PWM ~600).
+#ifndef BMCU_OUTLET_CONSUME_MM_S
+#define BMCU_OUTLET_CONSUME_MM_S 12.0f
+#endif
+// Buffer stroke plus margin: what a coupled strand can take faster than the
+// extruder before the buffer presses back.
+#ifndef BMCU_OUTLET_USE_MM
+#define BMCU_OUTLET_USE_MM 40.0f
+#endif
+#ifndef BMCU_OUTLET_SEND_MARGIN_MM
+#define BMCU_OUTLET_SEND_MARGIN_MM 150.0f
+#endif
+// Forward gear travel allowed with the buffer pulled or pressed, net of the
+// consumption ceiling, before it is a slip (docs/FEED_RESISTANCE_DESIGN.md
+// §3): real travel brings a deflected buffer back within its stroke (the sim
+// assumes 12 mm each way; normal pull_back, send_out and on_use stay above
+// 47 % in the 2026-11-27 recordings).
+#ifndef BMCU_OUTLET_SLIP_MM
+#define BMCU_OUTLET_SLIP_MM 40.0f
+#endif
+// A slip clears by itself once the strand is seen to move with the motor
+// coasting (docs/FEED_RESISTANCE_DESIGN.md §3.3): this much forward travel,
+// counted after the motor has spun down. Not recovered within the wait, or
+// back more than the allowed number of times per printer command, it is
+// raised to the printer.
+#ifndef BMCU_SLIP_RECOVER_MM
+#define BMCU_SLIP_RECOVER_MM 3.0f
+#endif
+#ifndef BMCU_SLIP_SETTLE_MS
+#define BMCU_SLIP_SETTLE_MS 500u
+#endif
+#ifndef BMCU_SLIP_WAIT_MS
+#define BMCU_SLIP_WAIT_MS 10000u
+#endif
+#ifndef BMCU_SLIP_RESUMES
+#define BMCU_SLIP_RESUMES 2u
+#endif
+static constexpr outlet_guard::Config kOutletConfig = {
+    // A send starts with the strand at or past the key switch, so the
+    // switch-to-head distance bounds the free stretch.
+    distance_m_to_counts((BMCU_KEY_TO_HEAD_MM + BMCU_OUTLET_SEND_MARGIN_MM) / 1000.0f),
+    distance_m_to_counts(BMCU_OUTLET_USE_MM / 1000.0f),
+    distance_m_to_counts(BMCU_OUTLET_SLIP_MM / 1000.0f),
+    static_cast<uint32_t>(BMCU_OUTLET_CONSUME_MM_S * kAS5600_COUNTS_PER_M / 1000.0f + 0.5f),
+    5500,   // pressed: well clear of the 50-52 % a free or printing strand reads
+    4700,   // pulled
+    on_use_jam::kLowPctQ,
+    3000u,  // longest jam disarm after a resume
+    distance_m_to_counts(BMCU_SLIP_RECOVER_MM / 1000.0f),
+    BMCU_SLIP_SETTLE_MS,
+    BMCU_SLIP_WAIT_MS,
+    BMCU_SLIP_RESUMES,
+};
+static outlet_guard::State g_outlet[4];
+// A latched slip still waiting to clear by itself: the motor coasts instead of
+// braking, so that the extruder can draw the strand through the gear.
+static uint8_t g_outlet_coast[4];
+
+static inline bool outlet_blocks_push(uint8_t ch)
+{
+    return BMCU_OUTLET_GUARD && outlet_guard::blocks_push(g_outlet[ch]);
+}
+
+static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t dt_us,
+                          uint32_t now_ms);
 
 // One AS5600 sample of channel `ch`. `fwd_delta` is forward travel in counts.
 static void zone_sample(uint8_t ch, int32_t fwd_delta, bool measured, bool driving_fwd,
@@ -2441,10 +2514,26 @@ public:
 
         if ((mode & kMotionPressureOnUse) != 0u && !g_on_use_low_latch[CHx])
         {
-            if (MC_ONLINE_key_stu[CHx] == 0u)
+            if (MC_ONLINE_key_stu[CHx] == 0u ||
+                (BMCU_OUTLET_GUARD &&
+                 (outlet_guard::blocks_push(g_outlet[CHx]) ||
+                  outlet_guard::jam_disarmed(g_outlet[CHx], kOutletConfig,
+                                             MC_PULL_pct_q[CHx], now_ms))))
             {
+                // Key empty; or the outlet guard holds the motor (the 20 s
+                // high-PWM timer would latch LOW on a push that is braked),
+                // or has just resumed, on a buffer still stretched, which is
+                // not a jam.
                 g_on_use_hi_pwm_us[CHx] = 0u;
                 on_use_jam::reset(g_on_use_low_since_ms[CHx]);
+                // Held, the controller must not wind up against a buffer the
+                // push is not allowed to restore: a resume starts from zero,
+                // not from the PWM that was grinding.
+                if (outlet_blocks_push(CHx))
+                {
+                    PID_pressure.clear();
+                    PID_speed.clear();
+                }
             }
             else
             {
@@ -2518,6 +2607,32 @@ public:
 };
 
 _MOTOR_CONTROL MOTOR_CONTROL[4] = {_MOTOR_CONTROL(0), _MOTOR_CONTROL(1), _MOTOR_CONTROL(2), _MOTOR_CONTROL(3)};
+
+static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t dt_us,
+                          uint32_t now_ms)
+{
+    if (!BMCU_OUTLET_GUARD) return;
+    const auto& motor = MOTOR_CONTROL[ch];
+    const uint8_t mode =
+        motor.motion == filament_motion_enum::filament_motion_send ? outlet_guard::MODE_SEND :
+        motor.motion == filament_motion_enum::filament_motion_pull ? outlet_guard::MODE_PULL :
+                                                                     outlet_guard::MODE_USE;
+    const bool pushing = motor.motor_polarity_valid && g_motor_pwm[ch] != 0 &&
+                         motor.to_logical_pwm(g_motor_pwm[ch]) < 0;
+    outlet_guard::sample(g_outlet[ch], kOutletConfig, mode, measured, fwd_delta, dt_us,
+                         MC_PULL_pct_q[ch], pushing, MC_ONLINE_key_stu[ch] != 0u, now_ms);
+    // A slip waits, coasting, to clear by itself (outlet_guard_policy.h). One
+    // that will not is the printer's: latch the on_use jam, so the motor
+    // brakes and the printer gets 0xF06F and stops the channel for a human.
+    const bool escalated = outlet_guard::slip_escalated(g_outlet[ch], kOutletConfig, now_ms);
+    g_outlet_coast[ch] = (outlet_guard::slipping(g_outlet[ch]) && !escalated) ? 1u : 0u;
+    if (escalated &&
+        motor.motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
+    {
+        g_on_use_low_latch[ch] = 1u;
+        g_on_use_jam_latch[ch] = 1u;
+    }
+}
 int32_t _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
 void Motion_control_set_PWM(uint8_t CHx, int PWM)
@@ -2525,12 +2640,19 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
     if (CHx >= kChCount) return;
     if (PWM > PWM_lim) PWM = PWM_lim;
     if (PWM < -PWM_lim) PWM = -PWM_lim;
+    // Open outlet or slip: no push on this channel, whoever asks for it
+    // (run(), DM autoload, the idle feed). Retracts pass. Logical push is
+    // negative.
+    if (PWM != 0 && outlet_blocks_push(CHx) &&
+        MOTOR_CONTROL[CHx].to_logical_pwm(PWM) < 0)
+        PWM = 0;
     g_motor_pwm[CHx] = static_cast<int16_t>(PWM);
 
     uint16_t set1 = 0, set2 = 0;
 
     if (PWM > 0)       set1 = (uint16_t)PWM;
     else if (PWM < 0)  set2 = (uint16_t)(-PWM);
+    else if (BMCU_OUTLET_GUARD && g_outlet_coast[CHx]) { /* coast: both low */ }
     else { set1 = 1000; set2 = 1000; }
 
     switch (CHx)
@@ -2635,6 +2757,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
                         g_motor_pwm[i] != 0 &&
                             MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pull,
                         zone_now_ms);
+            outlet_sample(i, false, 0, dt_us, zone_now_ms);
             continue;
         }
 
@@ -2660,6 +2783,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
         // Raw counts grow on a retract (send negates them for its progress),
         // so forward travel is -diff.
         zone_sample(i, -diff, true, false, zone_now_ms);
+        outlet_sample(i, true, -diff, dt_us, zone_now_ms);
 
         auto &motor = MOTOR_CONTROL[i];
         motor.directed_progress_counts +=
@@ -2819,9 +2943,36 @@ static uint8_t motor_motion_filamnet_pull_back_to_online_key(uint32_t time_now)
         {
         case filament_pulling_back:
         {
+            auto &motor = MOTOR_CONTROL[i];
+
+            // The printer moved on to feeding this channel again. Holding the
+            // channel here skips the dispatch, so the retract used to run to
+            // its full target while the printer's send_out went unanswered --
+            // the reload then waited on a motor that was still pulling. A
+            // forward command ends the pull back; the dispatch takes it from
+            // here this same pass. Idle and session frames do not: after a
+            // pull_back command the printer expects the retract to finish.
+            {
+                const _filament_motion cmd = A.filament[i].motion;
+                if (A.now_filament_num == i &&
+                    (cmd == _filament_motion::send_out ||
+                     cmd == _filament_motion::before_on_use ||
+                     cmd == _filament_motion::on_use))
+                {
+                    pull_back_empty_t0_ms[i] = 0u;
+                    g_pull_remain_counts[i] = 0;
+                    g_pull_speed_set_q[i] = -PULL_V_FAST_Q;
+                    g_pull_pwm_floor[i] = PULL_PWM_MIN;
+                    motor.set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+                    filament_pull_back_target_counts[i] =
+                        distance_m_to_counts(motion_control_pull_back_distance);
+                    filament_now_position[i] = filament_idle;
+                    break;
+                }
+            }
+
             MC_STU_RGB_set_latch(i, 0xFFu, 0x00u, 0xFFu, time_now, 1u);
 
-            auto &motor = MOTOR_CONTROL[i];
             const int32_t target_counts = filament_pull_back_target_counts[i];
             const int32_t progress_counts = motor.directed_progress_counts;
             constexpr int32_t PULL_PROGRESS_QUANTUM_COUNTS = distance_m_to_counts(0.0005f);
@@ -3049,20 +3200,18 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
 
             case _filament_motion::send_out:
             {
-                if (g_on_use_jam_latch[num])
+                // A send_out is the printer deciding to feed this channel
+                // again, which is all the confirmation a jam needs. This used
+                // to wait for the buffer above 85 % with the motor braked: a
+                // hand push cannot get past a braked gear, so only pinching the
+                // buffer itself during the send_out window opened it (AMS-A
+                // ch3, 2026-11-27), while a normal print sits near 55 %. A jam
+                // still there latches again in the next on_use.
+                if (g_on_use_jam_latch[num] || g_on_use_low_latch[num])
                 {
-                    if (MC_PULL_pct_q[num] > 8500)
-                    {
-                        g_on_use_low_latch[num] = 0u;
-                        g_on_use_jam_latch[num] = 0u;
-                        g_on_use_hi_pwm_us[num] = 0u;
-                    }
-                    else
-                    {
-                        MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                        MC_STU_RGB_set_latch(num, 0x00u, 0xD5u, 0x2Au, time_now, 0u);
-                        break;
-                    }
+                    g_on_use_low_latch[num] = 0u;
+                    g_on_use_jam_latch[num] = 0u;
+                    g_on_use_hi_pwm_us[num] = 0u;
                 }
 
                 MC_STU_RGB_set_latch(num, 0x00u, 0xD5u, 0x2Au, time_now, 0u);
@@ -3113,6 +3262,19 @@ static void motor_motion_switch(uint32_t time_now, uint8_t held_mask)
                 if (filament_now_position[num] != filament_before_pull_back)
                 {
                     filament_now_position[num] = filament_before_pull_back;
+                    // The printer has acted on the jam: it stopped the channel
+                    // and is unloading it. The latch has done its job (stop
+                    // feeding into a held strand, raise 0xF06F). Kept past this
+                    // point it vetoed every later send_out and cut this pull
+                    // back to 100 mm, so a strand left in the path made every
+                    // reload fail even after the cause was cleared -- the only
+                    // ways out were pinching the buffer past 85% during a
+                    // send_out or withdrawing the filament. A jam that is still
+                    // there latches again in the next on_use. AMS-A ch3,
+                    // 2026-11-27: spool end held at the core.
+                    g_on_use_low_latch[num] = 0u;
+                    g_on_use_jam_latch[num] = 0u;
+                    g_on_use_hi_pwm_us[num] = 0u;
                     before_pb_last_counts[num]      = g_filament_position_counts[num];
                     before_pb_retracted_counts[num] = 0;
                     before_pb_sign[num]             = 0;
