@@ -108,8 +108,9 @@ jobs:
           check strand_zone witnessNoProofClear
           check strand_zone witnessNoDoubleDown
           check strand_zone witnessNoTrip outlet_guard
+          check strand_zone witnessNoResume outlet_guard
           check strand_zone witnessNoUnwind outlet_guard
-          check strand_zone witnessNoReseatedHold outlet_guard
+          check strand_zone witnessNoPulledResume outlet_guard
           check strand_zone witnessNoJam outlet_guard
           check strand_zone witnessSmallSpill outlet_guard
           check strand_zone witnessNoBlindSpill outlet_guard

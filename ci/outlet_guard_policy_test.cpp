@@ -12,22 +12,20 @@ static const Config kCfg = {
     40,     // use budget
     40,     // slip budget
     12,     // consumption ceiling: 12 counts/s
-    5500, 4700,
+    5500, 4700, 4000, 3000u,
 };
 
 static const uint32_t kDt = 100000u;  // 100 ms samples
 
-// Feed `n` samples of `fwd` counts each. `pushing` only documents the
-// vector: the guard does not look at the motor.
+// Feed `n` samples of `fwd` counts each.
 static bool run(State& s, uint8_t mode, int n, int32_t fwd, int32_t pct, bool pushing,
                 uint32_t& t)
 {
-    (void)pushing;
     bool changed = false;
     for (int i = 0; i < n; i++)
     {
         t += 100u;
-        changed |= sample(s, kCfg, mode, true, fwd, kDt, pct, true);
+        changed |= sample(s, kCfg, mode, true, fwd, kDt, pct, pushing, true, t);
     }
     return changed;
 }
@@ -44,10 +42,10 @@ static int test_printing_never_trips(void)
     return 0;
 }
 
-// Tube off mid-print: fast free travel trips within the budget, and the
-// latch holds whatever the buffer reads: a detached tube does not come back by
-// itself. The printer's unload winds it back.
-static int test_detach_trips_and_holds(void)
+// Tube off mid-print: fast free travel trips within the budget. With the
+// motor stopped the extruder takes up the slack and draws the tube back onto
+// the hub; its pull on the strand is the resume.
+static int test_detach_trips_and_resumes_on_tension(void)
 {
     State s; reset(s); uint32_t t = 1000u;
     int spilled = 0;
@@ -58,16 +56,47 @@ static int test_detach_trips_and_holds(void)
     }
     CHECK(blocks_push(s), 21);
     CHECK(spilled <= 60, 22);                       // 40 + drain over the trip time
-    run(s, MODE_USE, 100, 0, 5000, false, t);       // braked, buffer at rest
+    // Braked, the printer eats the slack: nothing moves, buffer at rest.
+    run(s, MODE_USE, 100, 0, 5000, false, t);
     CHECK(blocks_push(s), 23);                      // the drain does not release it
-    run(s, MODE_USE, 100, 0, 4000, false, t);       // tension does not resume it
-    CHECK(blocks_push(s), 24);
-    run(s, MODE_USE, 10, 0, 6000, false, t);        // nor does a pressed buffer
-    CHECK(blocks_push(s), 25);
-    run(s, MODE_PULL, 4, -5, 5000, false, t);       // a partial unload does not
-    CHECK(blocks_push(s), 26);
-    run(s, MODE_PULL, 20, -5, 4000, false, t);      // the full one does, buffer pulled
-    CHECK(!blocks_push(s), 27);
+    // Tube reseated: the extruder pulls on the strand.
+    run(s, MODE_USE, 1, 0, 4600, false, t);
+    CHECK(!blocks_push(s), 24);
+    // The jam detector is disarmed while the buffer is still low ...
+    CHECK(jam_disarmed(s, kCfg, 3500, t + 10u), 25);
+    // ... until it is back above the jam threshold.
+    CHECK(!jam_disarmed(s, kCfg, 4100, t + 20u), 26);
+    CHECK(!jam_disarmed(s, kCfg, 3500, t + 30u), 27);
+    return 0;
+}
+
+// The disarm is bounded in time: a real jam right after a resume still latches.
+static int test_disarm_times_out(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    run(s, MODE_USE, 20, 5, 5000, true, t);
+    CHECK(blocks_push(s), 31);
+    run(s, MODE_USE, 1, 0, 4600, false, t);
+    CHECK(!blocks_push(s), 32);
+    CHECK(jam_disarmed(s, kCfg, 3000, t + 2999u), 33);
+    CHECK(!jam_disarmed(s, kCfg, 3000, t + 3000u), 34);
+    return 0;
+}
+
+// A resume on a held strand (tension that was not the tube coming back):
+// the push that follows turns the gear with the buffer still pulled, and
+// that is a slip, which tension does not resume.
+static int test_resume_on_a_held_strand_ends_in_slip(void)
+{
+    State s; reset(s); uint32_t t = 1000u;
+    run(s, MODE_USE, 20, 5, 5000, true, t);         // reads as an open outlet
+    CHECK(blocks_push(s) && !slipping(s), 191);
+    run(s, MODE_USE, 1, 0, 4000, false, t);         // the extruder pulls: resume
+    CHECK(!blocks_push(s), 192);
+    run(s, MODE_USE, 30, 5, 4000, true, t);         // gear turns, buffer stays pulled
+    CHECK(slipping(s), 193);
+    run(s, MODE_USE, 100, 0, 4000, false, t);
+    CHECK(slipping(s), 194);
     return 0;
 }
 
@@ -134,7 +163,7 @@ static int test_key_empty_clears(void)
     State s; reset(s); uint32_t t = 1000u;
     run(s, MODE_USE, 20, 5, 5000, true, t);
     CHECK(blocks_push(s), 91);
-    CHECK(sample(s, kCfg, MODE_USE, true, 0, kDt, 5000, false), 92);
+    CHECK(sample(s, kCfg, MODE_USE, true, 0, kDt, 5000, false, false, t + 100u), 92);
     CHECK(!blocks_push(s), 93);
     return 0;
 }
@@ -154,14 +183,14 @@ static int test_unmeasured_never_trips(void)
 {
     State s; reset(s);
     for (int i = 0; i < 1000; i++)
-        sample(s, kCfg, MODE_USE, false, 0, kDt, 5000, true);
+        sample(s, kCfg, MODE_USE, false, 0, kDt, 5000, true, true, 1000u);
     CHECK(!blocks_push(s), 111);
     return 0;
 }
 
 // Gear slip on a held strand (spool clamped): the gear turns, the extruder
 // keeps pulling, the buffer stays stretched. A slip, braked, raised to the
-// printer, held until the printer's next command.
+// printer; never resumed by the tension that is its signature.
 static int test_slip_trips_and_holds(void)
 {
     State s; reset(s); uint32_t t = 1000u;
@@ -214,6 +243,7 @@ static int test_slip_is_not_open(void)
     run(s, MODE_USE, 30, 5, 3000, true, t);
     CHECK(slipping(s), 151);
     CHECK(s.excess_q8 == 0, 152);
+    CHECK(!jam_disarmed(s, kCfg, 3000, t + 1u), 153);
     return 0;
 }
 
@@ -261,7 +291,8 @@ int main(void)
 {
     int r;
     if ((r = test_printing_never_trips())) return r;
-    if ((r = test_detach_trips_and_holds())) return r;
+    if ((r = test_detach_trips_and_resumes_on_tension())) return r;
+    if ((r = test_disarm_times_out())) return r;
     if ((r = test_send_budget())) return r;
     if ((r = test_leaving_send_resets())) return r;
     if ((r = test_repeated_send_keeps_count())) return r;
@@ -277,5 +308,6 @@ int main(void)
     if ((r = test_send_ends_slip())) return r;
     if ((r = test_send_through_pull_resets())) return r;
     if ((r = test_use_pull_cycles_keep_count())) return r;
+    if ((r = test_resume_on_a_held_strand_ends_in_slip())) return r;
     return 0;
 }

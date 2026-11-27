@@ -23,22 +23,28 @@
 //   any other  drained at the consumption ceiling; the budget is the buffer
 //              stroke plus margin, a few tens of mm.
 //
-// Back-pressure resets it while unlatched: the buffer pressed (a coupled
-// strand pushed) or pulled (the extruder pulling a coupled strand). Leaving send_out for on_use, directly or through retracts, resets
+// Back-pressure resets it: the buffer pressed (a coupled strand pushed), or
+// tension while the motor is not pushing (the extruder pulling a coupled
+// strand). Leaving send_out for on_use, directly or through retracts, resets
 // it, latch included: the printer only moves on to before_on_use / on_use
 // once its own sensor has the filament, and a send that ends any other way
 // is the printer's to retry, with a fresh budget. Every other command keeps
 // the count; a retract winds it back.
 //
 // Trip: forward drive stops on that channel (Motion_control_set_PWM brakes
-// any push), retracts are still served; in on_use Motion_control.cpp raises
-// the jam (0xF06F), so the printer stops and unloads. A detached tube does
-// not come back by itself, so nothing resumes on its own: the latch holds,
-// buffer readings included, until a retract winds the count back to zero
-// (the printer's unload), the key reads empty, or a send ends in on_use.
-// An earlier version resumed on tension, assuming consumption would draw the
-// tube back onto the hub; that resume had to disarm the jam detector, and a
-// slipping gear (below) used it to grind on indefinitely.
+// any push), retracts are still served. Nothing is raised to the printer:
+// this one recovers by itself. With the motor stopped, the extruder takes up
+// the spilled slack, the strand draws the tube back onto the hub, and the
+// extruder then pulls on a strand the BMCU is not feeding. That tension is
+// the resume. A retract that winds the count back to zero, or the key
+// reading empty, clears it as well.
+//
+// The resume is exactly what the buffer-based jam detector reads as a jam
+// (stretched buffer), so the jam window stays disarmed after a resume until
+// the buffer has come back above the jam threshold, or for disarm_ms. A
+// held strand also reads as tension; if the resume was one, the push that
+// follows either moves the gear with the buffer still pulled (a slip, below)
+// or does not move it (the jam detector, once the disarm runs out).
 //
 // No encoder, no verdict: the count needs measured travel.
 //
@@ -54,13 +60,16 @@
 // can take that much and keep the buffer where it is); past slip_budget it
 // is a slip, never an open outlet. Quint found the pressed case: a send_out
 // with the strand at the extruder (pressed, below the 85 % hard stop) whose
-// gear then slips was reset by the pressed buffer on every sample. Before this, a slip tripped
-// the open-outlet latch, the stretched buffer resumed it at once, and each
-// resume disarmed the jam detector: the gear could grind on indefinitely.
+// gear then slips was reset by the pressed buffer on every sample. Before
+// this, a slip tripped the open-outlet latch, the stretched buffer resumed
+// it at once, and each resume disarmed the jam detector: the gear could
+// grind on indefinitely.
 //
-// A slip brakes the push like an open outlet. It ends when the printer
-// commands another motion, or the key reads empty. Motion_control.cpp raises the on_use jam
-// for it, so the printer stops the channel and unloads.
+// A slip does not recover by itself. It brakes the push like an open outlet,
+// but is not resumed by tension (tension is what it looks like), and
+// Motion_control.cpp raises the on_use jam for it, so the printer stops the
+// channel and a human can deal with the strand. It ends when the printer
+// commands another motion, or the key reads empty.
 //
 // Header-only so it is host-testable; Motion_control.cpp is not.
 
@@ -88,7 +97,9 @@ struct Config
     int32_t  slip_budget_counts;  // forward travel allowed while pulled or pressed
     uint32_t consume_cps;         // consumption ceiling, counts per second
     int32_t  press_q;             // buffer at or above: pressed (0.01 %)
-    int32_t  tension_q;           // buffer below: pulled
+    int32_t  tension_q;           // buffer below, not pushing: pulled
+    int32_t  jam_low_q;           // the jam detector's threshold
+    uint32_t disarm_ms;           // longest jam disarm after a resume
 };
 
 struct State
@@ -98,6 +109,7 @@ struct State
     uint8_t  tripped;             // Trip
     uint8_t  mode;
     uint8_t  from_send;           // the count started in send_out (kept through retracts)
+    uint32_t disarm_t0_ms;        // 0: jam detector armed
 };
 
 inline void reset(State& s)
@@ -107,6 +119,7 @@ inline void reset(State& s)
     s.tripped = TRIP_NONE;
     s.mode = MODE_USE;
     s.from_send = 0u;
+    s.disarm_t0_ms = 0u;
 }
 
 inline int32_t budget_counts(const Config& c, uint8_t mode)
@@ -128,7 +141,7 @@ inline bool slipping(const State& s)
 // dt_us the time it covers. Returns true when `tripped` changed.
 inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
                    int32_t fwd_counts, uint32_t dt_us, int32_t pct_q,
-                   bool key_present)
+                   bool pushing, bool key_present, uint32_t now_ms)
 {
     const uint8_t was = s.tripped;
 
@@ -160,16 +173,26 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
         s.mode = mode;
     }
 
-    // Back-pressure: a coupled strand, so the travel so far went somewhere.
-    // A latch ignores it; only a retract undoes what went out.
-    const bool deflected = pct_q < c.tension_q || pct_q >= c.press_q;
-    if (deflected && s.tripped == TRIP_NONE) s.excess_q8 = 0;
+    // Back-pressure. A pulled buffer is a coupled strand, so whatever the
+    // excess was it is not an open outlet; it may be a slip. Tension on a
+    // latched open outlet is the tube back on the hub: the resume.
+    const bool pulled = pct_q < c.tension_q;
+    if (pct_q >= c.press_q || pulled)
+    {
+        if (s.tripped == TRIP_OPEN && (!pulled || !pushing))
+        {
+            if (pulled) s.disarm_t0_ms = now_ms ? now_ms : 1u;
+            s.tripped = TRIP_NONE;
+        }
+        s.excess_q8 = 0;
+    }
+    const bool deflected = pulled || pct_q >= c.press_q;
     if (!deflected) s.slip_q8 = 0;
 
     if (!measured)
     {
-        // Nothing to judge. A held latch stays, with what it has to wind back.
-        if (s.tripped == TRIP_NONE) s.excess_q8 = 0;
+        // Nothing to judge. A held latch stays until contact or key empty.
+        s.excess_q8 = 0;
         s.slip_q8 = 0;
         return was != s.tripped;
     }
@@ -179,14 +202,6 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
 
     if (deflected)
     {
-        // A retract still winds a latched count back, whatever the buffer
-        // reads while it does.
-        if (s.tripped == TRIP_OPEN && fwd_counts < 0)
-        {
-            s.excess_q8 += static_cast<int64_t>(fwd_counts) * 256;
-            if (s.excess_q8 <= 0) { s.excess_q8 = 0; s.tripped = TRIP_NONE; }
-            return was != s.tripped;
-        }
         if (fwd_counts > 0) s.slip_q8 += static_cast<int64_t>(fwd_counts) * 256;
         s.slip_q8 -= drain;
         if (s.slip_q8 < 0) s.slip_q8 = 0;
@@ -211,6 +226,20 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
         s.tripped = TRIP_OPEN;
     }
     return was != s.tripped;
+}
+
+// The jam detector asks before evaluating a low buffer. True while a resume
+// has disarmed it; the disarm ends once the buffer is back above the jam
+// threshold or disarm_ms has passed.
+inline bool jam_disarmed(State& s, const Config& c, int32_t pct_q, uint32_t now_ms)
+{
+    if (s.disarm_t0_ms == 0u) return false;
+    if (pct_q >= c.jam_low_q || (now_ms - s.disarm_t0_ms) >= c.disarm_ms)
+    {
+        s.disarm_t0_ms = 0u;
+        return false;
+    }
+    return true;
 }
 
 }

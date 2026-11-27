@@ -85,7 +85,8 @@ Today a jam is "buffer below 40 % for `BMCU_ON_USE_JAM_HOLD_MS`"
 (`on_use_jam_policy.h`), plus a 20 s high-PWM timer that sets LOW without JAM.
 Both read the buffer, which measures the extruder's demand, not the strand's
 resistance. A stretched buffer is also what the printer produces whenever it
-pulls faster than the BMCU feeds.
+pulls faster than the BMCU feeds, which includes every resume after the BMCU
+stopped feeding on purpose (§2.5).
 
 The design judges resistance directly: compare the motor's forward drive
 (logical PWM) with the travel the AS5600 measures, against the relation
@@ -150,11 +151,11 @@ have consumed.
   consumption ceiling × dt (`BMCU_OUTLET_CONSUME_MM_S`, 12 mm/s). It never
   goes below zero.
 - In send_out nothing drains: the strand is not in the extruder yet.
-- **Reset by back-pressure** while unlatched, either of:
+- **Reset by back-pressure**, either of:
   - the buffer pressed, pull ≥ 55 % (a coupled strand pushed);
-  - the buffer pulled, pull < 47 % (the extruder pulling a coupled strand).
-
-  Latched, the buffer is ignored (§2.5).
+  - the buffer pulled, pull < 47 %, while the motor is not pushing (the
+    extruder pulling a strand the BMCU is not feeding; the same condition is
+    the resume, §2.5).
 
   In on_use the drain, not the buffer, is what accounts for a printing
   strand.
@@ -190,34 +191,39 @@ A send starts with the strand at or past the key switch, so the
 switch-to-head distance, not `AMS_RETRACT_LEN`, bounds the free stretch.
 The whole guard is `BMCU_OUTLET_GUARD` (default on); the ceiling is
 `BMCU_OUTLET_CONSUME_MM_S`. Thresholds in `kOutletConfig`: pressed 55 %,
-pulled 47 %.
+pulled 47 %, jam 40 %, jam disarm 3 s.
 
 On the night of 2026-11-27 the loads took 34, 35, 41 and 41 s from send_out
 to the tip arriving.
 
-### 2.5 Trip and hold
+### 2.5 Trip, hold, resume
 
-A detached tube does not come back by itself, so the guard stops and tells
-the printer; nothing resumes on its own. Out of the normal range is a stop.
+A detached tube recovers by itself if the BMCU stops and waits: the
+extruder swallows the spilled filament, and the strand draws the tube back
+onto the hub. The guard's job is to stop, and to see that moment.
 
 - **Trip:** `excess > budget(mode)`. Latch per channel. While latched,
   `Motion_control_set_PWM` turns every logical push (logical PWM < 0) on that
   channel into a brake, whatever path asked for it (the pressure controller,
-  DM autoload, the idle feed). Retracts pass.
-- **Raised:** in on_use `outlet_sample` sets the jam (`g_on_use_low_latch`,
-  `g_on_use_jam_latch`, `0xF06F`), so the printer stops the channel and
-  unloads.
-- **Hold:** latched, nothing pushes, `excess` is not drained, and no buffer
-  reading releases it, tension included.
-- **Release:** a retract that winds the count back to zero (the printer's
-  unload; it counts whatever the buffer reads), the key reading empty, or a
-  send ending in on_use (§2.3).
+  DM autoload, the idle feed). Retracts pass. Nothing is raised to the
+  printer: the print goes on, and no human step is needed.
+- **Hold:** latched, nothing pushes, and `excess` is not drained: only a
+  retract may take back what went out. With the tube off nothing pulls on the
+  BMCU's strand, so the buffer stays at rest and the latch holds.
+- **Resume:** once the slack is gone and the tube is back, the extruder
+  pulls on a strand the BMCU is not feeding: pull < 47 % with the motor not
+  pushing. That clears count and latch.
+- **Unwind:** a retract that brings the count back to zero clears the latch
+  (the send-path case, where nothing is consumed and a human puts the tube
+  back).
+- **Key empty** clears it.
 
-The first version resumed on tension, assuming the extruder would draw the
-tube back onto the hub once it had consumed the spill. That resume read as a
-jam, so it disarmed the jam detector for up to 3 s, and a slipping gear
-(§3) tripped the latch, was resumed at once by its own stretched buffer, and
-ground on with the jam detector disarmed.
+A held strand reads as tension too, so a resume can be wrong. It does not
+repeat: the push that follows either turns the gear with the buffer still
+pulled, which is a slip (§3) that tension does not resume and that raises
+the jam, or does not turn it, which the jam detector latches once its
+disarm runs out (§2.6). This was the hole before the slip verdict: a slip
+tripped this latch, its own stretched buffer resumed it, and it ground on.
 
 ### 2.6 Interaction with jam detection
 
@@ -227,7 +233,10 @@ design.
 
 - **While latched** both are held off (the jam window and the high-PWM timer
   are reset as on key empty): the push is braked, so a low buffer and a long
-  high PWM say nothing about a jam. The guard has raised the jam itself.
+  high PWM say nothing about a jam.
+- **After a resume** the jam window stays disarmed until the buffer is back
+  at or above 40 %, or for 3 s. The resume *is* a pulled buffer, which the
+  detector would otherwise latch as a jam, raising `0xF06F`.
 - **The causes are disjoint:** a jam is drive without travel, so it adds
   nothing to `excess`; an open outlet is travel with nothing taking it.
 
@@ -249,13 +258,12 @@ header yet.
   consumption ceiling, and a send that reaches the extruder before the
   buffer presses, never trip.
 - `grindBounded`, `slipNotOpen`: §3.
-- `latchBrakes`, `faultRaised` (a latch in on_use has raised the jam once
-  sampled), `jamSound` (a jam latches only on a held strand or an
-  open-outlet trip), `jamReleasedByCommand` (send_out / pull release a jam).
-- Witnesses kept reachable: trip, unwind, a latch still held with the tube
-  drawn back on, a real jam, a send-path spill past the on_use budget, an
-  unbounded spill with the encoder bad (no encoder, no verdict), a slip
-  trip.
+- `latchBrakes`, `jamSound` (a jam latches only on a held strand, in
+  particular not at the resume), `jamReleasedByCommand` (send_out / pull
+  release a jam).
+- Witnesses kept reachable: trip, resume, unwind, a pulled buffer at the
+  resume, a real jam, a send-path spill past the on_use budget, an unbounded
+  spill with the encoder bad (no encoder, no verdict), a slip trip.
 - Scenarios: `arrivalBeforePressTest`, `detachMidPrintTest`,
   `sendNotTakenTest` (trip, retry with a fresh budget, unwind),
   `jamIsNotOpenTest`.
@@ -277,10 +285,12 @@ of this module too (since `1d8ddee`).
   repeated retries into an open outlet each let out up to a budget unless a
   retract comes between them.
 - With the AS5600 bad there is no guard at all.
-- In send_out a trip only brakes: there is no error to raise there, so the
-  printer's own load timeout has to notice the filament never arrived.
-- Reseating the tube is a human step. The latch ends with the printer's
-  unload, after which a fresh load has to be started.
+- A tube that comes off and never reseats leaves the channel latched until a
+  retract or a key-empty; nothing is raised, so the printer's own handling
+  (its load timeout, or the print running out of filament) decides.
+- A human fixing the tube by hand while the print runs is not modelled: hands
+  on the strand or the buffer can read as tension and resume the push before
+  the tube is back. That costs another budget (40 mm) before it trips again.
 - The thresholds come from one printing reading and the simulator; they are
   not yet checked on hardware.
 
@@ -298,10 +308,9 @@ reads as travel. "Drive without travel", the obvious slip test, cannot see
 it, and §1.3 (resistance) cannot either: a slipping gear turns freely.
 
 Before this, a slip in on_use looked like an open outlet: travel nothing
-takes. It tripped the §2 latch, which then resumed on tension (§2.5): the
-stretched buffer resumed it at once, and each resume disarmed the jam
-detector. In the simulator the gear ground 617 mm and never stopped
-(`406d143`).
+takes. It tripped the §2 latch, the stretched buffer resumed it at once,
+and each resume disarmed the jam detector (§2.6). In the simulator the gear
+ground 617 mm and never stopped (`406d143`).
 
 ### 3.2 The signature
 
@@ -326,8 +335,12 @@ pulled buffer, never tripped.
 
 ### 3.3 Trip and release
 
-- A slip brakes every push and raises the on_use jam like an open outlet
-  (§2.5), but it is never an open-outlet trip.
+- A slip brakes every push like an open outlet (`blocks_push`), but it is
+  never an open-outlet trip, and tension does not resume it: tension is what
+  a slip looks like.
+- It does not recover by itself, so in on_use `Motion_control.cpp` raises
+  the jam (`g_on_use_low_latch`, `g_on_use_jam_latch`, `0xF06F`): the printer
+  stops the channel, and a human reseats the filament.
 - The printer's next command (pull, send_out) ends it, as it ends the jam
   latch (§1.2); key empty does as well.
 
@@ -335,7 +348,7 @@ pulled buffer, never tripped.
 
 - Host: `ci/outlet_guard_policy_test.cpp` (slip trips and holds, a refill
   is not a slip, feed-limited printing is not a slip, a slip is not an open
-  outlet, send_out ends it).
+  outlet, send_out ends it, a resume on a held strand ends in a slip).
 - Simulator: `GearSlip` in `sim/tests/test_firmware_sensors.py`, extruder at
   1 mm/s, 30 mm stroke, the gear slipping from t = 8 s:
 
@@ -343,7 +356,7 @@ pulled buffer, never tripped.
   |---|---|---|
   | `64b5c7c` (deployed) | 166 mm | 11.2 s |
   | `406d143` | 617 mm | never |
-  | this | 55 mm | 9.4 s |
+  | this | 108 mm | 10.3 s |
 
 - Quint: `grindBounded`: gear travel into a held strand, net of the
   consumption ceiling, is bounded per fault and printer command. At most it

@@ -590,32 +590,32 @@ module strand_zone {
 // is the one stretch where free travel is normal; there nothing drains, and
 // the budget is the switch-to-head distance plus margin.
 //
-// Back-pressure resets an unlatched count: the buffer pressed (>= 55 %) or
-// pulled (< 47 %). A send that ends in on_use, directly or through retracts,
-// resets count and latch: the printer moves on to before_on_use only once
-// its own sensor has the filament. Every other command keeps the count. A
-// trip latches: every push is braked, in on_use the jam is raised (0xF06F),
-// and nothing the buffer reads releases it -- a detached tube does not come
-// back by itself. Only a retract that winds the count back to zero (the
-// printer's unload) does, or key empty, or a send ending in on_use. The
-// count is not drained while latched. No encoder, no verdict: with the
-// AS5600 bad an unlatched count is zero.
+// Back-pressure resets the count: the buffer pressed (>= 55 %), or pulled
+// (< 47 %) while the motor is not pushing. Leaving send_out for anything but
+// a retract resets count and latch: the printer moves on to before_on_use
+// only once its own sensor has the filament, and a send that ends any other
+// way is the printer's to retry, with a fresh budget. A retract keeps the
+// count and winds it back; reaching zero clears the latch. Latched, every
+// push is braked, and the count is not drained (only a retract may undo it).
+// No encoder, no verdict: with the AS5600 bad the count is zero.
 //
 // Jam detection here is the implemented one, on the buffer: pulled for
 // JAM_N samples in on_use latches a jam. It is held off while the guard is
-// latched, which raises the jam itself.
+// latched, and after a resume until the buffer is no longer pulled or for
+// DISARM_N samples: the resume is a pulled buffer, and not a jam.
 //
 // Gear slip: forward gear travel while the buffer is pulled or pressed is
-// counted on its own (`slipCnt`), drained at CONS outside send_out; past
-// SLIP_BUD it latches a slip (`slipped`), which brakes the push, raises the
-// on_use jam and ends at the printer's next command into another mode.
+// counted on its own (`slipCnt`), drained at CONS outside send_out; past SLIP_BUD it latches a slip
+// (`slipped`), which brakes the push, raises the on_use jam, is not resumed
+// by tension and ends at the printer's next command into another mode. A
+// pulled buffer is a coupled strand, so it zeroes the open-outlet count.
 //
 // Abstract units: one sample is one step of time. A push moves the strand up
 // to FEED per sample, the extruder takes at most CONS per sample (`credit`).
 // Positions run from the key switch (0) to the extruder (PATH); HUB is where
 // the tube can come off. The buffer has BUF of stroke (`buf` == BUF is
 // pressed) and stretches up to PULL_MAX (`pulled` > 0 is both "pulled" for
-// back-pressure and "low" for the jam detector: the 47 % and 40 % thresholds
+// the resume and "low" for the jam detector: the 47 % and 40 % thresholds
 // are one here).
 //
 // Assumptions:
@@ -625,9 +625,8 @@ module strand_zone {
 //       strand's, unless the gear slips on a held strand (`slips`), when it
 //       reads FEED per push and the strand does not move.
 //   G3  The printer consumes only a strand its extruder holds. With the
-//       outlet open it first takes up the spill. Once that is gone the tube
-//       might be drawn back onto the hub (`reseat`); not expected on the
-//       hardware, kept so that nothing in the guard depends on it.
+//       outlet open it first takes up the spill; once that is gone the tube
+//       may be drawn back onto the hub (`reseat`, nondeterministic).
 //   G4  A retract releases the extruder's pull and removes spill first.
 //   G5  In on_use the pressure controller pushes whenever the buffer is not
 //       pressed and nothing holds the motor; it never idles on a pulled
@@ -646,6 +645,7 @@ module outlet_guard {
   pure val FEED: int = 2          // push travel per sample
   pure val CONS: int = 1          // BMCU_OUTLET_CONSUME_MM_S per sample
   pure val JAM_N: int = 2         // BMCU_ON_USE_JAM_HOLD_MS in samples
+  pure val DISARM_N: int = 3      // the 3 s jam disarm after a resume, in samples
 
   // The guard's modes are the motor's (outlet_sample): send, pull, and every
   // other motion that can feed forward (on_use, before_on_use, idle feed).
@@ -664,7 +664,7 @@ module outlet_guard {
   // printer command. Three stretches at most: while the buffer still reads
   // pressed (a slip count, short of its trip), while it reads at rest (the
   // open-outlet count, longest in send_out with no drain), and once it is
-  // pulled (a slip count to its trip). A slip count
+  // pulled and the latch resumes (a slip count to its trip). A slip count
   // outpaces its drain by FEED - CONS per sample.
   pure val SLIP_RUN: int = FEED * (SLIP_BUD / (FEED - CONS) + 1)
   pure val GRIND_CAP: int = FEED * (MAX_BUDGET / FEED + 1) + 2 * SLIP_RUN
@@ -682,13 +682,13 @@ module outlet_guard {
   type Fw = {
     excess: int, tripped: bool, judged: bool, fromSend: bool,
     slipCnt: int, slipped: bool,
-    jam: bool, jamEv: int, jamWasFault: bool,
+    jam: bool, jamEv: int, disarm: int, jamWasStuck: bool,
   }
 
   pure val FW0: Fw = {
     excess: 0, tripped: false, judged: true, fromSend: false,
     slipCnt: 0, slipped: false,
-    jam: false, jamEv: 0, jamWasFault: false,
+    jam: false, jamEv: 0, disarm: -1, jamWasStuck: false,
   }
 
   // A command into a different mode ends a slip (outlet_guard::sample on a
@@ -699,21 +699,21 @@ module outlet_guard {
   // outlet_guard::sample, then the on_use jam check of
   // pressure_ctrl_on_use. `pressed` / `pulledNow` are the buffer at the
   // sample, `fwd` the travel since the last one.
-  pure def fwSample(fw: Fw, m: Mode, measured: bool, fwd: int,
+  pure def fwSample(fw: Fw, m: Mode, measured: bool, fwd: int, pushing: bool,
                     pressed: bool, pulledNow: bool, stuck: bool): Fw = {
-    // back-pressure (a coupled strand) resets an unlatched count
+    // back-pressure: pressed, or pulled (a coupled strand)
+    val bp0 =
+      if (pressed or pulledNow)
+        { ...fw, excess: 0,
+          tripped: fw.tripped and pulledNow and pushing,
+          disarm: if (fw.tripped and pulledNow and not(pushing)) 0 else fw.disarm }
+      else fw
     val deflected = pulledNow or pressed
-    val bp0 = if (deflected and not(fw.tripped)) { ...fw, excess: 0 } else fw
     val bp = if (deflected) bp0 else { ...bp0, slipCnt: 0 }
     val drainOf = if (m != SEND) CONS else 0
     // the counts
     val t =
-      if (not(measured)) { ...bp, excess: if (bp.tripped) bp.excess else 0, slipCnt: 0 }
-      else if (deflected and bp.tripped and fwd < 0) {
-        // a retract winds a latched count back, whatever the buffer reads
-        val e = bp.excess + fwd
-        { ...bp, excess: if (e < 0) 0 else e, tripped: e > 0 }
-      }
+      if (not(measured)) { ...bp, excess: 0, slipCnt: 0 }
       else if (deflected) {
         val s1 = bp.slipCnt + (if (fwd > 0) fwd else 0) - drainOf
         val s2 = if (s1 < 0) 0 else s1
@@ -728,15 +728,18 @@ module outlet_guard {
           tripped: if (bp.tripped) not(fwd < 0 and e3 == 0)
                    else not(bp.slipped) and e3 > budget(m) }
       }
-    val held = t.tripped or t.slipped
+    // jam_disarmed: ends once the buffer is not pulled, or after DISARM_N
+    val dActive = t.disarm >= 0 and pulledNow and t.disarm < DISARM_N
+    val held = t.tripped or t.slipped or dActive
     val ev = if (m != USE or held or not(pulledNow) or t.jam) 0 else t.jamEv + 1
-    // a guard latch in on_use raises the jam (outlet_sample)
-    val latches = ev >= JAM_N or (m == USE and held and not(t.jam))
+    // a slip in on_use raises the jam (outlet_sample)
+    val latches = ev >= JAM_N or (m == USE and t.slipped and not(t.jam))
     { ...t,
       judged: true,
+      disarm: if (dActive) t.disarm + 1 else -1,
       jamEv: if (latches) 0 else ev,
       jam: t.jam or latches,
-      jamWasFault: if (latches) (stuck or t.tripped) else t.jamWasFault }
+      jamWasStuck: if (latches) stuck else t.jamWasStuck }
   }
 
   // ---------------------------------------------------------------- state
@@ -794,7 +797,7 @@ module outlet_guard {
   // the guard latch stay: a repeated send_out buys no new budget.
   action cmdSend: bool = all {
     mode' = SEND,
-    fw' = { ...endSlip(fw, mode, SEND), jam: false, jamEv: 0, jamWasFault: false,
+    fw' = { ...endSlip(fw, mode, SEND), jam: false, jamEv: 0, jamWasStuck: false,
             fromSend: true, judged: fw.judged and mode == SEND },
     keepPhys, attemptSpill' = attemptSpill, faultFed' = faultFed, grind' = 0,
     lastAction' = "cmdSend",
@@ -822,7 +825,7 @@ module outlet_guard {
   // is kept, so that winding it back is what clears the guard.
   action cmdPull: bool = all {
     mode' = PULL,
-    fw' = { ...endSlip(fw, mode, PULL), jam: false, jamEv: 0, jamWasFault: false,
+    fw' = { ...endSlip(fw, mode, PULL), jam: false, jamEv: 0, jamWasStuck: false,
             fromSend: fw.fromSend and mode != USE, judged: fw.judged and mode == PULL },
     keepPhys, attemptSpill' = attemptSpill, faultFed' = faultFed, grind' = 0,
     lastAction' = "cmdPull",
@@ -855,7 +858,7 @@ module outlet_guard {
     // what the AS5600 reads: the gear, which turns on a slipping strand
     val slipping = stuck and slips
     val meas = if (slipping) FEED else t
-    val fw2 = fwSample(fw, mode, asGood, meas, b2 == BUF, p2 > 0, stuck)
+    val fw2 = fwSample(fw, mode, asGood, meas, true, b2 == BUF, p2 > 0, stuck)
     val uncoupledFeed = slipping or (t > 0 and (toSpill or (mode != SEND and not(coupled))))
     all {
       front' = f2, spill' = s2, buf' = b2, pulled' = p2,
@@ -875,18 +878,21 @@ module outlet_guard {
   }
 
   // One sample with the motor not pushing: latched, jammed, a pressed buffer
-  // held, or a mode that does not push (G5).
+  // held, or a mode that does not push (G5). The extruder pulling a coupled
+  // strand here is the resume.
   action idleSample: bool = all {
     not(driveEnabled) or buf == BUF,
     not(mode == PULL),                    // PULL samples are retracts
-    val fw2 = fwSample(fw, mode, asGood, 0, buf == BUF, pulled > 0, stuck)
+    val fw2 = fwSample(fw, mode, asGood, 0, false, buf == BUF, pulled > 0, stuck)
     val reset = restarted(fw2)
     all {
       fw' = fw2,
       attemptSpill' = if (reset) 0 else attemptSpill,
       faultFed' = if (reset) false else faultFed,
       grind' = grindNet(grind, mode),
-      lastAction' = if (fw2.jam and not(fw.jam)) "jamLatch" else "idle",
+      lastAction' = if (fw.tripped and not(fw2.tripped)) "resume"
+                    else if (fw2.jam and not(fw.jam)) "jamLatch"
+                    else "idle",
     },
     credit' = CONS,
     front' = front, spill' = spill, outletOpen' = outletOpen, stuck' = stuck, slips' = slips,
@@ -897,7 +903,7 @@ module outlet_guard {
   action retract: bool = all {
     mode == PULL,
     front > 0 or spill > 0,
-    val fw2 = fwSample(fw, mode, asGood, -1, false, false, stuck)
+    val fw2 = fwSample(fw, mode, asGood, -1, false, false, false, stuck)
     all {
       fw' = fw2,
       attemptSpill' = if (restarted(fw2)) 0
@@ -945,7 +951,7 @@ module outlet_guard {
   }
 
   // With the spill taken up, consumption draws the tube back onto the hub;
-  // the extruder now pulls against the braked BMCU (G3: not expected).
+  // the extruder now pulls against the braked BMCU.
   action reseat: bool = all {
     outletOpen, spill == 0, mode == USE, front == PATH, credit > 0,
     outletOpen' = false, pulled' = 1, credit' = credit - 1,
@@ -1016,7 +1022,7 @@ module outlet_guard {
   // mode, the count is within the mode's budget; latched nothing pushes, so
   // it never gets more than one sample past the largest budget.
   val freeBounded: bool = all {
-    (fw.judged and not(fw.tripped) and asGood and mode != PULL) implies fw.excess <= budget(mode),
+    (fw.judged and not(fw.tripped) and asGood) implies fw.excess <= budget(mode),
     fw.excess <= MAX_BUDGET + FEED,
   }
 
@@ -1037,15 +1043,12 @@ module outlet_guard {
   // per fault (the slip, or a detach on top of it) and printer command.
   val grindBounded: bool = grind <= GRIND_CAP
 
-  // A slip and an open outlet are told apart.
+  // A slip is never taken for an open outlet that tension may resume.
   val slipNotOpen: bool = fw.slipped implies not(fw.tripped)
 
-  // A guard latch in on_use is raised to the printer once sampled.
-  val faultRaised: bool =
-    (mode == USE and fw.judged and (fw.tripped or fw.slipped)) implies fw.jam
-
-  // A jam latches only on a held strand or an open-outlet trip.
-  val jamSound: bool = fw.jam implies fw.jamWasFault
+  // A jam latches only on a held strand: in particular not at the resume,
+  // where the buffer is pulled by the printer.
+  val jamSound: bool = fw.jam implies fw.jamWasStuck
 
   // The printer's send_out / pull release a jam (346783f).
   val jamReleasedByCommand: bool =
@@ -1053,16 +1056,17 @@ module outlet_guard {
 
   val safety: bool = all {
     freeBounded, spillBounded, noFalseTrip, latchBrakes, jamSound, jamReleasedByCommand,
-    grindBounded, slipNotOpen, faultRaised,
+    grindBounded, slipNotOpen,
   }
 
   // ---------------------------------------------------------------- witnesses
   // Expected to be VIOLATED.
 
   val witnessNoTrip: bool = not(fw.tripped)
+  val witnessNoResume: bool = lastAction != "resume"
   val witnessNoUnwind: bool = lastAction != "unwound"
-  // The tube drawn back while latched: the latch and the jam still hold.
-  val witnessNoReseatedHold: bool = not(fw.tripped and not(outletOpen) and fw.jam)
+  // At the resume the buffer is pulled: what the jam detector is held off for.
+  val witnessNoPulledResume: bool = not(lastAction == "resume" and pulled > 0 and not(stuck))
   val witnessNoJam: bool = not(fw.jam)
   // On the send path the spill reaches past the on_use budget.
   val witnessSmallSpill: bool = attemptSpill <= USE_BUD
@@ -1086,15 +1090,14 @@ module outlet_guard {
       .then(consume).then(drive)
       .expect(not(fw.tripped) and safety)
 
-  // The tube comes off mid-print: the guard stops within its budget and
-  // raises the jam; the printer eats the slack, and even with the tube back
-  // the latch holds until the printer's unload winds the count back.
+  // The tube comes off mid-print: the guard stops within its budget, the
+  // printer eats the slack, the tube reseats, the resume is not a jam.
   run detachMidPrintTest =
     init.then(cmdSend).then(drive).then(drive).then(drive).then(drive)
       .expect(lastAction == "drivePressed" and fw.excess == 0 and fw.slipCnt == FEED)
       .then(cmdUse).then(detach)
       .then(drive).then(drive).then(drive).then(drive).then(drive)
-      .expect(fw.tripped and fw.jam and spill == 10 and not(driveEnabled))
+      .expect(fw.tripped and lastAction == "trip" and spill == 10 and not(driveEnabled))
       .then(idleSample)
       .expect(fw.tripped and fw.excess == 5)          // latched: no drain
       .then(consume).then(idleSample).then(consume).then(idleSample)
@@ -1104,10 +1107,9 @@ module outlet_guard {
       .then(consume).then(idleSample).then(consume).then(idleSample)
       .expect(spill == 0 and fw.tripped)
       .then(reseat).then(idleSample)
-      .expect(fw.tripped and fw.jam and fw.excess == 5)  // tension resumes nothing
-      .then(cmdPull)
-      .then(retract).then(retract).then(retract).then(retract).then(retract)
-      .expect(lastAction == "unwound" and not(fw.tripped) and safety)
+      .expect(lastAction == "resume" and not(fw.tripped) and not(fw.jam) and fw.disarm >= 0)
+      .then(drive)
+      .expect(not(fw.jam) and not(fw.tripped) and safety)
 
   // A send into an open outlet trips at the send budget. The printer gives
   // up (idle): count and latch start over, the retry gets a fresh budget and
