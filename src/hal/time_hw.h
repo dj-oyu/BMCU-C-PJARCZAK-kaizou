@@ -15,11 +15,19 @@ extern "C" {
 #define STK_CMPHR (*(volatile uint32_t *)(TIME_HW_STK_BASE + 0x14u))
 
 void     time_hw_init(void);
-uint32_t time_hw_ticks_per_us(void);
-uint32_t time_hw_ticks_per_ms(void);
 
-extern uint32_t time_hw_tpus;
-extern uint32_t time_hw_tpms;
+// SysTick runs at HCLK/8 and the clock is fixed at build time
+// (platformio.ini: -DSYSCLK_FREQ_144MHz_HSI), so the tick rates are constants:
+// every ms_to_ticks32(constant) and `n * time_hw_tpms` folds at compile time
+// instead of a load, a zero check and a division at each of ~70 call sites.
+#ifndef SYSCLK_FREQ_144MHz_HSI
+#error "time_hw assumes the 144 MHz HSI clock configuration"
+#endif
+#define time_hw_tpus (SYSCLK_FREQ_144MHz_HSI / 8u / 1000000u)
+#define time_hw_tpms (time_hw_tpus * 1000u)
+
+static inline uint32_t time_hw_ticks_per_us(void) { return time_hw_tpus; }
+static inline uint32_t time_hw_ticks_per_ms(void) { return time_hw_tpms; }
 
 static inline __attribute__((always_inline)) uint32_t time_diff_u32(uint32_t a, uint32_t b)
 {

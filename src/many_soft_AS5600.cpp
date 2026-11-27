@@ -1,6 +1,7 @@
 #include "many_soft_AS5600.h"
 
 #include "hal/time_hw.h"
+#include "hal/periph_regs.h"
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
 #include "core_riscv.h"
@@ -21,7 +22,9 @@ static inline void gpio_hi(GPIO_TypeDef* p, uint16_t pin) { p->BSHR = pin; }
 static inline void gpio_lo(GPIO_TypeDef* p, uint16_t pin) { p->BCR  = pin; }
 static inline uint32_t pin_index_u16(uint16_t pinMask)
 {
-    return (uint32_t)__builtin_ctz((uint32_t)pinMask);
+    uint32_t i = 0; uint32_t m = pinMask;
+    while (!(m & 1u)) { m >>= 1; i++; }
+    return i;
 }
 
 static inline void gpio_set_cfg4(GPIO_TypeDef* p, uint16_t pinMask, uint32_t cfg4)
@@ -74,10 +77,10 @@ AS5600_soft_IIC_many::~AS5600_soft_IIC_many()
 
 void AS5600_soft_IIC_many::enable_gpio_clock(GPIO_TypeDef* p)
 {
-    if      (p == GPIOA) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    else if (p == GPIOB) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
-    else if (p == GPIOC) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
-    else if (p == GPIOD) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD, ENABLE);
+    if      (p == GPIOA) RCC->APB2PCENR |= RCC_APB2Periph_GPIOA;
+    else if (p == GPIOB) RCC->APB2PCENR |= RCC_APB2Periph_GPIOB;
+    else if (p == GPIOC) RCC->APB2PCENR |= RCC_APB2Periph_GPIOC;
+    else if (p == GPIOD) RCC->APB2PCENR |= RCC_APB2Periph_GPIOD;
 }
 
 void AS5600_soft_IIC_many::sda_mode_ipu(int i)
@@ -156,16 +159,8 @@ void AS5600_soft_IIC_many::init_iic()
         gpio_hi(port_SCL[i], pin_SCL[i]);
         gpio_hi(port_SDA[i], pin_SDA[i]);
 
-        GPIO_InitTypeDef gi = {0};
-        gi.GPIO_Speed = GPIO_Speed_50MHz;
-
-        gi.GPIO_Mode = GPIO_Mode_Out_PP;
-        gi.GPIO_Pin  = pin_SCL[i];
-        GPIO_Init(port_SCL[i], &gi);
-
-        gi.GPIO_Mode = GPIO_Mode_Out_OD;
-        gi.GPIO_Pin  = pin_SDA[i];
-        GPIO_Init(port_SDA[i], &gi);
+        gpio_config(port_SCL[i], pin_SCL[i], GPIO_CFG_OUT_PP);
+        gpio_config(port_SDA[i], pin_SDA[i], GPIO_CFG_OUT_OD);
 
         // idle high
         gpio_hi(port_SCL[i], pin_SCL[i]);

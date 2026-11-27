@@ -17,7 +17,7 @@ public:
     void RST(void);
     void updata(void);
 
-    void set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index);
+    __attribute__((noinline)) void set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index);
 
     void set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index, bool filament = false);
 

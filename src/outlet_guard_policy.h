@@ -132,6 +132,17 @@ struct State
     int64_t  recover_q8;          // counts * 256, unpowered forward travel while slipped
 };
 
+// floor(cps * 256 * dt_us / 1e6), exactly, without a 64-bit division (which
+// would link libgcc's __divdi3, ~1 KB). 256 / 1e6 = 4 / 15625; splitting both
+// operands at 15625 leaves one product small enough for a 32-bit divide.
+inline int64_t drain_q8(uint32_t cps, uint32_t dt_us)
+{
+    const uint32_t a = dt_us / 15625u, b = dt_us % 15625u;
+    const uint32_t c = cps / 15625u,  d = cps % 15625u;
+    return 4 * (static_cast<int64_t>(cps) * a + static_cast<int64_t>(c) * b) +
+           static_cast<int64_t>((4u * d * b) / 15625u);
+}
+
 inline void reset(State& s)
 {
     s.excess_q8 = 0;
@@ -229,8 +240,7 @@ inline bool sample(State& s, const Config& c, uint8_t mode, bool measured,
         return was != s.tripped;
     }
 
-    const int64_t drain = (mode != MODE_SEND)
-        ? (static_cast<int64_t>(c.consume_cps) * 256 * dt_us) / 1000000 : 0;
+    const int64_t drain = (mode != MODE_SEND) ? drain_q8(c.consume_cps, dt_us) : 0;
 
     if (s.tripped == TRIP_SLIP)
     {

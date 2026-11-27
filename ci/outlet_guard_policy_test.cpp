@@ -368,6 +368,31 @@ static int test_slip_escalates_after_wait(void)
     return 0;
 }
 
+// drain_q8 avoids a 64-bit division; it must equal floor(cps * 256 * dt / 1e6)
+// exactly, for every input. The reference uses 128-bit arithmetic because
+// cps * 256 * dt overflows 64 bits.
+static int test_drain_q8_is_exact(void)
+{
+    typedef unsigned __int128 u128;
+    const uint32_t edges[] = {0u, 1u, 2u, 15624u, 15625u, 15626u, 31250u, 99999u, 100000u,
+                              1000000u, 0x7FFFFFFFu, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    const unsigned n = sizeof(edges) / sizeof(edges[0]);
+    for (unsigned i = 0; i < n; i++)
+        for (unsigned j = 0; j < n; j++)
+        {
+            const u128 ref = (u128)edges[i] * 256u * edges[j] / 1000000u;
+            CHECK((u128)drain_q8(edges[i], edges[j]) == ref, 240);
+        }
+    uint32_t x = 12345u;
+    for (int k = 0; k < 2000000; k++)
+    {
+        x = x * 1664525u + 1013904223u; const uint32_t cps = (k & 1) ? (x >> (x & 15u)) : x;
+        x = x * 1664525u + 1013904223u; const uint32_t dt = (k & 2) ? (x >> (x & 15u)) : x;
+        CHECK((u128)drain_q8(cps, dt) == (u128)cps * 256u * dt / 1000000u, 241);
+    }
+    return 0;
+}
+
 int main(void)
 {
     int r;
@@ -394,5 +419,6 @@ int main(void)
     if ((r = test_pushed_travel_does_not_recover())) return r;
     if ((r = test_slip_recovery_is_limited())) return r;
     if ((r = test_slip_escalates_after_wait())) return r;
+    if ((r = test_drain_q8_is_exact())) return r;
     return 0;
 }

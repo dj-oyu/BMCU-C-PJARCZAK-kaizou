@@ -1,5 +1,6 @@
 #include "ws2812.h"
 #include "hal/time_hw.h"
+#include "hal/periph_regs.h"
 #include "hal/irq_wch.h"
 
 // WS2812B timing (datasheet):
@@ -20,10 +21,10 @@ static uint32_t g_ws2812_rst_ticks = 0;
 
 static inline void enable_gpio_clock(GPIO_TypeDef* p)
 {
-    if      (p == GPIOA) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    else if (p == GPIOB) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
-    else if (p == GPIOC) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
-    else if (p == GPIOD) RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD, ENABLE);
+    if      (p == GPIOA) RCC->APB2PCENR |= RCC_APB2Periph_GPIOA;
+    else if (p == GPIOB) RCC->APB2PCENR |= RCC_APB2Periph_GPIOB;
+    else if (p == GPIOC) RCC->APB2PCENR |= RCC_APB2Periph_GPIOC;
+    else if (p == GPIOD) RCC->APB2PCENR |= RCC_APB2Periph_GPIOD;
 }
 
 static inline __attribute__((always_inline)) void wait_until(uint32_t deadline)
@@ -76,11 +77,7 @@ void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 
     enable_gpio_clock(port);
 
-    GPIO_InitTypeDef gi = {0};
-    gi.GPIO_Speed = GPIO_Speed_50MHz;
-    gi.GPIO_Mode  = GPIO_Mode_Out_PP;
-    gi.GPIO_Pin   = pin;
-    GPIO_Init(port, &gi);
+    gpio_config(port, pin, GPIO_CFG_OUT_PP);
 
     RGB_L(port, pin);
     clear();

@@ -13,6 +13,7 @@
 #include "ams_merger_policy.h"
 #include "strand_zone_policy.h"
 #include "app_api.h"
+#include "hal/periph_regs.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -310,17 +311,21 @@ static void persistence_save_run()
 int main(void)
 {
     SystemInit();
-    SystemCoreClockUpdate();
+    // No SystemCoreClockUpdate(): nothing reads SystemCoreClock; the clock is
+    // fixed at build time (hal/time_hw.h, hal/periph_regs.h).
     time_hw_init();
 
     __enable_irq();
 
-    WWDG_DeInit();
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_WWDG, DISABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+    // Window watchdog reset and clock off.
+    RCC->APB1PRSTR |= RCC_APB1Periph_WWDG;
+    RCC->APB1PRSTR &= ~RCC_APB1Periph_WWDG;
+    RCC->APB1PCENR &= ~RCC_APB1Periph_WWDG;
+    RCC->APB2PCENR |= RCC_APB2Periph_AFIO;
 
-    NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
-    GPIO_PinRemapConfig(GPIO_Remap_PD01, ENABLE);
+    // Interrupt priorities are set as NVIC_PriorityGroup_1 values by
+    // nvic_enable(); the SDK's group setting was only read by NVIC_Init.
+    AFIO->PCFR1 = PERIPH_PCFR1_BASE;
 
     // Start the dedicated monitor UART before any sensor/calibration waits.
     bmcu_link_init();

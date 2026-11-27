@@ -1,9 +1,6 @@
 #include "hal/time_hw.h"
 #include "ch32v20x.h"
 
-uint32_t time_hw_tpus = 1;
-uint32_t time_hw_tpms = 1000;
-
 static inline __attribute__((always_inline)) uint64_t ticks64_raw(void)
 {
     uint32_t hi1, lo, hi2;
@@ -26,18 +23,7 @@ void time_hw_init(void)
     STK_CMPHR = 0xFFFFFFFFu;
 
     STK_CTLR = (1u << 3) | (1u << 0);   // STRE=1, STCLK=HCLK/8, STE=1
-
-    uint32_t tpus = (SystemCoreClock / 8u) / 1000000u;
-    if (!tpus) tpus = 1u;
-    time_hw_tpus = tpus;
-
-    uint32_t tpms = tpus * 1000u;
-    if (!tpms) tpms = 1u;
-    time_hw_tpms = tpms;
 }
-
-uint32_t time_hw_ticks_per_us(void) { return time_hw_tpus; }
-uint32_t time_hw_ticks_per_ms(void) { return time_hw_tpms; }
 
 uint64_t time_ticks64(void)
 {

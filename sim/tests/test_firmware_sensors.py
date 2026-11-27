@@ -103,13 +103,18 @@ class CalibrateThenLoad(unittest.TestCase):
 
         def shape(events):
             return [{k: e[k] for k in fields if k in e} for e in events]
-        # The recording starts with online 0->1.  The simulated firmware puts
-        # that change in the STATUS reply to the GET_STATUS the monitor sent
-        # 15 ms after insertion (GET_STATUS consumes pending changes without
-        # an event), so it is checked through STATUS instead.
+        # The recording starts with online 0->1.  Whether the simulated
+        # firmware reports it as an event too is a race: the monitor sends a
+        # GET_STATUS about 10 ms after insertion, and GET_STATUS consumes a
+        # pending change without an event.  Which comes first depends on how
+        # fast the main loop runs, so a faster build can flip it.  Either way
+        # STATUS must show the channel online.
         self.assertEqual(recorded[0]["field"], 3)
         self.assertTrue(any(msg["data"]["online_mask"] & 1 for msg in self.short[1].messages
                             if msg.get("type") == "status" and 1000 <= msg["sim_ms"] < 6000))
+        if got and got[0].get("event_name") == "state_change" and got[0].get("value") == 1:
+            self.assertEqual(shape(got[:1]), shape(recorded[:1]))
+            got = got[1:]
         self.assertEqual(shape(got), shape(recorded[1:4]))
         self.assertAlmostEqual(got[0]["held_ms"], recorded[1]["held_ms"], delta=50)
         # Not compared: held_ms of the second teardown.  The device reports 0

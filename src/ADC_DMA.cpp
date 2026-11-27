@@ -3,6 +3,8 @@
 #include "ch32v20x_adc.h"
 #include "ch32v20x_dma.h"
 #include "ch32v20x_rcc.h"
+#include "sensor_fixed.h"
+#include "hal/periph_regs.h"
 #include <stdint.h>
 
 static constexpr uint32_t kCh      = 8;
@@ -21,15 +23,12 @@ static uint32_t g_acc_sum[kCh];
 static uint8_t  g_ring_idx = 0;
 static uint8_t  g_blocks_filled = 0;
 
-static float            g_v[2][kCh] __attribute__((aligned(4)));
+static int32_t          g_v[2][kCh] __attribute__((aligned(4)));
 static volatile uint8_t g_v_rd = 0;
 static volatile uint8_t g_acc_dirty = 0;
 
-static constexpr float kScale32  = 3.3f / (8190.0f *  32.0f);
-static constexpr float kScale64  = 3.3f / (8190.0f *  64.0f);
-static constexpr float kScale96  = 3.3f / (8190.0f *  96.0f);
-static constexpr float kScale128 = 3.3f / (8190.0f * 128.0f);
-static float g_scale = kScale32;
+static_assert(kBlock == 32u && kNBlocks == 4u, "sensor_fixed::kAdcMul assumes 4 blocks of 32 scans");
+static uint32_t g_mul = sensor_fixed::kAdcMul[1];
 
 static inline __attribute__((always_inline)) void adc_dma_barrier()
 {
@@ -43,20 +42,15 @@ static inline __attribute__((always_inline)) void adc_dma_compiler_barrier()
 
 void ADC_DMA_gpio_analog()
 {
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    GPIO_InitTypeDef gpio = {0};
-    gpio.GPIO_Mode  = GPIO_Mode_AIN;
-    gpio.GPIO_Speed = GPIO_Speed_50MHz;
-    gpio.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 |
-                      GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7;
-    GPIO_Init(GPIOA, &gpio);
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOA;
+    gpio_config(GPIOA, 0x00FFu, GPIO_CFG_AIN);   // PA0..PA7
 }
 
 static inline void filter_reset()
 {
     g_ring_idx = 0;
     g_blocks_filled = 0;
-    g_scale = kScale32;
+    g_mul = sensor_fixed::kAdcMul[1];
 
     for (uint32_t ch = 0; ch < kCh; ch++) g_acc_sum[ch] = 0;
 
@@ -66,8 +60,8 @@ static inline void filter_reset()
 
     for (uint32_t ch = 0; ch < kCh; ch++)
     {
-        g_v[0][ch] = 0.0f;
-        g_v[1][ch] = 0.0f;
+        g_v[0][ch] = 0;
+        g_v[1][ch] = 0;
     }
 
     g_v_rd = 0;
@@ -119,10 +113,7 @@ static inline void process_half_update_filter(const uint32_t* p_half)
     if (g_blocks_filled < kNBlocks)
     {
         g_blocks_filled++;
-        if      (g_blocks_filled == 1u) g_scale = kScale32;
-        else if (g_blocks_filled == 2u) g_scale = kScale64;
-        else if (g_blocks_filled == 3u) g_scale = kScale96;
-        else                            g_scale = kScale128;
+        g_mul = sensor_fixed::kAdcMul[g_blocks_filled];
     }
 
     adc_dma_compiler_barrier();
@@ -165,24 +156,18 @@ void ADC_DMA_poll()
     }
 }
 
-const float *ADC_DMA_get_value()
+const int32_t *ADC_DMA_get_value()
 {
     ADC_DMA_poll();
 
     if (g_acc_dirty)
     {
-        const float scale = g_scale;
+        const uint32_t mul = g_mul;
         const uint8_t wr = (uint8_t)(g_v_rd ^ 1u);
-        float* out = g_v[wr];
+        int32_t* out = g_v[wr];
 
-        out[0] = (float)g_acc_sum[0] * scale;
-        out[1] = (float)g_acc_sum[1] * scale;
-        out[2] = (float)g_acc_sum[2] * scale;
-        out[3] = (float)g_acc_sum[3] * scale;
-        out[4] = (float)g_acc_sum[4] * scale;
-        out[5] = (float)g_acc_sum[5] * scale;
-        out[6] = (float)g_acc_sum[6] * scale;
-        out[7] = (float)g_acc_sum[7] * scale;
+        for (uint32_t ch = 0; ch < kCh; ch++)
+            out[ch] = sensor_fixed::adc_sum_to_dmv(g_acc_sum[ch], mul);
 
         adc_dma_compiler_barrier();
         g_v_rd = wr;
@@ -219,13 +204,13 @@ void ADC_DMA_wait_full()
 
 static inline void adc_calibrate(ADC_TypeDef* a)
 {
-    ADC_Cmd(a, ENABLE);
-    ADC_BufferCmd(a, DISABLE);
+    a->CTLR2 |= ADC_ADON;
+    a->CTLR1 &= ~(1u << 26);            // output buffer off
 
-    ADC_ResetCalibration(a);
-    while (ADC_GetResetCalibrationStatus(a)) {}
-    ADC_StartCalibration(a);
-    while (ADC_GetCalibrationStatus(a)) {}
+    a->CTLR2 |= ADC_RSTCAL;
+    while (a->CTLR2 & ADC_RSTCAL) {}
+    a->CTLR2 |= ADC_CAL;
+    while (a->CTLR2 & ADC_CAL) {}
 }
 
 void ADC_DMA_init()
@@ -238,81 +223,59 @@ void ADC_DMA_init()
         return;
     }
 
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
-    RCC_ADCCLKConfig(RCC_PCLK2_Div8);
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_ADC1 | RCC_APB2Periph_ADC2;
+    RCC->AHBPCENR |= RCC_AHBPeriph_DMA1;
+    RCC->CFGR0 = (RCC->CFGR0 & ~RCC_ADCPRE) | RCC_PCLK2_Div8;
 
     ADC_DMA_gpio_analog();
 
     for (uint32_t i = 0; i < kBufLen; i++) g_dma_buf[i] = 0xFFFFFFFFu;
     filter_reset();
 
-    DMA_DeInit(DMA1_Channel1);
-    DMA_Cmd(DMA1_Channel1, DISABLE);
-
+    // DMA1 channel 1: ADC1 data (ADC2 in the high half-word, regular
+    // simultaneous mode) into the circular buffer, words, high priority, no
+    // interrupts -- ADC_DMA_poll() reads the flags.
     constexpr uint32_t RDATAR_ADDRESS = 0x4001244Cu;
-
-    DMA_InitTypeDef dma = {0};
-    dma.DMA_PeripheralBaseAddr = RDATAR_ADDRESS;
-    dma.DMA_MemoryBaseAddr     = (uint32_t)g_dma_buf;
-    dma.DMA_DIR                = DMA_DIR_PeripheralSRC;
-    dma.DMA_BufferSize         = kBufLen;
-    dma.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
-    dma.DMA_MemoryInc          = DMA_MemoryInc_Enable;
-    dma.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Word;
-    dma.DMA_MemoryDataSize     = DMA_MemoryDataSize_Word;
-    dma.DMA_Mode               = DMA_Mode_Circular;
-    dma.DMA_Priority           = DMA_Priority_High;
-    dma.DMA_M2M                = DMA_M2M_Disable;
-    DMA_Init(DMA1_Channel1, &dma);
-
-    DMA_SetCurrDataCounter(DMA1_Channel1, kBufLen);
-
+    dma_channel_setup(DMA1_Channel1, DMA1_FLAG_GL1 | DMA1_FLAG_TC1 | DMA1_FLAG_HT1 | DMA1_FLAG_TE1,
+                      DMA_DIR_PeripheralSRC | DMA_MemoryInc_Enable | DMA_Mode_Circular |
+                      DMA_PeripheralDataSize_Word | DMA_MemoryDataSize_Word | DMA_Priority_High,
+                      RDATAR_ADDRESS, (uint32_t)g_dma_buf, kBufLen);
     DMA1->INTFCR = (DMA1_FLAG_GL1 | DMA1_FLAG_HT1 | DMA1_FLAG_TC1 | DMA1_FLAG_TE1);
-    DMA_ITConfig(DMA1_Channel1, DMA_IT_HT | DMA_IT_TC | DMA_IT_TE, DISABLE);
 
-    ADC_DeInit(ADC1);
-    ADC_DeInit(ADC2);
+    // Reset both ADCs, then: scan, continuous, software trigger, right
+    // aligned, 8 conversions of channels 0..7 at 71.5 cycles each. ADC1 is
+    // the master of regular simultaneous mode.
+    RCC->APB2PRSTR |= RCC_APB2Periph_ADC1;
+    RCC->APB2PRSTR &= ~RCC_APB2Periph_ADC1;
+    RCC->APB2PRSTR |= RCC_APB2Periph_ADC2;
+    RCC->APB2PRSTR &= ~RCC_APB2Periph_ADC2;
 
-    ADC_InitTypeDef a1 = {0};
-    a1.ADC_Mode               = ADC_Mode_RegSimult;
-    a1.ADC_ScanConvMode       = ENABLE;
-    a1.ADC_ContinuousConvMode = ENABLE;
-    a1.ADC_ExternalTrigConv   = ADC_ExternalTrigConv_None;
-    a1.ADC_DataAlign          = ADC_DataAlign_Right;
-    a1.ADC_NbrOfChannel       = 8;
-    a1.ADC_OutputBuffer       = ADC_OutputBuffer_Disable;
-    a1.ADC_Pga                = ADC_Pga_1;
-    ADC_Init(ADC1, &a1);
-
-    ADC_InitTypeDef a2 = {0};
-    a2.ADC_Mode               = ADC_Mode_Independent;
-    a2.ADC_ScanConvMode       = ENABLE;
-    a2.ADC_ContinuousConvMode = ENABLE;
-    a2.ADC_ExternalTrigConv   = ADC_ExternalTrigConv_None;
-    a2.ADC_DataAlign          = ADC_DataAlign_Right;
-    a2.ADC_NbrOfChannel       = 8;
-    a2.ADC_OutputBuffer       = ADC_OutputBuffer_Disable;
-    a2.ADC_Pga                = ADC_Pga_1;
-    ADC_Init(ADC2, &a2);
-
-    for (int i = 0; i < 8; i++)
+    constexpr uint32_t kCtlr2  = ADC_ExternalTrigConv_None | ADC_CONT;
+    constexpr uint32_t kSmp    = ADC_SampleTime_71Cycles5;
+    constexpr uint32_t kSamptr = kSmp * 0x249249u & 0xFFFFFFu;          // channels 0..7
+    constexpr uint32_t kRsqr3  = 0u | 1u << 5 | 2u << 10 | 3u << 15 | 4u << 20 | 5u << 25;
+    constexpr uint32_t kRsqr2  = 6u | 7u << 5;
+    constexpr uint32_t kRsqr1  = (8u - 1u) << 20;
+    ADC_TypeDef* const adcs[2] = {ADC1, ADC2};
+    for (ADC_TypeDef* a : adcs)
     {
-        ADC_RegularChannelConfig(ADC1, (uint8_t)i, (uint8_t)(i + 1), ADC_SampleTime_71Cycles5);
-        ADC_RegularChannelConfig(ADC2, (uint8_t)i, (uint8_t)(i + 1), ADC_SampleTime_71Cycles5);
+        a->CTLR1 = (a == ADC1 ? ADC_Mode_RegSimult : ADC_Mode_Independent) | ADC_SCAN;
+        a->CTLR2 = kCtlr2;
+        a->RSQR1 = kRsqr1;
+        a->SAMPTR2 = kSamptr;
+        a->RSQR3 = kRsqr3;
+        a->RSQR2 = kRsqr2;
     }
 
     adc_calibrate(ADC1);
     adc_calibrate(ADC2);
 
-    ADC_DMACmd(ADC1, ENABLE);
+    ADC1->CTLR2 |= ADC_DMA;
 
-    DMA_Cmd(DMA1_Channel1, ENABLE);
+    DMA1_Channel1->CFGR |= DMA_CFGR1_EN;
 
-    ADC_SoftwareStartConvCmd(ADC2, ENABLE);
-    ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+    ADC2->CTLR2 |= ADC_EXTTRIG | ADC_SWSTART;
+    ADC1->CTLR2 |= ADC_EXTTRIG | ADC_SWSTART;
 
     uint32_t t0 = time_ticks32();
     const uint32_t warm = ms_to_ticks32(350u);
