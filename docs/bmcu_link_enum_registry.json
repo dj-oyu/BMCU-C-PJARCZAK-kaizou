@@ -124,7 +124,8 @@
       "8": "diagnostic_counter",
       "9": "printer_long_transaction",
       "10": "reset_state",
-      "11": "dm_teardown"
+      "11": "dm_teardown",
+      "12": "printer_long_payload"
     },
     "dm_teardown_cause": {
       "1": "ks_deviated",

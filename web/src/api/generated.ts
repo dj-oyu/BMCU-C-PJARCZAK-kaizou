@@ -391,6 +391,7 @@ export const BmcuRecordType = {
   PrinterLongTransaction: 9,
   ResetState: 10,
   DmTeardown: 11,
+  PrinterLongPayload: 12,
 } as const
 export type BmcuRecordType = (typeof BmcuRecordType)[keyof typeof BmcuRecordType]
 

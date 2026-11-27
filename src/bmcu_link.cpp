@@ -176,6 +176,27 @@ DmTeardownGate g_dm_teardown[4] = {};
 uint32_t g_dm_teardown_suppressed = 0u;
 PrinterAuthCache g_printer_auth = {};
 UnsupportedLongCache g_unsupported_long = {};
+
+// RECORD_PRINTER_LONG_PAYLOAD. One capture is in flight at a time: it is
+// copied here when the frame arrives and drained a chunk per service pass, and
+// only while the event ring has room, so a capture never evicts other events.
+// The seen table makes each (type, hash) pair a one-off; the unanswered frames
+// arrive at ~10 Hz and would otherwise flood the eight-slot ring.
+constexpr uint8_t kLongCaptureBytes = 32u;
+constexpr uint8_t kLongCaptureSeen = 8u;
+struct LongPayloadCapture
+{
+    uint16_t type;
+    uint8_t total_length;
+    uint8_t captured;    // bytes in data; 0 when nothing is pending
+    uint8_t sent;        // bytes already emitted
+    uint8_t data[kLongCaptureBytes];
+    uint16_t seen_type[kLongCaptureSeen];
+    uint8_t seen_hash[kLongCaptureSeen];
+    uint8_t seen_next;
+    uint8_t seen_used;
+};
+LongPayloadCapture g_long_capture = {};
 uint32_t g_printer_foreign_count = 0u;
 bmcu_ams_service::Watch g_ams_service = {};
 uint8_t g_status_cache_valid = 0u;
@@ -467,6 +488,59 @@ void push_log_record(const LogRecord& record)
         g_events[g_event_write] = record;
         g_event_write = next;
     }
+}
+
+static uint8_t event_ring_free(void)
+{
+    return static_cast<uint8_t>((g_event_read - g_event_write - 1u) & (kEventSlots - 1u));
+}
+
+static void long_capture_offer(uint16_t type, uint8_t hash, const uint8_t* payload,
+                               uint16_t length)
+{
+    LongPayloadCapture& c = g_long_capture;
+    for (uint8_t i = 0u; i < c.seen_used; ++i)
+        if (c.seen_type[i] == type && c.seen_hash[i] == hash) return;
+    // Busy with an earlier capture: leave this pair unseen so a later frame
+    // with the same content is captured instead.
+    if (c.captured != 0u || payload == nullptr || length == 0u) return;
+
+    c.seen_type[c.seen_next] = type;
+    c.seen_hash[c.seen_next] = hash;
+    c.seen_next = static_cast<uint8_t>((c.seen_next + 1u) % kLongCaptureSeen);
+    if (c.seen_used < kLongCaptureSeen) ++c.seen_used;
+
+    const uint8_t n = length < kLongCaptureBytes ? static_cast<uint8_t>(length)
+                                                 : kLongCaptureBytes;
+    __builtin_memcpy(c.data, payload, n);
+    c.type = type;
+    c.total_length = length > 0xFFu ? 0xFFu : static_cast<uint8_t>(length);
+    c.captured = n;
+    c.sent = 0u;
+}
+
+// Queue at most one chunk per pass, and only while three ring slots are free.
+static void long_capture_drain(void)
+{
+    LongPayloadCapture& c = g_long_capture;
+    if (c.captured == 0u || event_ring_free() < 3u) return;
+
+    const uint8_t left = static_cast<uint8_t>(c.captured - c.sent);
+    const uint8_t n = left < 4u ? left : 4u;
+    LogRecord record = {};
+    record.header.hw_tick32 = time_ticks32();
+    record.header.type = RECORD_PRINTER_LONG_PAYLOAD;
+    record.header.severity = SEVERITY_INFO;
+    record.header.source = SOURCE_PRINTER_BUS;
+    record.header.payload_length = static_cast<uint8_t>(4u + n);
+    record.payload.printer_long_payload.type = c.type;
+    record.payload.printer_long_payload.total_length = c.total_length;
+    record.payload.printer_long_payload.offset = c.sent;
+    __builtin_memcpy(record.payload.printer_long_payload.data, c.data + c.sent, n);
+    push_log_record(record);
+
+    c.sent = static_cast<uint8_t>(c.sent + n);
+    if (c.sent >= c.captured) c.captured = 0u;
 }
 
 void push_state_event(StateField field, uint8_t slot, uint16_t previous_value, uint16_t value,
@@ -1292,6 +1366,8 @@ void bmcu_link_service(void)
         }
     }
 
+    long_capture_drain();
+
     if (!g_status_cache_valid) apply_status_changes(BMCU_STATUS_CHANGE_ALL, false);
 
     // A full snapshot is a bounded baseline transaction. STATUS can become
@@ -1597,8 +1673,8 @@ static __attribute__((noinline, cold)) void note_unsupported_long(uint16_t type)
 }
 
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
-                                        uint16_t payload_length, uint16_t response_length,
-                                        uint8_t payload_hash)
+                                        const uint8_t* payload, uint16_t payload_length,
+                                        uint16_t response_length, uint8_t payload_hash)
 {
     const uint32_t tick = time_ticks32();
     g_printer_auth.last_type = type;
@@ -1623,6 +1699,8 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
     const bool unsupported = outcome == OUTCOME_IGNORED &&
                              reason == REASON_UNSUPPORTED;
     if (unsupported) note_unsupported_long(type);
+    if (unsupported || type == 0x040Du || type == 0x040Eu)
+        long_capture_offer(type, payload_hash, payload, payload_length);
 
     const bool notable = type == 0x040Du || type == 0x040Eu || unsupported ||
                          outcome == OUTCOME_REJECTED || outcome == OUTCOME_FAILED;

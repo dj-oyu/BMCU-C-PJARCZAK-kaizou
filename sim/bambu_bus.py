@@ -50,6 +50,18 @@ def short_frame(ftype: int, payload: bytes, flag: int = 0xC5) -> bytes:
     return body + bytes((c & 0xFF, c >> 8))
 
 
+def long_frame(ftype: int, payload: bytes, dst: int = 0x0700, src: int = 0x0600,
+               seq: int = 0, flag: int = 0x05) -> bytes:
+    # The layout bambubus_long_package_analysis reads: header fields are
+    # little-endian, length counts the whole frame including the CRC16.
+    length = 13 + len(payload) + 2
+    head = bytes((0x3D, flag, seq & 0xFF, seq >> 8, length & 0xFF, length >> 8))
+    body = (head + bytes((crc8(head),)) + dst.to_bytes(2, "little") +
+            src.to_bytes(2, "little") + ftype.to_bytes(2, "little") + payload)
+    c = crc16(body)
+    return body + bytes((c & 0xFF, c >> 8))
+
+
 @dataclass
 class Frame:
     t: int

@@ -103,9 +103,11 @@ void bmcu_link_status_changed(uint32_t reasons);
 void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t outcome,
                                    uint8_t reason, uint16_t request_length,
                                    uint16_t response_length, uint8_t addressed_ams);
+// payload is the frame's data, payload_length bytes; it is read during the
+// call only.
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
-                                        uint16_t payload_length, uint16_t response_length,
-                                        uint8_t payload_hash);
+                                        const uint8_t* payload, uint16_t payload_length,
+                                        uint16_t response_length, uint8_t payload_hash);
 // Observe-only AMS service/registration instrumentation (issue #3 phase 1).
 // These only feed diagnostic telemetry; nothing they record is ever read back
 // into a printer-bus decision. Main-loop context only.

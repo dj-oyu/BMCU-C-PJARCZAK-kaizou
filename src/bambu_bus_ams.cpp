@@ -1360,8 +1360,8 @@ bambubus_package_type bambubus_run()
             {
                 bmcu_link_printer_long_transaction(
                     printer_data_long.type, static_cast<uint8_t>(outcome),
-                    static_cast<uint8_t>(reason), printer_data_long.data_length,
-                    response_length,
+                    static_cast<uint8_t>(reason), printer_data_long.datas,
+                    printer_data_long.data_length, response_length,
                     bounded_payload_hash(printer_data_long.datas, printer_data_long.data_length));
             }
 

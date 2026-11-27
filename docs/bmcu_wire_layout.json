@@ -1,6 +1,6 @@
 {
   "layout": "bmcu-wire-layout",
-  "revision": 12,
+  "revision": 13,
   "note": "Byte offsets that no enum registry describes. Hand-maintained, pinned by ci/test_pico_binary_api.py and web/test/decode.test.ts against fixtures the Python codec produced. Source for both web/src/api/layout.ts and the served /api/schema.json.",
   "revision_policy": "Bump revision whenever a structure layout or an enum changes: a field added, removed, renamed, moved or retyped, or an enum value assigned or given a new meaning. Prose and endpoint-list edits do not move it. Consumers of /api/schema.json cache by revision and refetch when it differs; ci/test_web_ui_build.py fingerprints structures and local_enums so a change here cannot land without moving it.",
   "structures": {
@@ -134,6 +134,17 @@
         {"name": "cause", "offset": 2, "type": "u8", "enum": "dm_teardown_cause"},
         {"name": "ks", "offset": 3, "type": "u8", "note": "the key reading that caused the teardown, same encoding as channel_flags.ks: 0 none, 1 both, 2 external only, 3 internal only"},
         {"name": "held_ms", "offset": 4, "type": "u32", "note": "how long the machine had been in that state. This is the point of the record: for a s1_debounce deviation it is the width of the lever excursion that aborted an in-progress load, and sizing any tolerance for lever float needs those widths. The bench session that raised the question recorded only how many excursions there were, never how wide."}
+      ]
+    },
+    "printer_long_payload_payload": {
+      "description": "event_payload payload when record_type is 12 (printer_long_payload): leading bytes of a printer long frame the firmware does not answer (IGNORED/UNSUPPORTED), or of a 0x040D/0x040E frame. PRINTER_LONG_TRANSACTION carries only an 8-bit hash of the payload; this carries the bytes. The first 32 bytes of a frame go out as consecutive records of up to four bytes, and the event payload_length is 4 plus the number of meaningful data bytes. Each (type, payload hash) pair is captured once per boot, because the unanswered frames arrive at about 10 Hz and the event ring is eight slots.",
+      "endianness": "little",
+      "size": 8,
+      "fields": [
+        {"name": "type", "offset": 0, "type": "u16", "note": "the long frame's type"},
+        {"name": "total_length", "offset": 2, "type": "u8", "note": "the frame's payload length, saturating at 255; bytes past the first 32 are not captured"},
+        {"name": "offset", "offset": 3, "type": "u8", "note": "where in the frame's payload this chunk starts"},
+        {"name": "data", "offset": 4, "type": "u8", "count": 4, "note": "payload bytes from offset; only payload_length - 4 of them are meaningful"}
       ]
     },
     "dm_key_record_data": {

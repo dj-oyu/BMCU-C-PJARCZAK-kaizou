@@ -530,6 +530,19 @@ correlation reaches TX completion.
 `PRINTER_LONG_TRANSACTION (9)` preserves the complete long-frame `type:u16` and then carries
 `owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, payload_hash:u8`.
 
+`PRINTER_LONG_PAYLOAD (12)` carries the bytes the hash stands for, for a long
+frame resolved to IGNORED/UNSUPPORTED and for every `0x040D`/`0x040E`:
+`type:u16, total_length:u8, offset:u8, data[4]`. The first 32 bytes of the
+frame's payload go out as consecutive records of up to four bytes, `offset`
+saying where each starts and the header's `payload_length` (4 plus the data
+bytes) saying how many of `data` are meaningful. Each `(type, payload_hash)`
+pair is captured once per boot, into an eight-entry table: the unanswered
+frames arrive at about 10 Hz and the event ring is eight slots. One capture is
+in flight at a time, and a chunk is queued only while at least three ring
+slots are free, so a capture never evicts another event. Its purpose is to
+identify `0x0411`, `0x023C` and `0x0237`, which a printer on firmware 1.08
+sends continuously and this firmware has never answered.
+
 `PRINTER_TRANSACTION (3)` carries
 `command:u8, owner:u8, outcome:u8, reason:u8, request_length:u8, response_length:u8, rx_class:u8`.
 
