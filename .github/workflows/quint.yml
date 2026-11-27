@@ -1,7 +1,7 @@
 name: Quint model check
 
 # Exhaustive bounded check of spec/bmcu_merger.qnt and spec/strand_zone.qnt
-# with Apalache. The random simulation and the trace replay against the
+# with Apalache, split over parallel jobs. The random simulation and the trace replay against the
 # firmware policies run in host-tests.yml on every PR; this adds the symbolic
 # check, which needs Java and takes minutes, so it runs only when a spec or a
 # policy it mirrors moves.
@@ -46,18 +46,9 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # Apalache alone took 38 min on fc0edd2 and over 56 min with the
-    # restored-tail branch in passage_proof.
-    timeout-minutes: 120
-    env:
-      MAX_STEPS: ${{ inputs.max_steps || '6' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
 
       - uses: actions/setup-node@v6
         with:
@@ -65,12 +56,6 @@ jobs:
 
       - name: Install Quint
         run: npm install --global @informalsystems/quint@0.34.0
-
-      # Quint fetches Apalache on first use; keep it between runs.
-      - uses: actions/cache@v4
-        with:
-          path: ~/.quint
-          key: quint-apalache-0.34.0
 
       - name: Typecheck
         run: |
@@ -122,7 +107,47 @@ jobs:
           check strand_zone witnessNoRecover outlet_guard 50000
           check strand_zone witnessNoEscalation outlet_guard 50000
 
+  # Bounded symbolic check, one job per invariant group. An invariant holds on
+  # its own, so checking safety's conjuncts apart is the same check; each job
+  # unrolls the steps again (about 3 min for bmcu_merger). On fc0edd2 the one
+  # sequential run took 38 min: singleUser 15, ownerIsUsing 11, the rest 7,
+  # strand_zone 2, unrolling 3.
+  apalache:
+    name: apalache (${{ matrix.spec }} ${{ matrix.invariant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { spec: bmcu_merger, invariant: singleUser }
+          - { spec: bmcu_merger, invariant: ownerIsUsing }
+          - { spec: bmcu_merger, invariant: safetyRest }
+          - { spec: strand_zone, invariant: safety }
+    env:
+      MAX_STEPS: ${{ inputs.max_steps || '6' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install Quint
+        run: npm install --global @informalsystems/quint@0.34.0
+
+      # Quint fetches Apalache on first use; keep it between runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-apalache-0.34.0
+
       - name: Bounded symbolic check (Apalache)
-        run: |
-          quint verify spec/bmcu_merger.qnt --invariant=safety --max-steps="$MAX_STEPS"
-          quint verify spec/strand_zone.qnt --invariant=safety --max-steps="$MAX_STEPS"
+        run: >-
+          quint verify "spec/${{ matrix.spec }}.qnt"
+          --invariant="${{ matrix.invariant }}" --max-steps="$MAX_STEPS"

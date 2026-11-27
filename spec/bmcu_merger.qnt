@@ -486,6 +486,12 @@ module bmcu_merger {
     assistNotJammed, sendNotJammed, jamEscapable,
   }
 
+  // safety less its two costly conjuncts: CI checks the three apart, in
+  // parallel (.github/workflows/quint.yml).
+  val safetyRest: bool = all {
+    tailHasOwner, assistNotJammed, sendNotJammed, jamEscapable,
+  }
+
   // ---------------------------------------------------------------- witnesses
   //
   // Expected to be VIOLATED. Each is a known behaviour the firmware does not
