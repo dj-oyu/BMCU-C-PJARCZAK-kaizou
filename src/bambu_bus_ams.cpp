@@ -629,8 +629,13 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
             package_send->unknow2 = row.unknow2;
             memcpy(package_send->unknow3, row.unknow3, sizeof(row.unknow3));
 
-            memcpy(out + 29, &row.last1, sizeof(row.last1));
-            memcpy(out + 33, &row.last2, sizeof(row.last2));
+            // The sniffed rows are bytes 29..36 of the real AMS's reply. Byte
+            // 29 is filament_stu_flag, and the sniffed unit's value (0x57: ch0
+            // in use, four spools online) is not ours, so it is not replayed.
+            uint8_t tail[8];
+            memcpy(tail, &row.last1, sizeof(row.last1));
+            memcpy(tail + 4, &row.last2, sizeof(row.last2));
+            memcpy(out + 30, tail + 1, 7u);
 
             before_on_use_sniff_7f_index = (uint8_t)(idx + 1u);
         }

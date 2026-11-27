@@ -30,6 +30,7 @@
 #include "hal/time_hw.h"
 #include "ams_merger_policy.h"
 #include "bmcu_link_protocol.h"
+#include "before_on_use_replay.h"
 
 bool package_check_crc16(uint8_t *data, int data_length);
 
@@ -595,6 +596,48 @@ int test_motion_reply_bytes(void)
     return 0;
 }
 
+// The before_on_use 0x7F replay sends rows sniffed from a real AMS. Each row is
+// that unit's bytes 29..36, and byte 29 is filament_stu_flag: replaying it told
+// the printer "ch0 in use, four spools online" (0x57) whatever we were loading.
+// Load ch2 with ch1 empty, so our own flag (0x71) differs from the sniffed one
+// in every channel's field, and check each replayed frame keeps it.
+int test_before_on_use_replay_keeps_stu_flag(void)
+{
+    host_bus::reset();
+    host_bus::set_channel_online(1u, false);
+
+    host_bus::poll_motion_short(kSelf, kStatuSendOut, 2u, kFlagSendOut);
+
+    for (uint8_t idx = 0u; idx < 3u; ++idx)
+    {
+        const int len = host_bus::poll_motion_short(kSelf, kStatuBeforeOnUse, 2u,
+                                                    kFlagBeforeOnUse);
+        CHECK(len == 44, 901);
+        CHECK(motion_of(2u) == _filament_motion::before_on_use, 902);
+        CHECK(package_check_crc16(host_bus::reply, len), 903);
+
+        before_on_use_replay::Row row;
+        before_on_use_replay::unpack(idx, &row);
+        uint8_t tail[8];
+        memcpy(tail, &row.last1, 4u);
+        memcpy(tail + 4, &row.last2, 4u);
+
+        // The row was replayed: its pressure and unknow3 are on the wire.
+        CHECK(memcmp(&host_bus::reply[13], &row.pressure, 2u) == 0, 904);
+        CHECK(memcmp(&host_bus::reply[17], row.unknow3, 12u) == 0, 905);
+
+        // ch0 online idle, ch1 offline, ch2 online and moving, ch3 online idle.
+        CHECK(host_bus::reply[29] == 0x71u, 906);
+        CHECK(tail[0] == 0x57u, 907);   // the sniffed flag, which must not leak
+
+        CHECK(memcmp(&host_bus::reply[30], tail + 1, 7u) == 0, 908);
+        CHECK(host_bus::reply[37] == 0xB1u, 909);   // never captured; init value
+        CHECK(host_bus::reply[38] == 2u, 910);
+    }
+
+    return 0;
+}
+
 // An offline AMS answers nothing at all, even for its own address. Included
 // because it is the one other way a frame addressed to us produces no reply,
 // and telling it apart from peer traffic is the point of family 2.
@@ -776,6 +819,7 @@ const Vector kVectors[] = {
     {"owner_on_use_promotes_tail", test_owner_on_use_promotes_tail},
     {"stale_tail_escape", test_stale_tail_escape},
     {"motion_reply_bytes", test_motion_reply_bytes},
+    {"before_on_use_replay_keeps_stu_flag", test_before_on_use_replay_keeps_stu_flag},
     {"offline_ams_is_silent", test_offline_ams_is_silent},
     {"merger_ownership_invariant_walk", test_merger_ownership_invariant_walk},
 };

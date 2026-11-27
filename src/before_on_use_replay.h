@@ -9,6 +9,10 @@
 //   [2:0] unknow3[11] palette  [4:3] unknow3[4] palette  [6:5] unknow3[6] palette
 //   [7] last1 bit 8            [10:8] last2 byte 1 - 0xEC  [11] last2 bit 0
 // unknow3[5,7] are 0xFF and [8,9] are 0 in every row.
+//
+// last1/last2 are the sniffed frame's bytes 29..36. Byte 29 (last1's low byte,
+// 0x57 in every row) is that unit's filament_stu_flag; the replay site keeps
+// our own and sends only bytes 30..36.
 
 #include <stdint.h>
 
