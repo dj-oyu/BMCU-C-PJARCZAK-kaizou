@@ -23,6 +23,7 @@ static constexpr uint32_t MAGIC_CAL = 0x324C4143u; // 'CAL2'
 static constexpr uint32_t MAGIC_MOT = 0x31544F4Du; // 'MOT1'
 static constexpr uint32_t MAGIC_STA = 0x31415453u; // 'STA1'
 static constexpr uint16_t VER_1     = 0x0001u;
+static constexpr uint16_t VER_2     = 0x0002u;
 
 struct __attribute__((packed, aligned(4))) NVM256_HDR
 {
@@ -71,8 +72,9 @@ bool Flash_AMS_downstream_valid(void);
 bool Flash_AMS_state_take_page_erased(void);
 
 // CAL: 1x 256B
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4]);
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4]);
+// Values in 0.1 mV (sensor_fixed.h).
+bool Flash_MC_PULL_cal_read(int32_t offs[4], int32_t vmin[4], int32_t vmax[4], int8_t pol[4]);
+bool Flash_MC_PULL_cal_write_all(const int32_t offs[4], const int32_t vmin[4], const int32_t vmax[4], const int8_t pol[4]);
 bool Flash_MC_PULL_cal_clear(void);
 bool Flash_NVM_full_clear(void);
 

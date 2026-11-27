@@ -4,13 +4,13 @@
 
 extern WS2812_class RGBOUT[4];
 
-static inline __attribute__((always_inline))
+__attribute__((noinline)) inline
 void MC_STU_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b)
 {
     if (ch < 4) RGBOUT[ch].set_RGB(r, g, b, 0);
 }
 
-static inline __attribute__((always_inline))
+__attribute__((noinline)) inline
 void MC_PULL_ONLINE_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b, bool filament = false)
 {
     if (ch < 4) RGBOUT[ch].set_RGB_online(r, g, b, 1, filament);

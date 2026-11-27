@@ -18,6 +18,7 @@
 #include "core_riscv.h"
 #include "hal/time_hw.h"
 #include "hal/irq_wch.h"
+#include "hal/periph_regs.h"
 
 extern WS2812_class SYS_RGB;
 
@@ -1216,55 +1217,30 @@ void emit_ams_service_events(const bmcu_ams_service::Events& events, uint32_t ti
 
 void bmcu_link_init(void)
 {
-    GPIO_InitTypeDef gpio = {0};
-    USART_InitTypeDef uart = {0};
-    DMA_InitTypeDef dma = {0};
-    NVIC_InitTypeDef nvic = {0};
+    RCC->APB1PCENR |= RCC_APB1Periph_USART3;
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOB;
+    RCC->AHBPCENR |= RCC_AHBPeriph_DMA1;
 
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART3, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+    gpio_config(GPIOB, GPIO_Pin_10, GPIO_CFG_AF_PP);
+    gpio_config(GPIOB, GPIO_Pin_11, GPIO_CFG_IN_PU);
 
-    gpio.GPIO_Pin = GPIO_Pin_10;
-    gpio.GPIO_Speed = GPIO_Speed_50MHz;
-    gpio.GPIO_Mode = GPIO_Mode_AF_PP;
-    GPIO_Init(GPIOB, &gpio);
-    gpio.GPIO_Pin = GPIO_Pin_11;
-    gpio.GPIO_Mode = GPIO_Mode_IPU;
-    GPIO_Init(GPIOB, &gpio);
+    // 115200 baud, 9 data bits (8 + even parity), 1 stop bit, RX interrupt.
+    USART3->CTLR2 = 0u;
+    USART3->CTLR3 = 0u;
+    USART3->BRR = PERIPH_USART_BRR(PERIPH_PCLK1_HZ, 115200u);
+    USART3->CTLR1 = USART_WordLength_9b | USART_Parity_Even | USART_Mode_Tx | USART_Mode_Rx |
+                    USART_CTLR1_RXNEIE;
 
-    uart.USART_BaudRate = 115200u;
-    uart.USART_WordLength = USART_WordLength_9b;
-    uart.USART_StopBits = USART_StopBits_1;
-    uart.USART_Parity = USART_Parity_Even;
-    uart.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-    uart.USART_Mode = USART_Mode_Tx | USART_Mode_Rx;
-    USART_Init(USART3, &uart);
-    USART_ITConfig(USART3, USART_IT_RXNE, ENABLE);
+    nvic_enable(USART3_IRQn, 1u, 1u);
 
-    nvic.NVIC_IRQChannel = USART3_IRQn;
-    nvic.NVIC_IRQChannelPreemptionPriority = 1u;
-    nvic.NVIC_IRQChannelSubPriority = 1u;
-    nvic.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&nvic);
+    // DMA1 channel 2: USART3 TX, memory to peripheral, bytes, low priority.
+    dma_channel_setup(DMA1_Channel2, DMA1_FLAG_GL2 | DMA1_FLAG_TC2 | DMA1_FLAG_HT2 | DMA1_FLAG_TE2,
+                      DMA_DIR_PeripheralDST | DMA_MemoryInc_Enable | DMA_Priority_Low,
+                      reinterpret_cast<uint32_t>(&USART3->DATAR),
+                      reinterpret_cast<uint32_t>(g_tx[0].data), 1u);
 
-    dma.DMA_PeripheralBaseAddr = reinterpret_cast<uint32_t>(&USART3->DATAR);
-    dma.DMA_MemoryBaseAddr = reinterpret_cast<uint32_t>(g_tx[0].data);
-    dma.DMA_DIR = DMA_DIR_PeripheralDST;
-    dma.DMA_BufferSize = 1u;
-    dma.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-    dma.DMA_MemoryInc = DMA_MemoryInc_Enable;
-    dma.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-    dma.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-    dma.DMA_Mode = DMA_Mode_Normal;
-    dma.DMA_Priority = DMA_Priority_Low;
-    dma.DMA_M2M = DMA_M2M_Disable;
-    DMA_Cmd(DMA1_Channel2, DISABLE);
-    DMA_DeInit(DMA1_Channel2);
-    DMA_Init(DMA1_Channel2, &dma);
-
-    USART_Cmd(USART3, ENABLE);
-    USART_DMACmd(USART3, USART_DMAReq_Tx, ENABLE);
+    USART3->CTLR1 |= USART_CTLR1_UE;
+    USART3->CTLR3 |= USART_DMAReq_Tx;
     g_link_diag = kDiagInit;
     g_last_led_tick = time_ticks32();
     g_status_dirty = BMCU_STATUS_CHANGE_ALL;

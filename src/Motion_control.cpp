@@ -18,6 +18,8 @@
 #include "dm_autoload_retry_policy.h"
 #include "unload_hold_policy.h"
 #include "outlet_guard_policy.h"
+#include "sensor_fixed.h"
+#include "hal/periph_regs.h"
 
 // Aliased rather than opened with a using-directive: this file is large and
 // the protocol namespace carries names like SENSOR_* and STATE_FIELD_* that
@@ -48,31 +50,7 @@ static inline uint8_t inserted_mask()
     return mask;
 }
 
-static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
-static inline float clampf(float x, float a, float b)
-{
-    if (x < a) return a;
-    if (x > b) return b;
-    return x;
-}
-
-static inline uint8_t dm_key_v_to_centi_ceil(float v)
-{
-    if (v <= 0.0f) return 0u;
-
-    float x = v * 100.0f - 0.0001f;
-    int iv = (int)x;
-    if ((float)iv < x) iv++;
-
-    if (iv < 0) iv = 0;
-    if (iv > 255) iv = 255;
-    return (uint8_t)iv;
-}
-
-static inline float dm_key_centi_to_v(uint8_t cv)
-{
-    return 0.01f * (float)cv;
-}
+using sensor_fixed::dmv;
 
 static uint32_t g_time_last_ticks32 = 0u;
 static uint32_t g_time_rem_ticks32 = 0u;
@@ -165,7 +143,6 @@ static constexpr float    kAS5600_PI = 3.14159265358979323846f;
 // stała do przeliczenia AS5600 - liczona raz
 static constexpr float kAS5600_MM_PER_CNT = -(kAS5600_PI * 7.5f) / 4096.0f;
 static constexpr float kAS5600_COUNTS_PER_M = 1000.0f / (-kAS5600_MM_PER_CNT);
-static constexpr float kAS5600_M_PER_CNT = (-kAS5600_MM_PER_CNT) * 0.001f;
 
 static constexpr int32_t distance_m_to_counts(float meters)
 {
@@ -241,27 +218,23 @@ static int32_t g_pull_speed_set_q[4] = {
 };
 static int16_t g_pull_pwm_floor[4] = {500,500,500,500};
 
-float MC_PULL_V_OFFSET[4]      = {0.0f, 0.0f, 0.0f, 0.0f};
-float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
-float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
+int32_t MC_PULL_V_OFFSET[4]    = {0, 0, 0, 0};
+int32_t MC_PULL_V_MIN[4]       = {dmv(1.00), dmv(1.00), dmv(1.00), dmv(1.00)};
+int32_t MC_PULL_V_MAX[4]       = {dmv(2.00), dmv(2.00), dmv(2.00), dmv(2.00)};
 int8_t MC_PULL_POLARITY[4]     = {1, 1, 1, 1};
-float MC_DM_KEY_NONE_THRESH[4] = {0.60f, 0.60f, 0.60f, 0.60f};
+int32_t MC_DM_KEY_NONE_THRESH[4] = {dmv(0.60), dmv(0.60), dmv(0.60), dmv(0.60)};
 
-// Last raw online-key reading per channel, in volts. Only ever written by the
+// Last raw online-key reading per channel, in 0.1 mV. Only ever written by the
 // ADC read and only ever read by the link accessor below; the control paths
 // keep using their own locals.
-static float g_dm_key_v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+static int32_t g_dm_key_v[4] = {0, 0, 0, 0};
 
 uint8_t MC_PULL_pct[4]        = {50, 50, 50, 50};
 static int16_t MC_PULL_pct_q[4] = {5000, 5000, 5000, 5000}; // 0.01 percent
 
-static float  MC_PULL_stu_raw[4]        = {1.65f, 1.65f, 1.65f, 1.65f};
+static int32_t MC_PULL_stu_raw[4]       = {sensor_fixed::kCenter, sensor_fixed::kCenter,
+                                            sensor_fixed::kCenter, sensor_fixed::kCenter};
 static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
-static float  g_pull_low_scale[4]       = {0,0,0,0};
-static float  g_pull_high_scale[4]      = {0,0,0,0};
-static float  g_pull_cached_vmin[4]     = {0,0,0,0};
-static float  g_pull_cached_vmax[4]     = {0,0,0,0};
-static uint8_t g_pull_scale_valid_mask  = 0u;
 
 static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
 static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
@@ -269,7 +242,7 @@ static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06
 static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};
 static uint32_t g_on_use_low_since_ms[4] = {0u, 0u, 0u, 0u}; // on_use_jam_policy.h
 
-static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(
+static __attribute__((noinline)) void MC_STU_RGB_set_latch(
     uint8_t ch, uint8_t r, uint8_t g, uint8_t b, uint32_t now_ms, uint8_t blink)
 {
     if (!g_on_use_low_latch[ch]) { MC_STU_RGB_set(ch, r, g, b); return; }
@@ -281,13 +254,13 @@ static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(
 }
 
 #if BMCU_DM_TWO_MICROSWITCH
-static inline uint8_t dm_key_to_state(uint8_t ch, float v)
+static inline uint8_t dm_key_to_state(uint8_t ch, int32_t v)
 {
-    const float none_thr = MC_DM_KEY_NONE_THRESH[ch];
+    const int32_t none_thr = MC_DM_KEY_NONE_THRESH[ch];
 
-    if (v < none_thr) return 0u;   // none
-    if (v > 1.7f)     return 1u;   // both
-    if (v > 1.4f)     return 2u;   // external only
+    if (v < none_thr)  return 0u;   // none
+    if (v > dmv(1.7))  return 1u;   // both
+    if (v > dmv(1.4))  return 2u;   // external only
     return 3u;
 }
 
@@ -491,8 +464,8 @@ static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 
 static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
 static constexpr int      CAL_RESET_PCT_THRESH  = 15;
-static constexpr float    CAL_RESET_V_DELTA     = 0.10f;
-static constexpr float    CAL_RESET_NEAR_MIN    = 0.03f;
+static constexpr int32_t  CAL_RESET_V_DELTA     = dmv(0.10);
+static constexpr int32_t  CAL_RESET_NEAR_MIN    = dmv(0.03);
 
 static int      g_hold_ch = -1;
 static uint32_t g_hold_t0_ticks = 0;
@@ -806,41 +779,9 @@ static __attribute__((noinline, cold)) void calibration_reset_and_reboot()
     NVIC_SystemReset();
 }
 
-static float pull_v_to_percent_f(uint8_t ch, float v)
+static inline int32_t pull_v_apply_polarity(uint8_t ch, int32_t v)
 {
-    constexpr float c = 1.65f;
-
-    float vmin = MC_PULL_V_MIN[ch];
-    float vmax = MC_PULL_V_MAX[ch];
-
-    if (vmin > 1.60f) vmin = 1.60f;
-    if (vmax < 1.70f) vmax = 1.70f;
-    if (vmax <= (vmin + 0.10f)) { vmin = 1.55f; vmax = 1.75f; }
-
-    const uint8_t bit = static_cast<uint8_t>(1u << ch);
-    if ((g_pull_scale_valid_mask & bit) == 0u ||
-        g_pull_cached_vmin[ch] != vmin || g_pull_cached_vmax[ch] != vmax)
-    {
-        float low_den = c - vmin;
-        float high_den = vmax - c;
-        if (low_den < 0.05f) low_den = 0.05f;
-        if (high_den < 0.05f) high_den = 0.05f;
-        g_pull_low_scale[ch] = 0.5f / low_den;
-        g_pull_high_scale[ch] = 0.5f / high_den;
-        g_pull_cached_vmin[ch] = vmin;
-        g_pull_cached_vmax[ch] = vmax;
-        g_pull_scale_valid_mask |= bit;
-    }
-
-    if (v <= c)
-        return clampf((v - vmin) * g_pull_low_scale[ch], 0.0f, 1.0f) * 100.0f;
-
-    return clampf(0.5f + (v - c) * g_pull_high_scale[ch], 0.0f, 1.0f) * 100.0f;
-}
-
-static inline float pull_v_apply_polarity(uint8_t ch, float v)
-{
-    if (MC_PULL_POLARITY[ch] < 0) return 3.30f - v;
+    if (MC_PULL_POLARITY[ch] < 0) return sensor_fixed::kFullScale - v;
     return v;
 }
 
@@ -861,24 +802,18 @@ void MC_PULL_detect_channels_inserted()
 
     constexpr uint8_t idx[kChCount] = {6,4,2,0};
     constexpr int N = 16;
-    float s[kChCount] = {0,0,0,0};
+    int32_t s[kChCount] = {0,0,0,0};
 
     for (int i = 0; i < N; i++)
     {
-        const float *v = ADC_DMA_get_value();
+        const int32_t *v = ADC_DMA_get_value();
         for (uint8_t ch = 0; ch < kChCount; ch++) s[ch] += v[idx[ch]];
         delay(2);
     }
 
-    constexpr float VMIN = 0.30f;
-    constexpr float VMAX = 3.00f;
-    constexpr float invN = 1.0f / (float)N;
-
+    // The mean must lie strictly inside 0.30..3.00 V.
     for (uint8_t ch = 0; ch < kChCount; ch++)
-    {
-        const float a = s[ch] * invN;
-        filament_channel_inserted[ch] = (a > VMIN) && (a < VMAX);
-    }
+        filament_channel_inserted[ch] = (s[ch] > N * dmv(0.30)) && (s[ch] < N * dmv(3.00));
     if (before_mask != inserted_mask())
         bmcu_link_status_changed(BMCU_STATUS_CHANGE_INSERTED);
 }
@@ -890,20 +825,20 @@ static inline void MC_PULL_ONLINE_init()
 
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
-    const float *data = ADC_DMA_get_value();
+    const int32_t *data = ADC_DMA_get_value();
 
     // mapowanie ADC -> kanały
     MC_PULL_stu_raw[3] = pull_v_apply_polarity(3u, data[0] + MC_PULL_V_OFFSET[3]);
-    const float key3   = data[1];
+    const int32_t key3 = data[1];
 
     MC_PULL_stu_raw[2] = pull_v_apply_polarity(2u, data[2] + MC_PULL_V_OFFSET[2]);
-    const float key2   = data[3];
+    const int32_t key2 = data[3];
 
     MC_PULL_stu_raw[1] = pull_v_apply_polarity(1u, data[4] + MC_PULL_V_OFFSET[1]);
-    const float key1   = data[5];
+    const int32_t key1 = data[5];
 
     MC_PULL_stu_raw[0] = pull_v_apply_polarity(0u, data[6] + MC_PULL_V_OFFSET[0]);
-    const float key0   = data[7];
+    const int32_t key0 = data[7];
 
     // Quantize the calibrated ADC value once per channel. All gesture and
     // control logic below consumes the cached 0.01% representation.
@@ -915,11 +850,8 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
             continue;
         }
 
-        const float pct_f = pull_v_to_percent_f(i, MC_PULL_stu_raw[i]);
-        int32_t pct_q = static_cast<int32_t>(pct_f * 100.0f + 0.5f);
-        if (pct_q < 0) pct_q = 0;
-        if (pct_q > 10000) pct_q = 10000;
-        MC_PULL_pct_q[i] = static_cast<int16_t>(pct_q);
+        MC_PULL_pct_q[i] = sensor_fixed::pull_dmv_to_pct_q(
+            MC_PULL_stu_raw[i], MC_PULL_V_MIN[i], MC_PULL_V_MAX[i]);
     }
 
     // Kept so the link can report what dm_key_to_state actually saw. Everything
@@ -929,7 +861,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
     g_dm_key_v[2] = key2; g_dm_key_v[3] = key3;
 
 #if BMCU_DM_TWO_MICROSWITCH
-    const float keyv[4] = { key0, key1, key2, key3 };
+    const int32_t keyv[4] = { key0, key1, key2, key3 };
 
     // --- Buffer Gesture Load  ---
     static uint32_t gst_t0_ticks[4]     = {0,0,0,0};
@@ -995,7 +927,7 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 
         if (gst_active[i])
         {
-            if (keyv[i] > 1.7f) gst_active[i] = false;
+            if (keyv[i] > dmv(1.7)) gst_active[i] = false;
             else if ((uint32_t)(now_ticks - gst_act_t0_ticks[i]) > T5500) gst_active[i] = false;
         }
 
@@ -1009,10 +941,10 @@ static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
     // --- End Buffer Gesture Load  ---
 #else
     // online key: tylko jeśli kanał fizycznie wpięty
-    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1.7f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > 1.7f)) ? 1u : 0u;
+    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > dmv(1.7))) ? 1u : 0u;
+    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > dmv(1.7))) ? 1u : 0u;
+    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > dmv(1.7))) ? 1u : 0u;
+    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > dmv(1.7))) ? 1u : 0u;
 #endif
 
 
@@ -1081,7 +1013,7 @@ static inline void Motion_control_apply_saved()
         if (Motion_control_data_save.dm_key_none_cv[i] < 60u)
             Motion_control_data_save.dm_key_none_cv[i] = 60u;
 
-        MC_DM_KEY_NONE_THRESH[i] = dm_key_centi_to_v(Motion_control_data_save.dm_key_none_cv[i]);
+        MC_DM_KEY_NONE_THRESH[i] = sensor_fixed::centi_to_dmv(Motion_control_data_save.dm_key_none_cv[i]);
     }
 }
 
@@ -1112,7 +1044,7 @@ static inline bool Motion_control_save()
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        uint8_t cv = dm_key_v_to_centi_ceil(MC_DM_KEY_NONE_THRESH[i]);
+        uint8_t cv = sensor_fixed::dmv_to_centi_ceil(MC_DM_KEY_NONE_THRESH[i]);
         if (cv < 60u) cv = 60u;
         Motion_control_data_save.dm_key_none_cv[i] = cv;
     }
@@ -1122,7 +1054,7 @@ static inline bool Motion_control_save()
 
 bool Motion_control_save_dm_key_none_thresholds(void)
 {
-    float thr[4];
+    int32_t thr[4];
     for (uint8_t i = 0; i < kChCount; i++)
         thr[i] = MC_DM_KEY_NONE_THRESH[i];
 
@@ -3841,11 +3773,11 @@ void Motion_control_run(int error)
             if (!filament_channel_inserted[ch]) continue;
 
             const int   pct = (int)MC_PULL_pct[ch];
-            const float v   = MC_PULL_stu_raw[ch];
+            const int32_t v = MC_PULL_stu_raw[ch];
 
             const bool hard_blue =
                 (pct <= CAL_RESET_PCT_THRESH) ||
-                (v <= (1.65f - CAL_RESET_V_DELTA)) ||
+                (v <= (sensor_fixed::kCenter - CAL_RESET_V_DELTA)) ||
                 (v <= (MC_PULL_V_MIN[ch] + CAL_RESET_NEAR_MIN));
 
             if (hard_blue) { pressed = (int)ch; break; }
@@ -3913,9 +3845,11 @@ void Motion_control_run(int error)
 
 float Motion_control_get_filament_meters(uint8_t channel)
 {
-    if (channel >= kChCount) return 0.0f;
-    return 1.0f - static_cast<float>(g_filament_position_counts[channel]) *
-                      kAS5600_M_PER_CNT;
+    const uint32_t bits = (channel < kChCount)
+        ? sensor_fixed::filament_meters_bits(g_filament_position_counts[channel]) : 0u;
+    float meters;
+    memcpy(&meters, &bits, sizeof(meters));
+    return meters;
 }
 
 bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelTelemetry* output)
@@ -3932,19 +3866,12 @@ bool Motion_control_get_channel_telemetry(uint8_t channel, MotionControlChannelT
     return true;
 }
 
-static inline uint16_t volts_to_mv_saturating(float v)
-{
-    if (!(v > 0.0f)) return 0u;            // also catches NaN
-    const float mv = v * 1000.0f + 0.5f;
-    return (mv >= 65535.0f) ? 65535u : static_cast<uint16_t>(mv);
-}
-
 void Motion_control_get_dm_key_millivolts(uint16_t key_mv[4], uint16_t none_thr_mv[4])
 {
     for (uint8_t i = 0; i < kChCount; ++i)
     {
-        key_mv[i] = volts_to_mv_saturating(g_dm_key_v[i]);
-        none_thr_mv[i] = volts_to_mv_saturating(MC_DM_KEY_NONE_THRESH[i]);
+        key_mv[i] = sensor_fixed::dmv_to_mv_saturating(g_dm_key_v[i]);
+        none_thr_mv[i] = sensor_fixed::dmv_to_mv_saturating(MC_DM_KEY_NONE_THRESH[i]);
     }
 }
 
@@ -4005,82 +3932,49 @@ bool Motion_control_is_reset_safe(void)
 }
 
 // ===== PWM init =====
+// TIM2/TIM3 CH1+CH2 and TIM4 CH1..CH4: PWM mode 1, active high, compare
+// preload on, period 1000 counts, prescaler 2, compare 0. The timers start
+// only after the pin remap below.
+static void pwm_timer_setup(TIM_TypeDef* t, bool four_channels)
+{
+    constexpr uint16_t kPwm1Preload = TIM_OCMode_PWM1 | TIM_OCPreload_Enable;   // channel 1
+    constexpr uint16_t kTwo = kPwm1Preload | (uint16_t)(kPwm1Preload << 8);      // channels 1+2
+
+    t->ATRLR = 999u;
+    t->PSC = 1u;
+    t->SWEVGR = TIM_UG;
+    t->CHCTLR1 = kTwo;
+    if (four_channels) t->CHCTLR2 = kTwo;
+    t->CCER = four_channels ? (TIM_CC1E | TIM_CC2E | TIM_CC3E | TIM_CC4E) : (TIM_CC1E | TIM_CC2E);
+}
+
 void MC_PWM_init()
 {
-    GPIO_InitTypeDef GPIO_InitStructure;
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB;
 
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB, ENABLE);
+    gpio_config(GPIOB, GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_5 | GPIO_Pin_6 |
+                       GPIO_Pin_7 | GPIO_Pin_8 | GPIO_Pin_9, GPIO_CFG_AF_PP);
+    gpio_config(GPIOA, GPIO_Pin_15, GPIO_CFG_AF_PP);
 
-    GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_5 |
-                                    GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8 | GPIO_Pin_9;
-    GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_Init(GPIOB, &GPIO_InitStructure);
+    RCC->APB2PCENR |= RCC_APB2Periph_AFIO;
+    RCC->APB1PCENR |= RCC_APB1Periph_TIM2 | RCC_APB1Periph_TIM3 | RCC_APB1Periph_TIM4;
 
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_15;
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE);
-    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM4, ENABLE);
-
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseStructure;
-    TIM_OCInitTypeDef TIM_OCInitStructure;
-
-    TIM_TimeBaseStructure.TIM_Period        = 999;
-    TIM_TimeBaseStructure.TIM_Prescaler     = 1;
-    TIM_TimeBaseStructure.TIM_ClockDivision = 0;
-    TIM_TimeBaseStructure.TIM_CounterMode   = TIM_CounterMode_Up;
-
-    TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
-    TIM_TimeBaseInit(TIM3, &TIM_TimeBaseStructure);
-    TIM_TimeBaseInit(TIM4, &TIM_TimeBaseStructure);
-
-    TIM_OCInitStructure.TIM_OCMode      = TIM_OCMode_PWM1;
-    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
-    TIM_OCInitStructure.TIM_Pulse       = 0;
-    TIM_OCInitStructure.TIM_OCPolarity  = TIM_OCPolarity_High;
-
-    TIM_OC1Init(TIM2, &TIM_OCInitStructure);
-    TIM_OC2Init(TIM2, &TIM_OCInitStructure);
-
-    TIM_OC1Init(TIM3, &TIM_OCInitStructure);
-    TIM_OC2Init(TIM3, &TIM_OCInitStructure);
-
-    TIM_OC1Init(TIM4, &TIM_OCInitStructure);
-    TIM_OC2Init(TIM4, &TIM_OCInitStructure);
-    TIM_OC3Init(TIM4, &TIM_OCInitStructure);
-    TIM_OC4Init(TIM4, &TIM_OCInitStructure);
-
-    TIM_OC1PreloadConfig(TIM2, TIM_OCPreload_Enable);
-    TIM_OC2PreloadConfig(TIM2, TIM_OCPreload_Enable);
-
-    TIM_OC1PreloadConfig(TIM3, TIM_OCPreload_Enable);
-    TIM_OC2PreloadConfig(TIM3, TIM_OCPreload_Enable);
-
-    TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
-    TIM_OC2PreloadConfig(TIM4, TIM_OCPreload_Enable);
-    TIM_OC3PreloadConfig(TIM4, TIM_OCPreload_Enable);
-    TIM_OC4PreloadConfig(TIM4, TIM_OCPreload_Enable);
+    pwm_timer_setup(TIM2, false);
+    pwm_timer_setup(TIM3, false);
+    pwm_timer_setup(TIM4, true);
 
     // CH1/CH2 still map to PA15/PB3, while CH3/CH4 stay off PB10/PB11.
     // PB10/PB11 are the dedicated H1 USART3 monitor/control link.
-    GPIO_PinRemapConfig(GPIO_PartialRemap1_TIM2, ENABLE);
-    GPIO_PinRemapConfig(GPIO_PartialRemap_TIM3, ENABLE);
-    GPIO_PinRemapConfig(GPIO_Remap_TIM4, DISABLE);
+    // TIM2 partial remap 1, TIM3 partial remap, TIM4 not remapped.
+    AFIO->PCFR1 = PERIPH_PCFR1_BASE | AFIO_PCFR1_TIM2_REMAP_PARTIALREMAP1 |
+                  AFIO_PCFR1_TIM3_REMAP_PARTIALREMAP;
 
-    TIM_CtrlPWMOutputs(TIM2, ENABLE);
-    TIM_ARRPreloadConfig(TIM2, ENABLE);
-    TIM_Cmd(TIM2, ENABLE);
-
-    TIM_CtrlPWMOutputs(TIM3, ENABLE);
-    TIM_ARRPreloadConfig(TIM3, ENABLE);
-    TIM_Cmd(TIM3, ENABLE);
-
-    TIM_CtrlPWMOutputs(TIM4, ENABLE);
-    TIM_ARRPreloadConfig(TIM4, ENABLE);
-    TIM_Cmd(TIM4, ENABLE);
+    TIM_TypeDef* const timers[3] = {TIM2, TIM3, TIM4};
+    for (TIM_TypeDef* t : timers)
+    {
+        t->BDTR |= TIM_MOE;
+        t->CTLR1 = TIM_ARPE | TIM_CEN;
+    }
 }
 
 // różnica kątów
@@ -4213,7 +4107,7 @@ static void MOTOR_init()
 {
     MC_PWM_init();
 
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD, ENABLE);
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD;
 
     MOTOR_get_dir();
 

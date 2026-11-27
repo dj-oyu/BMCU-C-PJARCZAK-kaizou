@@ -8,12 +8,12 @@
 #include "ch32v20x_misc.h"
 #include "core_riscv.h"
 #include "hal/irq_wch.h"
+#include "hal/periph_regs.h"
 #include "crc_bus.h"
 #include "printer_rx_framer.h"
 
 uint16_t bus_host_device_type=0x0000;
 
-DMA_InitTypeDef bus_uart1_dma_init_structure;
 namespace
 {
 constexpr uint32_t kPrinterTxTimeoutMs = 25u;
@@ -195,7 +195,7 @@ _bus_port_deal bus_port_to_host;
 
 void bus_init()
 {
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
+    RCC->AHBPCENR |= RCC_AHBPeriph_CRC;
     bus_crc_init();
     bus_port_to_host.init(bus_port_to_host_send_func);
     bus_uart1_init();
@@ -203,97 +203,54 @@ void bus_init()
 
 void bus_uart1_init()
 {
-    GPIO_InitTypeDef GPIO_InitStructure = {0};
-    USART_InitTypeDef USART_InitStructure = {0};
-    NVIC_InitTypeDef NVIC_InitStructure = {0};
-
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+    RCC->APB2PCENR |= RCC_APB2Periph_USART1 | RCC_APB2Periph_GPIOA;
+    RCC->AHBPCENR |= RCC_AHBPeriph_DMA1;
 
     /* USART1 TX-->A.9   RX-->A.10   DE-->A.12*/
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9; // TX
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10; // RX
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
-    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_12; // DE
-    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
-    GPIO_Init(GPIOA, &GPIO_InitStructure);
+    gpio_config(GPIOA, GPIO_Pin_9, GPIO_CFG_AF_PP);
+    gpio_config(GPIOA, GPIO_Pin_10, GPIO_CFG_IN_PU);
+    gpio_config(GPIOA, GPIO_Pin_12, GPIO_CFG_OUT_PP);
     GPIOA->BCR = GPIO_Pin_12;
 
-    USART_InitStructure.USART_BaudRate = 1250000;
-    USART_InitStructure.USART_WordLength = USART_WordLength_9b;
-    USART_InitStructure.USART_StopBits = USART_StopBits_1;
-    USART_InitStructure.USART_Parity = USART_Parity_Even;
-    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-    USART_InitStructure.USART_Mode = USART_Mode_Tx | USART_Mode_Rx;
-
-    USART_Init(USART1, &USART_InitStructure);
-#if BMCU_PRINTER_RX_DMA
-    USART_ITConfig(USART1, USART_IT_RXNE, DISABLE);
-#else
-    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+    // 1.25 Mbaud, 9 data bits (8 + even parity), 1 stop bit, no flow control.
+    USART1->CTLR2 = 0u;
+    USART1->CTLR3 = 0u;
+    USART1->BRR = PERIPH_USART_BRR(PERIPH_PCLK2_HZ, 1250000u);
+    USART1->CTLR1 = USART_WordLength_9b | USART_Parity_Even | USART_Mode_Tx | USART_Mode_Rx |
+#if !BMCU_PRINTER_RX_DMA
+                    USART_CTLR1_RXNEIE |
 #endif
-    USART_ITConfig(USART1, USART_IT_TC, ENABLE);
+                    USART_CTLR1_TCIE;
 #if BMCU_PRINTER_RX_DMA
-    USART_ITConfig(USART1, USART_IT_ERR, ENABLE);
+    USART1->CTLR3 = USART_CTLR3_EIE;
 #endif
 
-    NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
+    nvic_enable(USART1_IRQn, 0u, 0u);
 
-    // Configure DMA1 channel 4 for USART1 TX
-    bus_uart1_dma_init_structure.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DATAR;
-    bus_uart1_dma_init_structure.DMA_MemoryBaseAddr = (uint32_t)0;
-    bus_uart1_dma_init_structure.DMA_DIR = DMA_DIR_PeripheralDST;
-    bus_uart1_dma_init_structure.DMA_Mode = DMA_Mode_Normal;
-    bus_uart1_dma_init_structure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-    bus_uart1_dma_init_structure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-    bus_uart1_dma_init_structure.DMA_Priority = DMA_Priority_VeryHigh;
-    bus_uart1_dma_init_structure.DMA_M2M = DMA_M2M_Disable;
-    bus_uart1_dma_init_structure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-    bus_uart1_dma_init_structure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-    bus_uart1_dma_init_structure.DMA_BufferSize = 0;
-    DMA_Init(DMA1_Channel4, &bus_uart1_dma_init_structure);
+    // DMA1 channel 4: USART1 TX, memory to peripheral, bytes, very high priority.
+    // bus_uart1_dma_send() fills in the address and count.
+    dma_channel_setup(DMA1_Channel4, DMA1_FLAG_GL4 | DMA1_FLAG_TC4 | DMA1_FLAG_HT4 | DMA1_FLAG_TE4,
+                      DMA_DIR_PeripheralDST | DMA_MemoryInc_Enable | DMA_Priority_VeryHigh,
+                      (uint32_t)&USART1->DATAR, 0u, 0u);
 
 #if BMCU_PRINTER_RX_DMA
-    DMA_InitTypeDef rx_dma = {0};
-    rx_dma.DMA_PeripheralBaseAddr = (uint32_t)&USART1->DATAR;
-    rx_dma.DMA_MemoryBaseAddr = (uint32_t)g_printer_rx_dma_ring;
-    rx_dma.DMA_DIR = DMA_DIR_PeripheralSRC;
-    rx_dma.DMA_BufferSize = kPrinterRxDmaSize;
-    rx_dma.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-    rx_dma.DMA_MemoryInc = DMA_MemoryInc_Enable;
-    rx_dma.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-    rx_dma.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-    rx_dma.DMA_Mode = DMA_Mode_Circular;
-    rx_dma.DMA_Priority = DMA_Priority_VeryHigh;
-    rx_dma.DMA_M2M = DMA_M2M_Disable;
-    DMA_DeInit(DMA1_Channel5);
-    DMA_Init(DMA1_Channel5, &rx_dma);
+    // DMA1 channel 5: USART1 RX into the circular ring, with half/full/error
+    // interrupts.
+    dma_channel_setup(DMA1_Channel5, DMA1_FLAG_GL5 | DMA1_FLAG_TC5 | DMA1_FLAG_HT5 | DMA1_FLAG_TE5,
+                      DMA_DIR_PeripheralSRC | DMA_MemoryInc_Enable | DMA_Mode_Circular |
+                      DMA_Priority_VeryHigh | DMA_IT_HT | DMA_IT_TC | DMA_IT_TE,
+                      (uint32_t)&USART1->DATAR, (uint32_t)g_printer_rx_dma_ring, kPrinterRxDmaSize);
     DMA1->INTFCR = DMA1_FLAG_GL5 | DMA1_FLAG_HT5 | DMA1_FLAG_TC5 | DMA1_FLAG_TE5;
-    DMA_ITConfig(DMA1_Channel5, DMA_IT_HT | DMA_IT_TC | DMA_IT_TE, ENABLE);
 
-    NVIC_InitStructure.NVIC_IRQChannel = DMA1_Channel5_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
+    nvic_enable(DMA1_Channel5_IRQn, 0u, 1u);
 
     g_printer_rx_dma_half_events = 0u;
     set_dma_cursors(0u);
-    DMA_Cmd(DMA1_Channel5, ENABLE);
-    USART_DMACmd(USART1, USART_DMAReq_Rx, ENABLE);
+    DMA1_Channel5->CFGR |= DMA_CFGR1_EN;
+    USART1->CTLR3 |= USART_DMAReq_Rx;
 #endif
 
-    USART_Cmd(USART1, ENABLE);
+    USART1->CTLR1 |= USART_CTLR1_UE;
 }
 
 bool bus_uart1_rx_transport_quiet()

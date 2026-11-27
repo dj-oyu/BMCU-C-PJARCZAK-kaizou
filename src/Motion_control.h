@@ -53,12 +53,13 @@ float Motion_control_get_filament_meters(uint8_t channel);
 void MC_PULL_detect_channels_inserted();
 
 // Externy
-extern float   MC_PULL_V_OFFSET[4];
-extern float   MC_PULL_V_MIN[4];
-extern float   MC_PULL_V_MAX[4];
+// Calibration and thresholds in 0.1 mV; see sensor_fixed.h.
+extern int32_t MC_PULL_V_OFFSET[4];
+extern int32_t MC_PULL_V_MIN[4];
+extern int32_t MC_PULL_V_MAX[4];
 extern uint8_t MC_PULL_pct[4];
 extern int8_t  MC_PULL_POLARITY[4];
-extern float   MC_DM_KEY_NONE_THRESH[4];
+extern int32_t MC_DM_KEY_NONE_THRESH[4];
 extern bool    filament_channel_inserted[4];
 
 // platformio.ini: -DBAMBU_BUS_AMS_NUM

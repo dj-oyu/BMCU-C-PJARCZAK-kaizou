@@ -35,7 +35,7 @@ ahubus_package_type ahubus_get_package_type(uint8_t *package_recv_buf)
 }
 void ahubus_init()
 {
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
+    RCC->AHBPCENR |= RCC_AHBPeriph_CRC;
 }
 
 int ahubus_package_add_crc(uint8_t *buf)

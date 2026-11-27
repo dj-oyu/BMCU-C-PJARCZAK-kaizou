@@ -6,7 +6,9 @@
 #include "Debug_log.h"
 #include "app_api.h"
 #include "bmcu_link.h"
-#include <math.h>
+#include "sensor_fixed.h"
+
+using sensor_fixed::dmv;
 
 extern void RGB_update();
 
@@ -34,65 +36,44 @@ void calibration_wait(uint32_t milliseconds)
 }
 }
 
-static inline float adc_pull_raw_ch(int ch, const float *v8)
+// All voltages below are in 0.1 mV; see sensor_fixed.h.
+static inline int32_t adc_pull_raw_ch(int ch, const int32_t *v8)
 {
     switch (ch)
     {
-    case 0: return (float)v8[6];
-    case 1: return (float)v8[4];
-    case 2: return (float)v8[2];
-    default:return (float)v8[0];
+    case 0: return v8[6];
+    case 1: return v8[4];
+    case 2: return v8[2];
+    default:return v8[0];
     }
 }
 
-static inline float adc_key_raw_ch(int ch, const float *v8)
+static inline int32_t adc_key_raw_ch(int ch, const int32_t *v8)
 {
     switch (ch)
     {
-    case 0: return (float)v8[7];
-    case 1: return (float)v8[5];
-    case 2: return (float)v8[3];
-    default:return (float)v8[1];
+    case 0: return v8[7];
+    case 1: return v8[5];
+    case 2: return v8[3];
+    default:return v8[1];
     }
 }
 
-static inline uint8_t dm_key_round_up_to_centi(float v)
+static inline int32_t adc_pull_v_centered(int ch)
 {
-    if (v <= 0.0f) return 0u;
-
-    float x = v * 100.0f - 0.0001f;
-    int iv = (int)x;
-    if ((float)iv < x) iv++;
-
-    if (iv < 0) iv = 0;
-    if (iv > 255) iv = 255;
-    return (uint8_t)iv;
-}
-
-static inline float dm_key_none_threshold_from_idle(float key_value)
-{
-    const uint8_t key_cv = dm_key_round_up_to_centi(key_value);
-
-    uint8_t thr_cv = (uint8_t)(key_cv + 10u);
-    if (thr_cv < 60u) thr_cv = 60u;
-    if (thr_cv > 139u) thr_cv = 139u;
-
-    return 0.01f * (float)thr_cv;
-}
-
-static inline float adc_pull_v_centered(int ch)
-{
-    const float *d = ADC_DMA_get_value();
+    const int32_t *d = ADC_DMA_get_value();
     return adc_pull_raw_ch(ch, d) + MC_PULL_V_OFFSET[ch];
 }
 
-static inline float cal_apply_polarity(float v, int8_t pol)
+static inline int32_t cal_apply_polarity(int32_t v, int8_t pol)
 {
-    return (pol < 0) ? (3.30f - v) : v;
+    return (pol < 0) ? (sensor_fixed::kFullScale - v) : v;
 }
 
-static const float    CAL_PRESS_DELTA_V = 0.1f;
-static const float    CAL_CENTER_EPS_V  = 0.02f;
+static inline int32_t abs_dmv(int32_t v) { return v < 0 ? -v : v; }
+
+static constexpr int32_t CAL_PRESS_DELTA_V = dmv(0.1);
+static constexpr int32_t CAL_CENTER_EPS_V  = dmv(0.02);
 static const uint32_t CAL_STABLE_MS     = 200;
 static const uint32_t CAL_TIMEOUT_MS    = 30000;
 
@@ -128,15 +109,15 @@ static void show_diag_step(uint8_t r, uint8_t g, uint8_t b, int on_ms = 360, int
     calibration_wait(off_ms);
 }
 
-static bool capture_first_extreme_wait_release(int ch, float center_v, float &out_best_norm, int8_t &out_pol)
+static bool capture_first_extreme_wait_release(int ch, int32_t center_v, int32_t &out_best_norm, int8_t &out_pol)
 {
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
     const uint32_t dt  = (uint32_t)CAL_TIMEOUT_MS * tpm;
 
     bool pressed = false;
-    float raw_min = center_v;
-    float raw_max = center_v;
+    int32_t raw_min = center_v;
+    int32_t raw_max = center_v;
     uint32_t stable_t0 = 0u;
 
     out_best_norm = center_v;
@@ -147,7 +128,7 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
         const uint32_t now_t = time_ticks32();
         if ((uint32_t)(now_t - t0) >= dt) break;
 
-        const float v = adc_pull_v_centered(ch);
+        const int32_t v = adc_pull_v_centered(ch);
 
         const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
         if (((elapsed_ms / 200u) & 1u) == 0u) MC_PULL_ONLINE_RGB_set(ch, 0x00, 0x00, 0x10);
@@ -156,7 +137,7 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
 
         if (!pressed)
         {
-            if (fabsf(v - center_v) >= CAL_PRESS_DELTA_V)
+            if (abs_dmv(v - center_v) >= CAL_PRESS_DELTA_V)
             {
                 pressed = true;
                 raw_min = v;
@@ -168,13 +149,13 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
             if (v < raw_min) raw_min = v;
             if (v > raw_max) raw_max = v;
 
-            if (fabsf(v - center_v) <= CAL_CENTER_EPS_V)
+            if (abs_dmv(v - center_v) <= CAL_CENTER_EPS_V)
             {
                 if (stable_t0 == 0u) stable_t0 = now_t;
                 if ((uint32_t)(now_t - stable_t0) >= (uint32_t)CAL_STABLE_MS * tpm)
                 {
-                    const float dmin = center_v - raw_min;
-                    const float dmax = raw_max - center_v;
+                    const int32_t dmin = center_v - raw_min;
+                    const int32_t dmax = raw_max - center_v;
 
                     if (dmax > dmin)
                     {
@@ -208,7 +189,7 @@ static bool capture_first_extreme_wait_release(int ch, float center_v, float &ou
     return false;
 }
 
-static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t pol, float &out_best_norm)
+static bool capture_second_extreme_wait_release(int ch, int32_t center_v, int8_t pol, int32_t &out_best_norm)
 {
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
@@ -217,7 +198,7 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
     const bool want_raw_min = (pol < 0);
 
     bool pressed = false;
-    float best_raw = center_v;
+    int32_t best_raw = center_v;
     uint32_t stable_t0 = 0u;
 
     for (;;)
@@ -225,7 +206,7 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
         const uint32_t now_t = time_ticks32();
         if ((uint32_t)(now_t - t0) >= dt) break;
 
-        const float v = adc_pull_v_centered(ch);
+        const int32_t v = adc_pull_v_centered(ch);
 
         const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
         if (((elapsed_ms / 200u) & 1u) == 0u) MC_PULL_ONLINE_RGB_set(ch, 0x10, 0x00, 0x00);
@@ -262,7 +243,7 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
                 if (v > best_raw) best_raw = v;
             }
 
-            if (fabsf(v - center_v) <= CAL_CENTER_EPS_V)
+            if (abs_dmv(v - center_v) <= CAL_CENTER_EPS_V)
             {
                 if (stable_t0 == 0u) stable_t0 = now_t;
                 if ((uint32_t)(now_t - stable_t0) >= (uint32_t)CAL_STABLE_MS * tpm)
@@ -288,10 +269,10 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
     return false;
 }
 
-static void capture_minmax_one_ch_event(int ch, float center_v, float &out_min, float &out_max, int8_t &out_pol)
+static void capture_minmax_one_ch_event(int ch, int32_t center_v, int32_t &out_min, int32_t &out_max, int8_t &out_pol)
 {
-    float vmin = center_v;
-    float vmax = center_v;
+    int32_t vmin = center_v;
+    int32_t vmax = center_v;
     int8_t pol = 1;
 
     bool ok_min = capture_first_extreme_wait_release(ch, center_v, vmin, pol);
@@ -300,9 +281,9 @@ static void capture_minmax_one_ch_event(int ch, float center_v, float &out_min, 
     bool ok_max = capture_second_extreme_wait_release(ch, center_v, pol, vmax);
     if (ok_max) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
 
-    if (vmin > (center_v - 0.050f)) vmin = (center_v - 0.050f);
-    if (vmax < (center_v + 0.050f)) vmax = (center_v + 0.050f);
-    if (vmax <= vmin + 0.10f) { vmin = center_v - 0.10f; vmax = center_v + 0.10f; }
+    if (vmin > (center_v - dmv(0.050))) vmin = (center_v - dmv(0.050));
+    if (vmax < (center_v + dmv(0.050))) vmax = (center_v + dmv(0.050));
+    if (vmax <= vmin + dmv(0.10)) { vmin = center_v - dmv(0.10); vmax = center_v + dmv(0.10); }
 
     out_min = vmin;
     out_max = vmax;
@@ -321,7 +302,7 @@ void MC_PULL_calibration_boot()
 
     MC_PULL_detect_channels_inserted();
 
-    float offs[4], vmin[4], vmax[4];
+    int32_t offs[4], vmin[4], vmax[4];
     int8_t pol[4];
     if (Flash_MC_PULL_cal_read(offs, vmin, vmax, pol))
     {
@@ -337,26 +318,16 @@ void MC_PULL_calibration_boot()
 
     const bool ok_wipe = Flash_NVM_full_clear();
 
-    // float, not double, and it matters far more than it looks. These four
-    // lines were the only doubles in the firmware, and they dragged in the
-    // whole libgcc soft-double family -- __adddf3, __divdf3, __truncdfsf2,
-    // __extendsfdf2, 3752 bytes measured -- on a part with 61440 bytes of
-    // flash and under 4 KB spare. Nothing else here needs the range.
-    //
-    // Precision is not the constraint. Simulated over 20000 randomised runs
-    // of 90 samples spanning the full 0.05-3.30 V range, worst accumulated
-    // error is 3.8e-4 V in the sum and 4.2e-6 V in the mean -- half a percent
-    // of one 12-bit ADC LSB (8.1e-4 V), and far below the noise these 90
-    // samples exist to average out in the first place.
-    float sum_raw[4] = {0, 0, 0, 0};
-    float sum_key[4] = {0, 0, 0, 0};
+    // 90 samples of at most 33000 each stay far inside int32.
+    int32_t sum_raw[4] = {0, 0, 0, 0};
+    int32_t sum_key[4] = {0, 0, 0, 0};
     const int N = 90;
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
 
     for (int k = 0; k < N; k++)
     {
-        const float *v = ADC_DMA_get_value();
+        const int32_t *v = ADC_DMA_get_value();
 
         for (int ch = 0; ch < 4; ch++)
         {
@@ -374,30 +345,32 @@ void MC_PULL_calibration_boot()
         calibration_wait(15u);
     }
 
-    float center_raw[4] = {1.65f, 1.65f, 1.65f, 1.65f};
+    int32_t center_raw[4] = {sensor_fixed::kCenter, sensor_fixed::kCenter,
+                             sensor_fixed::kCenter, sensor_fixed::kCenter};
     for (int ch = 0; ch < 4; ch++)
     {
         if (!filament_channel_inserted[ch]) continue;
-        center_raw[ch] = sum_raw[ch] / (float)N;
+        center_raw[ch] = (sum_raw[ch] + N / 2) / N;
     }
 
     for (int ch = 0; ch < 4; ch++)
     {
         if (!filament_channel_inserted[ch])
         {
-            MC_PULL_V_OFFSET[ch] = 0.0f;
+            MC_PULL_V_OFFSET[ch] = 0;
             MC_PULL_POLARITY[ch] = 1;
-            MC_DM_KEY_NONE_THRESH[ch] = 0.60f;
+            MC_DM_KEY_NONE_THRESH[ch] = dmv(0.60);
             continue;
         }
 
-        MC_PULL_V_OFFSET[ch] = 1.65f - center_raw[ch];
+        MC_PULL_V_OFFSET[ch] = sensor_fixed::kCenter - center_raw[ch];
         MC_PULL_POLARITY[ch] = 1;
         MC_DM_KEY_NONE_THRESH[ch] =
-            dm_key_none_threshold_from_idle(sum_key[ch] / (float)N);
+            sensor_fixed::none_threshold_from_idle((sum_key[ch] + N / 2) / N);
     }
 
-    float center_v_ref[4] = {1.65f, 1.65f, 1.65f, 1.65f};
+    int32_t center_v_ref[4] = {sensor_fixed::kCenter, sensor_fixed::kCenter,
+                               sensor_fixed::kCenter, sensor_fixed::kCenter};
     for (int ch = 0; ch < 4; ch++)
     {
         if (!filament_channel_inserted[ch]) continue;
@@ -410,13 +383,13 @@ void MC_PULL_calibration_boot()
     {
         if (!filament_channel_inserted[ch])
         {
-            MC_PULL_V_MIN[ch] = 1.55f;
-            MC_PULL_V_MAX[ch] = 1.75f;
+            MC_PULL_V_MIN[ch] = dmv(1.55);
+            MC_PULL_V_MAX[ch] = dmv(1.75);
             MC_PULL_POLARITY[ch] = 1;
             continue;
         }
 
-        float mn, mx;
+        int32_t mn, mx;
         int8_t p;
         capture_minmax_one_ch_event(ch, center_v_ref[ch], mn, mx, p);
 

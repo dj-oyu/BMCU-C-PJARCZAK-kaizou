@@ -1,4 +1,5 @@
 #include "Flash_saves.h"
+#include "sensor_fixed.h"
 #include "hal/irq_wch.h"
 #include <string.h>
 
@@ -324,7 +325,7 @@ static inline uint32_t sta_slot_addr(uint32_t slot)
 
 void Flash_saves_init(void)
 {
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
+    RCC->AHBPCENR |= RCC_AHBPeriph_CRC;
 
     flash_runtime_cache_clear();
 
@@ -560,44 +561,72 @@ bool Flash_AMS_downstream_write(uint8_t mask)
     return true;
 }
 
+// Version 2 stores 0.1 mV in int16. Version 1 stored the same three arrays
+// as IEEE floats in volts; it is still read, decoded without soft-float, so a
+// board calibrated by an older build keeps its calibration.
 struct alignas(4) Flash_CAL_payload
 {
-    float offs[4];
-    float vmin[4];
-    float vmax[4];
+    int16_t offs[4];
+    int16_t vmin[4];
+    int16_t vmax[4];
 };
 
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4])
+struct alignas(4) Flash_CAL_payload_v1
+{
+    uint32_t v[12];   // offs[4], vmin[4], vmax[4] as float bits
+};
+
+static inline int16_t cal_clamp_i16(int32_t v)
+{
+    return (int16_t)(v < -32768 ? -32768 : (v > 32767 ? 32767 : v));
+}
+
+bool Flash_MC_PULL_cal_write_all(const int32_t offs[4], const int32_t vmin[4], const int32_t vmax[4], const int8_t pol[4])
 {
     Flash_CAL_payload p;
-    memcpy(p.offs, offs, sizeof(p.offs));
-    memcpy(p.vmin, vmin, sizeof(p.vmin));
-    memcpy(p.vmax, vmax, sizeof(p.vmax));
-
     uint32_t rsv = 0u;
     for (uint8_t ch = 0u; ch < 4u; ch++)
     {
+        p.offs[ch] = cal_clamp_i16(offs[ch]);
+        p.vmin[ch] = cal_clamp_i16(vmin[ch]);
+        p.vmax[ch] = cal_clamp_i16(vmax[ch]);
         if (pol && pol[ch] < 0) rsv |= (1u << ch);
     }
 
-    return nvm256_write(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1, rsv, &p, (uint16_t)sizeof(p));
+    return nvm256_write(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_2, rsv, &p, (uint16_t)sizeof(p));
 }
 
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4])
+bool Flash_MC_PULL_cal_read(int32_t offs[4], int32_t vmin[4], int32_t vmax[4], int8_t pol[4])
 {
-    Flash_CAL_payload p;
     uint16_t got = 0u;
     uint32_t rsv = 0u;
+    int32_t* const out[3] = {offs, vmin, vmax};
 
-    if (!nvm256_read(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1,
-                     &p, (uint16_t)sizeof(p), &got, &rsv))
-        return false;
-
-    if (got != sizeof(p)) return false;
-
-    memcpy(offs, p.offs, sizeof(p.offs));
-    memcpy(vmin, p.vmin, sizeof(p.vmin));
-    memcpy(vmax, p.vmax, sizeof(p.vmax));
+    Flash_CAL_payload p;
+    if (nvm256_read(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_2,
+                    &p, (uint16_t)sizeof(p), &got, &rsv))
+    {
+        if (got != sizeof(p)) return false;
+        for (uint8_t ch = 0u; ch < 4u; ch++)
+        {
+            offs[ch] = p.offs[ch];
+            vmin[ch] = p.vmin[ch];
+            vmax[ch] = p.vmax[ch];
+        }
+    }
+    else
+    {
+        Flash_CAL_payload_v1 v1;
+        if (!nvm256_read(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1,
+                         &v1, (uint16_t)sizeof(v1), &got, &rsv))
+            return false;
+        if (got != sizeof(v1)) return false;
+        for (uint8_t i = 0u; i < 12u; i++)
+        {
+            if (!sensor_fixed::float_bits_to_dmv(v1.v[i], &out[i >> 2][i & 3u]))
+                return false;
+        }
+    }
 
     if (pol)
     {
