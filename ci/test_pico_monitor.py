@@ -505,6 +505,17 @@ class PicoMonitorTests(unittest.TestCase):
         self.assertEqual((event["frame_type"], event["request_length"], event["payload_hash"]),
                          (0x040d, 17, 0x5a))
 
+    def test_printer_long_payload_event_carries_the_raw_bytes(self):
+        # A 3-byte 0x0237 payload: payload_length 7 says only three of the
+        # four data bytes are meaningful.
+        data = (0x0237).to_bytes(2, "little") + bytes((3, 0, 0x01, 0xA2, 0x5C, 0x00))
+        payload = (78).to_bytes(4, "little") + bytes((
+            link.RECORD_PRINTER_LONG_PAYLOAD, 2, 1, 7)) + data
+        event = self.monitor._decode_event(payload)
+        self.assertEqual(event["event_name"], "printer_long_payload")
+        self.assertEqual((event["frame_type"], event["total_length"], event["offset"],
+                          event["data_hex"]), (0x0237, 3, 0, "01a25c"))
+
     def test_printer_transaction_event_carries_the_resolved_class(self):
         # command is a raw wire byte and cannot identify the frame. Without
         # rx_class an unanswered transaction says only that something went

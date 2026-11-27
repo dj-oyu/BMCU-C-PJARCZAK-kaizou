@@ -159,9 +159,10 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 }
 
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
-                                        uint16_t payload_length, uint16_t response_length,
-                                        uint8_t payload_hash)
+                                        const uint8_t* payload, uint16_t payload_length,
+                                        uint16_t response_length, uint8_t payload_hash)
 {
+    (void)payload;
     if (host_bus::long_transaction_count >= host_bus::kMaxRecords) return;
     host_bus::LongTransaction& t =
         host_bus::long_transactions[host_bus::long_transaction_count++];

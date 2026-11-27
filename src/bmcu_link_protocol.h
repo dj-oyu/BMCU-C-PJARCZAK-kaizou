@@ -137,7 +137,7 @@ enum RecordType : uint8_t
     RECORD_STATE_CHANGE = 4u, RECORD_SENSOR = 5u, RECORD_COMMAND_RESULT = 6u,
     RECORD_SAFETY_DECISION = 7u, RECORD_DIAGNOSTIC_COUNTER = 8u,
     RECORD_PRINTER_LONG_TRANSACTION = 9u, RECORD_RESET_STATE = 10u,
-    RECORD_DM_TEARDOWN = 11u,
+    RECORD_DM_TEARDOWN = 11u, RECORD_PRINTER_LONG_PAYLOAD = 12u,
 };
 
 // Why the DM autoload state machine left the state it was in. The machine is
@@ -276,6 +276,21 @@ struct LogPrinterLongTransactionPayload
     uint8_t payload_hash;
 };
 
+// The leading bytes of a printer long frame this firmware does not answer
+// (IGNORED/UNSUPPORTED), or of a 0x040D/0x040E frame. PRINTER_LONG_TRANSACTION
+// carries only an 8-bit hash of the payload, which can say two frames differ
+// but never what either one asked for. The first kLongCaptureBytes of the
+// payload are sent as consecutive records of four bytes each, `offset` giving
+// where the chunk starts; payload_length in the header says how many of `data`
+// are meaningful. A (type, hash) pair is captured once per boot.
+struct LogPrinterLongPayloadPayload
+{
+    uint16_t type;
+    uint8_t total_length;   // the frame's payload length, saturating at 255
+    uint8_t offset;
+    uint8_t data[4];
+};
+
 struct LogResetStatePayload
 {
     uint32_t operation_id;
@@ -352,6 +367,7 @@ union LogRecordPayload
     LogSafetyDecisionPayload safety_decision;
     LogDiagnosticCounterPayload diagnostic_counter;
     LogDmTeardownPayload dm_teardown;
+    LogPrinterLongPayloadPayload printer_long_payload;
     uint8_t raw[8];
 };
 
@@ -374,6 +390,8 @@ static_assert(sizeof(LogResetStatePayload) == 8u,
               "LogResetStatePayload ABI changed");
 static_assert(sizeof(LogDmTeardownPayload) == 8u,
               "LogDmTeardownPayload ABI changed");
+static_assert(sizeof(LogPrinterLongPayloadPayload) == 8u,
+              "LogPrinterLongPayloadPayload ABI changed");
 static_assert(sizeof(LogRecord) == 16u, "LogRecord ABI changed");
 }
 

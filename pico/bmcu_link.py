@@ -63,6 +63,7 @@ RECORD_PRINTER_TRANSACTION = 3
 RECORD_PRINTER_LONG_TRANSACTION = 9
 RECORD_RESET_STATE = 10
 RECORD_DM_TEARDOWN = 11
+RECORD_PRINTER_LONG_PAYLOAD = 12
 
 
 def crc16_ccitt_false(data):
@@ -809,6 +810,15 @@ class BMCUMonitor:
             event.update({"event_name": "dm_teardown", "slot": payload[0],
                           "dm_auto_state": payload[1], "cause": payload[2],
                           "ks": payload[3], "held_ms": _u32(payload, 4)})
+        elif (event["record_type"] == RECORD_PRINTER_LONG_PAYLOAD and
+              event["payload_length"] >= 4):
+            # Raw leading bytes of a long frame the firmware leaves unanswered.
+            # Passed through as hex; reassembling chunks is a reader's job.
+            count = min(event["payload_length"], 8) - 4
+            event.update({"event_name": "printer_long_payload",
+                          "frame_type": _u16(payload, 0),
+                          "total_length": payload[2], "offset": payload[3],
+                          "data_hex": bytes(payload[4:4 + count]).hex()})
         elif (event["record_type"] == RECORD_PRINTER_LONG_TRANSACTION and
               event["payload_length"] >= 8):
             event.update({"event_name": "printer_long_transaction",

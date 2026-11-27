@@ -31,7 +31,7 @@ Overridable readings (``override``): ``key_v``, ``pull_v``, ``as5600_raw``,
 """
 from __future__ import annotations
 
-from .bambu_bus import short_frame
+from .bambu_bus import long_frame, short_frame
 from .clock import HCLK_HZ
 
 
@@ -88,6 +88,8 @@ def _frame(ev):
     payload = bytes.fromhex(ev.get("payload", "").replace(" ", ""))
     if "hex" in ev:
         return bytes.fromhex(ev["hex"].replace(" ", ""))
+    if "long_type" in ev:
+        return long_frame(int(ev["long_type"]), payload)
     return short_frame(int(ev["type"]), payload)
 
 
