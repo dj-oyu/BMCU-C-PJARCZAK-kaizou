@@ -122,8 +122,8 @@ module strand_zone {
       } else if (drivingFwd) {
         { ...e0, known: true, exact: false, reachedHead: false, passage: false, consumed: 0,
           lastDir: 1,
-          front: if (not(e0.known) or e0.front < SET + (SET - CLEAR)) SET + (SET - CLEAR)
-                 else e0.front }
+          // unseen forward travel can have reached the head
+          front: HEAD }
       } else { ...e0, exact: false, reachedHead: false, passage: false, consumed: 0 }
     // switch edges
     val e2 =

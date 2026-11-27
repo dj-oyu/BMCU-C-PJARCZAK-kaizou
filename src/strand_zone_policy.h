@@ -182,10 +182,13 @@ inline bool update(State& s, const Config& c, int32_t fwd_delta, bool measured,
         s.consumed = 0;
         if (driving_fwd)
         {
-            // Unseen forward travel: assume it went past the merger, by one
-            // hysteresis band. Unseen backward travel never clears anything.
-            const int32_t past = c.down_set + (c.down_set - c.down_clear);
-            if (!s.front_known || s.front < past) s.front = past;
+            // Unseen forward travel: assume it went as far as it can, to the
+            // head. Assuming less (down_set plus one band, as before) under-
+            // reports once the AS5600 recovers: the strand can be at the head,
+            // so measured travel back from the assumed front reads it upstream
+            // while it is still past the merger. Unseen backward travel never
+            // clears anything.
+            s.front = c.head;
             s.front_known = 1u;
             s.dir_acc = static_cast<int16_t>(c.dir_band);
             s.last_dir = 1;
