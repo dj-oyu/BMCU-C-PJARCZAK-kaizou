@@ -157,12 +157,16 @@ module strand_zone {
     e.front >= HEAD
 
   // strand_zone::passage_proof, applied to every channel but `ch`.
+  // A restored remnant has no front: in the tube or in its branch. The proof
+  // rules out the tube, so it is a branch piece up to the junction.
   pure def proofOne(e: Est): Est = {
     val inTube = e.known and e.front > SET
+    val branch = e.remnant and not(e.known)
     val e1 = { ...e, remnant: false,
                reachedHead: false, passage: false, consumed: 0, claimed: false,
-               exact: if (inTube) false else e.exact,
-               front: if (inTube) SET else e.front,
+               tailKnown: e.tailKnown or branch, known: e.known or branch,
+               exact: if (inTube or branch) false else e.exact,
+               front: if (inTube or branch) SET else e.front,
                zone: if (e.zone == DOWNSTREAM) UPSTREAM else e.zone }
     { ...e1, zone: deriveZone(e1) }
   }

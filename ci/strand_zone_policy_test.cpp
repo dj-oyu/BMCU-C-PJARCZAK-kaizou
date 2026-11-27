@@ -192,6 +192,26 @@ static int test_pack_and_restore(void)
     return 0;
 }
 
+// A tail restored from the zone record, with no strand behind it, has no
+// front: it may be in the tube or still in its branch. Another channel's
+// passage only rules out the tube, so the piece stays a branch tail, and the
+// next strand inserted behind it pushes it in: that strand reads past the
+// merger, not parked (Quint seed 0xf3b408d372a6e92b).
+static int test_restored_tail_survives_passage(void)
+{
+    State all[4];
+    for (int i = 0; i < 4; i++) reset(all[i]);
+    restore(all[2], C, kTail, true, false);
+    step(all[2], 0, false);                       // first reading: empty
+    step(all[0], 0, true); travel(all[0], 900, true);
+    CHECK(take_passage(all[0], C), 121);
+    passage_proof(all, C, 0);
+    CHECK(!all[2].remnant && all[2].tail_known && all[2].zone == kTail, 122);
+    step(all[2], 0, true);                        // a new strand at the switch
+    CHECK(all[2].remnant && is_downstream(all[2].zone), 123);
+    return 0;
+}
+
 // A front left at the head by an unmeasured pull must not keep proving
 // passage: the proof fires once, on arrival, and an unmeasured sample drops
 // what was measured.
@@ -358,5 +378,6 @@ int main(void)
     if ((rc = test_written_ahead()) != 0) return rc;
     if ((rc = test_claim_keeps_a_measured_front()) != 0) return rc;
     if ((rc = test_tail_piece_is_not_pulled_back()) != 0) return rc;
+    if ((rc = test_restored_tail_survives_passage()) != 0) return rc;
     return 0;
 }

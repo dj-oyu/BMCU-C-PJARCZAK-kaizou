@@ -118,7 +118,12 @@ When it fires, every other channel's estimate is pulled back to the junction:
 `front = min(front, down_set)`, not exact, remnant cleared. Not to `park`: a
 strand may sit anywhere in its own branch up to the junction, and pulling the
 estimate behind the real front would under-report it later. A known tail piece
-stays known: it is out of the tube but may still be in its own branch.
+stays known: it is out of the tube but may still be in its own branch. So
+does a remnant restored from the zone record without a front: it may have been
+in the tube or in its branch, and the proof only rules out the tube. It becomes
+a known tail piece at the junction, and the next strand inserted behind it
+reads it as pushed in. Quint found this gap: before, the proof dropped the
+remnant, and that strand read as parked with the piece ahead of it in the tube.
 
 ## Collision report
 
