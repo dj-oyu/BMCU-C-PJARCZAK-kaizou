@@ -115,9 +115,10 @@ jobs:
           check strand_zone witnessSmallSpill outlet_guard
           check strand_zone witnessNoBlindSpill outlet_guard
           check strand_zone witnessNoSlip outlet_guard
-          # A recovery needs a hold, its release and three draws in the wait.
+          # A recovery needs a hold, its release and three draws in the wait;
+          # an escalation, a hold that outlasts it.
           check strand_zone witnessNoRecover outlet_guard 50000
-          check strand_zone witnessNoEscalation outlet_guard
+          check strand_zone witnessNoEscalation outlet_guard 50000
 
       - name: Bounded symbolic check (Apalache)
         run: |
