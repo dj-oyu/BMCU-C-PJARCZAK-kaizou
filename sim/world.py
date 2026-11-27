@@ -91,6 +91,11 @@ class Channel:
     outlet_open: bool = False
     spill_mm: float = 0.0
     spilled: bool = False                  # slack has come out since the detach
+    # The drive gear slips on a held strand (a spool clamped at its core):
+    # a push turns the gear -- the AS5600 is on its shaft and reads it -- but
+    # the strand does not move, and the extruder keeps pulling on it.
+    slip: bool = False
+    slipped_mm: float = 0.0                # gear travel ground into the strand
     as5600_present: bool = True
     magnet_ok: bool = True
     overrides: dict = field(default_factory=dict)   # name -> value (forced reading)
@@ -336,6 +341,12 @@ class World:
         if c.jam_at_mm is not None and c.tip_mm + dx > c.jam_at_mm and dx > 0:
             dx = max(0.0, c.jam_at_mm - c.tip_mm)     # stalls against the jam
             c.speed_mm_s = 0.0
+        if c.slip and dx > 0:
+            c.slipped_mm += dx
+            c.angle = self._turn(c.angle, dx)
+            if at_head:
+                c.buffer_mm = max(-p.buffer_travel_mm, c.buffer_mm - consume)
+            return
         if c.anchored and dx > 0:
             dx = 0.0                                  # the spool gives nothing
             c.speed_mm_s = 0.0
@@ -430,6 +441,7 @@ class World:
                  "tail_mm": None if c.tail_mm is None else round(c.tail_mm, 2),
                  "speed_mm_s": round(c.speed_mm_s, 2), "buffer_mm": round(c.buffer_mm, 2),
                  "outlet_open": c.outlet_open, "spill_mm": round(c.spill_mm, 2),
+                 "slipped_mm": round(c.slipped_mm, 2),
                  "angle": int(c.angle), "drive": round(self.drive(c.index), 3),
                  "pull_v": round(self.pull_volts(c.index), 3), "key_v": round(self.key_volts(c.index), 3),
                  "overrides": dict(c.overrides)} for c in self.channels]

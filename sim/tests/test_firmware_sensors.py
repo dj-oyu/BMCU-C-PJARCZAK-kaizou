@@ -193,10 +193,11 @@ class AnchoredSpoolJam(unittest.TestCase):
 
 # Tube off the filament hub mid-print (docs/FEED_RESISTANCE_DESIGN.md §2).
 # The BMCU keeps feeding and the push goes out of the gap; the guard has to
-# stop it, wait while the extruder takes up the spilled slack, and resume once
-# the tube is drawn back on and the extruder pulls on the strand again --
-# without the resume reading as a jam. Before the detach it is a normal print
-# at 4 mm/s, which must not trip.
+# stop it and tell the printer. A detached tube does not come back by itself,
+# so nothing resumes: even when the world model draws the tube back on (the
+# extruder taking up the slack), the motor stays braked and the jam stands
+# until the printer acts. Before the detach it is a normal print at 4 mm/s,
+# which must not trip.
 OPEN_OUTLET = {"seconds": 36, "events": [
     {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
     {"t": 0.3, "do": "extruder", "mm_s": 4.0},
@@ -239,17 +240,68 @@ class OpenOutlet(unittest.TestCase):
         self.assertTrue(drive)
         self.assertFalse(any(d > 0.05 for d in drive), "pushed into the open outlet")
 
-    def test_resumes_once_the_tube_is_back(self):
+    def test_nothing_resumes_by_itself(self):
         self.assertIsNotNone(self.reseat_t, "the extruder never took up the slack")
-        drive = [c["drive"] for t, c in self.world if self.reseat_t < t < 36.0]
-        self.assertTrue(any(d > 0.1 for d in drive), "feeding never resumed")
-        bufs = [c["buffer_mm"] for t, c in self.world if 33.0 < t < 36.0]
-        self.assertGreater(min(bufs), -6.0, "the resumed print is starved")
+        drive = [c["drive"] for t, c in self.world if self.reseat_t + 0.5 < t < 36.0]
+        self.assertTrue(drive)
+        self.assertFalse(any(d > 0.05 for d in drive), "the motor resumed on its own")
 
-    def test_the_resume_is_not_a_jam(self):
-        flags = [d["channel_flags"][3] for t, d in self.status if t > 1.5]
-        self.assertFalse(any(f["jam_latch"] or f["low_latch"] for f in flags),
-                         "the guard's stop or its resume latched LOW/JAM")
+    def test_the_printer_is_told(self):
+        before = [d["channel_flags"][3] for t, d in self.status if 1.5 < t < 8.0]
+        self.assertFalse(any(f["jam_latch"] or f["low_latch"] for f in before),
+                         "the print latched LOW/JAM before the detach")
+        after = [d["channel_flags"][3] for t, d in self.status if t > 8.0]
+        self.assertTrue(any(f["jam_latch"] for f in after), "no jam was raised for the open outlet")
+        self.assertTrue(after[-1]["jam_latch"], "the jam did not stand until the printer acted")
+
+
+# The drive gear slips on a held strand mid-print (2026-11-27: grinding dust
+# in the BMCU). The AS5600 reads the gear turning, the strand stays put and the
+# extruder stretches the buffer. Printing speed (1 mm/s, AMS-B ch3 measured
+# 1.1) and a buffer slower to read the stretch than the default model: with
+# the default 12 mm stroke the jam detector fires within a second whatever
+# the guard does, and the test would not tell the builds apart. Here the
+# deployed build (64b5c7c) grinds ~166 mm, the open-outlet guard without the
+# slip verdict ~617 mm and never stops (its resume on tension disarmed the jam
+# detector), and the slip verdict with no resume ~55 mm.
+GEAR_SLIP = {"seconds": 20, "params": {"buffer_travel_mm": 30.0}, "events": [
+    {"t": 0.0, "do": "insert", "ch": 3, "tip_mm": 800, "push_s": 0},
+    {"t": 0.3, "do": "extruder", "mm_s": 1.0},
+    {"t": 1.0, "do": "printer_repeat", "type": 3, "payload": "00 09 03 7f", "every": 0.25, "until": 1.5},   # before_on_use
+    {"t": 1.5, "do": "printer_repeat", "type": 3, "payload": "00 07 03 7f", "every": 0.25, "until": 20.0},  # on_use
+    {"t": 8.0, "do": "set", "ch": 3, "slip": True},
+]}
+
+
+@unittest.skipUnless(IMAGE, "BMCU_SIM_IMAGE not set")
+class GearSlip(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from sim.run import run
+        with open(IMAGE, "rb") as f:
+            image = f.read()
+        nvm = bytes(run(image, 0, scenario=CALIBRATE)[0].flash.raw)
+        cls.m, cls.pico = run(image, 0, scenario=GEAR_SLIP, nvm=nvm)[:2]
+        cls.status = [(msg["sim_ms"] / 1000, msg["data"]) for msg in cls.pico.messages
+                      if msg.get("type") == "status"]
+        cls.world = [(t / HCLK_HZ, s[3]) for t, s in cls.m.world.snapshots]
+
+    def test_the_grinding_is_bounded(self):
+        self.assertIsNone(self.m.fault)
+        ground = max(c["slipped_mm"] for t, c in self.world)
+        self.assertGreater(ground, 1.0, "the scenario never slipped")
+        self.assertLess(ground, 90.0, "the gear kept grinding")
+
+    def test_the_motor_stays_stopped(self):
+        stop_t = next(t for t, c in self.world if c["slipped_mm"] >= max(
+            cc["slipped_mm"] for tt, cc in self.world))
+        drive = [c["drive"] for t, c in self.world if stop_t + 0.5 < t < 20.0]
+        self.assertTrue(drive)
+        self.assertFalse(any(abs(d) > 0.05 for d in drive), "the motor ran after the slip")
+
+    def test_the_printer_is_told(self):
+        flags = [d["channel_flags"][3] for t, d in self.status if t > 8.0]
+        self.assertTrue(any(f["jam_latch"] for f in flags), "no jam was raised for the slip")
 
 
 if __name__ == "__main__":

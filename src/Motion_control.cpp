@@ -604,16 +604,23 @@ static inline strand_zone::State& zone_state(uint8_t ch)
 #ifndef BMCU_OUTLET_SEND_MARGIN_MM
 #define BMCU_OUTLET_SEND_MARGIN_MM 150.0f
 #endif
+// Forward gear travel allowed with the buffer pulled or pressed, net of the
+// consumption ceiling, before it is a slip (docs/FEED_RESISTANCE_DESIGN.md
+// §3): real travel brings a deflected buffer back within its stroke (the sim
+// assumes 12 mm each way; normal pull_back, send_out and on_use stay above
+// 47 % in the 2026-11-27 recordings).
+#ifndef BMCU_OUTLET_SLIP_MM
+#define BMCU_OUTLET_SLIP_MM 40.0f
+#endif
 static constexpr outlet_guard::Config kOutletConfig = {
     // A send starts with the strand at or past the key switch, so the
     // switch-to-head distance bounds the free stretch.
     distance_m_to_counts((BMCU_KEY_TO_HEAD_MM + BMCU_OUTLET_SEND_MARGIN_MM) / 1000.0f),
     distance_m_to_counts(BMCU_OUTLET_USE_MM / 1000.0f),
+    distance_m_to_counts(BMCU_OUTLET_SLIP_MM / 1000.0f),
     static_cast<uint32_t>(BMCU_OUTLET_CONSUME_MM_S * kAS5600_COUNTS_PER_M / 1000.0f + 0.5f),
     5500,   // pressed: well clear of the 50-52 % a free or printing strand reads
     4700,   // pulled
-    on_use_jam::kLowPctQ,
-    3000u,
 };
 static outlet_guard::State g_outlet[4];
 
@@ -2481,16 +2488,11 @@ public:
 
         if ((mode & kMotionPressureOnUse) != 0u && !g_on_use_low_latch[CHx])
         {
-            if (MC_ONLINE_key_stu[CHx] == 0u ||
-                (BMCU_OUTLET_GUARD &&
-                 (outlet_guard::blocks_push(g_outlet[CHx]) ||
-                  outlet_guard::jam_disarmed(g_outlet[CHx], kOutletConfig,
-                                             MC_PULL_pct_q[CHx], now_ms))))
+            if (MC_ONLINE_key_stu[CHx] == 0u || outlet_blocks_push(CHx))
             {
                 // Key empty; or the outlet guard holds the motor (the 20 s
-                // high-PWM timer would latch LOW on a push that is braked),
-                // or has just resumed on tension, which is a stretched buffer
-                // and not a jam.
+                // high-PWM timer would latch LOW on a push that is braked;
+                // outlet_sample raises the jam for it).
                 g_on_use_hi_pwm_us[CHx] = 0u;
                 on_use_jam::reset(g_on_use_low_since_ms[CHx]);
             }
@@ -2576,10 +2578,18 @@ static void outlet_sample(uint8_t ch, bool measured, int32_t fwd_delta, uint32_t
         motor.motion == filament_motion_enum::filament_motion_send ? outlet_guard::MODE_SEND :
         motor.motion == filament_motion_enum::filament_motion_pull ? outlet_guard::MODE_PULL :
                                                                      outlet_guard::MODE_USE;
-    const bool pushing = motor.motor_polarity_valid && g_motor_pwm[ch] != 0 &&
-                         motor.to_logical_pwm(g_motor_pwm[ch]) < 0;
+    (void)now_ms;
     outlet_guard::sample(g_outlet[ch], kOutletConfig, mode, measured, fwd_delta, dt_us,
-                         MC_PULL_pct_q[ch], pushing, MC_ONLINE_key_stu[ch] != 0u, now_ms);
+                         MC_PULL_pct_q[ch], MC_ONLINE_key_stu[ch] != 0u);
+    // A latch in on_use (an open outlet, a slipping gear) is a fault the
+    // printer has to handle: raise the jam, so the motor stays braked and the
+    // printer gets 0xF06F and unloads. Nothing here recovers by itself.
+    if (outlet_guard::blocks_push(g_outlet[ch]) &&
+        motor.motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
+    {
+        g_on_use_low_latch[ch] = 1u;
+        g_on_use_jam_latch[ch] = 1u;
+    }
 }
 int32_t _MOTOR_CONTROL::x_prev[4] = {0,0,0,0};
 
