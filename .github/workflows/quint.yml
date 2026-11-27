@@ -15,6 +15,7 @@ on:
       - "spec/**"
       - "src/ams_merger_policy.h"
       - "src/strand_zone_policy.h"
+      - "src/outlet_guard_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
       - "ci/zone_replay_adapter.cpp"
@@ -24,6 +25,7 @@ on:
       - "spec/**"
       - "src/ams_merger_policy.h"
       - "src/strand_zone_policy.h"
+      - "src/outlet_guard_policy.h"
       - "ci/quint_replay.py"
       - "ci/quint_replay_adapter.cpp"
       - "ci/zone_replay_adapter.cpp"
@@ -82,6 +84,10 @@ jobs:
           quint run spec/strand_zone.qnt --step=stepFeed --invariant=safety \
             --max-samples=20000 --max-steps=80
           quint test spec/strand_zone.qnt
+          # outlet_guard is a second module in the same file.
+          quint test spec/strand_zone.qnt --main=outlet_guard
+          quint run spec/strand_zone.qnt --main=outlet_guard --invariant=safety \
+            --max-samples=20000 --max-steps=80
 
       # Expected to be violated: each witness is a behaviour the firmware does
       # not prevent (or an over-report the estimate is allowed). A witness that
@@ -89,9 +95,9 @@ jobs:
       - name: Known behaviours stay reachable
         run: |
           check() {
-            if quint run "spec/$1.qnt" --invariant="$2" \
+            if quint run "spec/$1.qnt" --invariant="$2" ${3:+--main=$3} \
                  --max-samples=5000 --max-steps=80 > witness.log 2>&1; then
-              echo "::error::$1 $2 was not violated - the model no longer reaches it"
+              echo "::error::$1${3:+/$3} $2 was not violated - the model no longer reaches it"
               tail -20 witness.log
               exit 1
             fi
@@ -101,6 +107,13 @@ jobs:
           check strand_zone witnessNeverSpurious
           check strand_zone witnessNoProofClear
           check strand_zone witnessNoDoubleDown
+          check strand_zone witnessNoTrip outlet_guard
+          check strand_zone witnessNoResume outlet_guard
+          check strand_zone witnessNoUnwind outlet_guard
+          check strand_zone witnessNoPulledResume outlet_guard
+          check strand_zone witnessNoJam outlet_guard
+          check strand_zone witnessSmallSpill outlet_guard
+          check strand_zone witnessNoBlindSpill outlet_guard
 
       - name: Bounded symbolic check (Apalache)
         run: |
