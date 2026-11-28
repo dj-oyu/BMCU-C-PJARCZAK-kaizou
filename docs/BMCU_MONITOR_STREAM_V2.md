@@ -292,9 +292,11 @@ move a motor. It can still change what the printer believes about the AMS, so
 the BMCU side keeps the table in RAM only: a power cycle always returns the
 BMCU to answering nothing.
 
-The firmware has no handler yet. Until it does, every request reads
-`rejected` with `ack: "unsupported"`, which proves the route end to end
-(client → Pico → BMCU → Pico) without changing what the printer sees.
+A BMCU whose firmware predates the handler answers every request
+`rejected` with `ack: "unsupported"`. That still proves the route end to end
+(client → Pico → BMCU → Pico) without changing what the printer sees. With the
+handler, a request reads `applied`, or `rejected` with `ack: "denied"` when all
+eight entries are taken (BMCU_LINK_PROTOCOL_ALPHA3.md §5.5).
 
 ## 8. Receiver (Bambuddy) behaviour
 

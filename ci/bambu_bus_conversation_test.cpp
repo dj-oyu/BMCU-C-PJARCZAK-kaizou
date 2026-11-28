@@ -416,6 +416,56 @@ int test_peer_addressed_long_frame(void)
     return 0;
 }
 
+// A long frame no handler knows stays unanswered until the Pico supplies a
+// reply (SET_LONG_REPLY). With one, the frame is answered with the same type,
+// the addresses swapped and the table's bytes, and reported REPLIED. The match
+// prefix keeps the answer to frames whose payload starts with it.
+int test_long_reply_table_answers_unknown_frame(void)
+{
+    host_bus::reset();
+    const uint8_t ours[] = {0x00, 0x00, 0x00, 0x00};
+    const uint8_t peer[] = {0x01, 0x00, 0x00, 0x00};
+
+    host_bus::publish_long(0x0411u, ours, 4);
+    CHECK(host_bus::run() == 0, 381);
+    CHECK(host_bus::long_transaction_count == 1, 382);
+    CHECK(host_bus::long_transactions[0].outcome == OUTCOME_IGNORED, 383);
+    CHECK(host_bus::long_transactions[0].reason == REASON_UNSUPPORTED, 384);
+
+    const uint8_t request[] = {0x11, 0x04, 0x00, 0x01, 0x03, 0x00, 0xA1, 0xA2, 0xA3};
+    CHECK(long_reply_table::apply(host_bus::long_reply, request, sizeof(request)) ==
+              long_reply_table::Result::ok, 385);
+
+    host_bus::publish_long(0x0411u, ours, 4);
+    const int sent = host_bus::run();
+    CHECK(sent == 15 + 3, 386);
+    CHECK(host_bus::reply[0] == 0x3Du, 387);
+    CHECK(host_bus::reply[7] == 0x00u && host_bus::reply[8] == 0x06u, 388);    // to the printer
+    CHECK(host_bus::reply[9] == 0x00u && host_bus::reply[10] == 0x07u, 389);   // from the AMS
+    CHECK(host_bus::reply[11] == 0x11u && host_bus::reply[12] == 0x04u, 390);  // same type
+    CHECK(host_bus::reply[13] == 0xA1u && host_bus::reply[15] == 0xA3u, 391);
+    CHECK(host_bus::long_transactions[1].outcome == OUTCOME_REPLIED, 392);
+    CHECK(host_bus::long_transactions[1].response_length == 18u, 393);
+
+    // The other unit's frame (different first byte) is left alone.
+    host_bus::publish_long(0x0411u, peer, 4);
+    CHECK(host_bus::run() == 0, 394);
+    CHECK(host_bus::long_transactions[2].outcome == OUTCOME_IGNORED, 395);
+
+    // A type with a handler is never answered from the table: MC_online
+    // (0x021A) still gets its own 6-byte reply, not the table's 0xEE.
+    const uint8_t mc[] = {0x1A, 0x02, 0x00, 0x00, 0x01, 0xEE};
+    CHECK(long_reply_table::apply(host_bus::long_reply, mc, sizeof(mc)) ==
+              long_reply_table::Result::ok, 396);
+    host_bus::set_ams_online(true);
+    const uint8_t mc_frame[] = {0x00, 0x00};
+    host_bus::publish_long(0x021Au, mc_frame, 2);
+    CHECK(host_bus::run() == 15 + 6, 397);
+    CHECK(host_bus::reply[13] == 0x00u, 398);
+
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Family 3: funnel routing (docs/BMCU_LOADED_LATCH_DESIGN.md section 10)
 // ---------------------------------------------------------------------------
@@ -821,6 +871,7 @@ const Vector kVectors[] = {
     {"motion_reply_bytes", test_motion_reply_bytes},
     {"before_on_use_replay_keeps_stu_flag", test_before_on_use_replay_keeps_stu_flag},
     {"offline_ams_is_silent", test_offline_ams_is_silent},
+    {"long_reply_table_answers_unknown_frame", test_long_reply_table_answers_unknown_frame},
     {"merger_ownership_invariant_walk", test_merger_ownership_invariant_walk},
 };
 
