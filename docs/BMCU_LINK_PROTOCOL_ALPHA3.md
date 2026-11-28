@@ -74,6 +74,7 @@ renumbered or reused. New values may be appended.
 | `0x12` | `PING` | Pico → BMCU | implemented |
 | `0x17` | `GET_FULL_STATUS` | Pico → BMCU | implemented |
 | `0x18` | `REQUEST_SOFT_RESET` | Pico → BMCU | implemented; hardware validation pending |
+| `0x19` | `SET_LONG_REPLY` | Pico → BMCU | Pico sends; firmware answers `ACK_UNSUPPORTED` (no handler yet) |
 | `0x72` | `PONG` | BMCU → Pico | implemented |
 | `0x73` | `FULL_STATUS_RECORD` | BMCU → Pico | implemented |
 | `0x7F` | `ACK` | BMCU → Pico | implemented |
@@ -201,6 +202,23 @@ RS-485 DE in receive, no pending DMA/USART transport error, and at least five
 seconds since printer-bus activity or a printer motion command. Persistence writes
 are suppressed while reset is pending. Bambuddy remote control remains disabled
 until a separately authenticated control scope is implemented.
+
+### 5.5 SET_LONG_REPLY — 5 to 45 bytes
+
+```text
+type:u16 | flags:u8 | match_len:u8 | reply_len:u8 | match[match_len] | reply[reply_len]
+```
+
+Asks the BMCU to answer printer long frames of `type` whose payload starts with
+`match` (`match_len` 0 matches every payload) with `reply` as the response
+payload. `flags` bit 0 clears that type's entry, and then `reply_len` is 0;
+other bits are 0. `match_len` is at most 8 and `reply_len` at most 32.
+
+The Pico sends it on request from the token-gated local route of
+BMCU_MONITOR_STREAM_V2.md §7.4 and tracks the `ACK` by sequence. The firmware
+has no handler yet and answers `ACK_UNSUPPORTED` like any unknown kind. A future
+handler must keep the table in RAM only, so a BMCU power cycle always returns it
+to answering nothing.
 
 ## 6. Full status synchronization
 

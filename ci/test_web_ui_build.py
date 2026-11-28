@@ -44,7 +44,7 @@ def _load_enum_registry_generator():
 # prose or the endpoint list. Changing either makes this test fail, and the
 # only correct fix is to bump revision in docs/bmcu_wire_layout.json and
 # record the new revision and digest here together.
-LAYOUT_REVISION = 13
+LAYOUT_REVISION = 14
 LAYOUT_DIGEST = \
     "e22fe147881141c0e26aedb0876304d08ad12a6ce50644b4d5e66ef253197644"
 

@@ -340,6 +340,7 @@ export const BmcuKind = {
   Ping: 18,
   GetFullStatus: 23,
   RequestSoftReset: 24,
+  SetLongReply: 25,
   Pong: 114,
   FullStatusRecord: 115,
   Ack: 127,

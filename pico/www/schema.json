@@ -250,6 +250,7 @@
    "2": "status",
    "23": "get_full_status",
    "24": "request_soft_reset",
+   "25": "set_long_reply",
    "3": "event",
    "4": "printer_transaction",
    "5": "sensor_record"
@@ -413,7 +414,7 @@
   "Compare the BMCU-reported crc_error and rx_drop in status_payload against the Pico decoder counters in diagnostic_tags: matching rates mean a shared cause, one-sided means the loss is in that direction only.",
   "A counter that does not advance is as informative as one that does. Sample twice and report the delta with the elapsed time, not the absolute value."
  ],
- "revision": 13,
+ "revision": 14,
  "schema": "bmcu-monitor-api",
  "structures": {
   "bmb1_envelope": {

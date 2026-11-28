@@ -54,6 +54,8 @@ per-record acknowledgement.
    - The soft reset travels over the monitor link, so it cannot rescue a BMCU
      that is truly hung anyway.
    - Pausing the printer remotely remains the safe remote action.
+   - The token-gated long-reply route of §7.4 is also local HTTP, not part of
+     the stream, and cannot reset or move anything.
 5. **No journal replay.** The Pico stops writing the BMJ1 flash journal and
    stops replaying earlier boots. History lives only at the receiver.
 6. **The receiver persists in batches**, not one transaction per record.
@@ -257,6 +259,42 @@ It establishes that the requester could see the Pico's panel within the last
 clear text. Someone on the LAN who can also see the panel is, under the trust
 rule above, someone allowed to reset. A sniffed code is useless once it has
 been used or has expired.
+
+### 7.4 Long-reply requests with a shared token
+
+A second local control route, for a PC or an agent on the LAN that wants the
+BMCU to answer a printer long frame it does not answer today (0x0411, 0x023C,
+0x0237, see `PRINTER_LONG_PAYLOAD`). It is served by `pico/long_reply.py`.
+Bambuddy still sends nothing to the Pico.
+
+- **Off unless provisioned.** `secrets.py` must define `BMCU_CONTROL_TOKEN`, at
+  least 16 characters. Without it every request answers `503`.
+- **Every request carries `X-BMCU-Control-Token`.** POST also needs
+  `X-BMCU-Control-Action: long-reply` and `Content-Type: application/json`.
+- `POST /api/control/long-reply` with
+  `{"link": 0, "type": "0x0411", "match": "01", "reply": "01000000"}` sends
+  `SET_LONG_REPLY` (BMCU_LINK_PROTOCOL_ALPHA3.md §5.5) and answers
+  `202 {"link", "sequence", "state": "sent"}`. `{"link", "type", "clear": true}`
+  asks for that type's entry to be dropped. `match` is at most 8 bytes and
+  `reply` at most 32, both hex.
+- `GET /api/control/long-reply?link=0` reports the last request on that link:
+  `state` is `sent`, `applied` (ACK OK), `rejected` (any other ACK, named in
+  `ack`) or `no_ack` after 2 s of silence.
+- **5 wrong tokens lock the route for 60 s** (`429`), including for the right
+  token. A right token resets the count.
+- The token never appears in a response, the runtime log, a record or a
+  datagram.
+
+What it establishes: the client knows the token. The token crosses the LAN in
+clear text, so anyone who can read LAN traffic can reuse it. That is weaker
+than the panel rule of §7.3, and it is accepted because a long reply cannot
+move a motor. It can still change what the printer believes about the AMS, so
+the BMCU side keeps the table in RAM only: a power cycle always returns the
+BMCU to answering nothing.
+
+The firmware has no handler yet. Until it does, every request reads
+`rejected` with `ack: "unsupported"`, which proves the route end to end
+(client → Pico → BMCU → Pico) without changing what the printer sees.
 
 ## 8. Receiver (Bambuddy) behaviour
 
