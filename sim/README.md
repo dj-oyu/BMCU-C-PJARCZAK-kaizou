@@ -42,7 +42,13 @@ those recorded signals.
 pip install "unicorn==2.1.1"
 python -m sim.run firmware.bin --seconds 8 --trace trace.jsonl   # --ams 1 for AMS-B builds
 BMCU_SIM_IMAGE=firmware.bin python -m unittest discover -s sim/tests -t . -v
+BMCU_SIM_IMAGE=firmware.bin python -m sim.shard gear_slip   # one CI shard
 ```
+
+CI runs the tests as parallel shards (`sim/shard.py`, one runner each); the
+required `sim` check passes only when every shard does. A test class that is
+not named in `SHARDS` runs in the `rest` shard, so a new test is never left
+out; give a class its own shard once it takes minutes.
 
 A bare-board 8-second boot takes about 8–15 s of wall time; with feeder
 modules and encoders attached the firmware bit-bangs four AS5600 buses

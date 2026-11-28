@@ -20,9 +20,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sim:
+  # Build the image once; every shard runs the same bytes.
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    outputs:
+      shards: ${{ steps.shards.outputs.names }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -56,18 +59,9 @@ jobs:
           mkdir -p sim-out
           cp .pio/build/fw/firmware.bin sim-out/ams_a_060.bin
 
-      # A skip here would mean the image test did not run; treat it as failure,
-      # the same rule host-tests.yml applies.
-      - name: Simulator tests
-        env:
-          BMCU_SIM_IMAGE: sim-out/ams_a_060.bin
-        run: |
-          set -o pipefail
-          python -m unittest discover -s sim/tests -t . -v 2>&1 | tee sim-tests.log
-          if grep -qE '\.\.\. skipped|\(skipped=[0-9]+\)' sim-tests.log; then
-            echo "::error::a simulator test was skipped"
-            exit 1
-          fi
+      - name: List the test shards
+        id: shards
+        run: echo "names=$(python -m sim.shard --names)" >> "$GITHUB_OUTPUT"
 
       - name: Record a trace
         run: python -m sim.run sim-out/ams_a_060.bin --seconds 8 --trace sim-out/trace.jsonl
@@ -77,3 +71,46 @@ jobs:
           name: sim-trace-${{ github.sha }}
           path: sim-out/
           retention-days: 14
+
+  # Each firmware test class boots the image from reset, most after a full
+  # calibration run, so the heavy classes get a runner each (sim/shard.py).
+  tests:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-unicorn-2.1.1
+      - name: Install Unicorn
+        run: python -m pip install "unicorn==2.1.1"
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-trace-${{ github.sha }}
+          path: sim-out/
+      - name: Simulator tests (${{ matrix.shard }})
+        env:
+          BMCU_SIM_IMAGE: sim-out/ams_a_060.bin
+        run: python -m sim.shard "${{ matrix.shard }}"
+
+  # The required status check on alpha is named "sim". It stays one job so the
+  # branch protection does not have to list every shard.
+  sim:
+    needs: [build, tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        run: |
+          echo "build=${{ needs.build.result }} tests=${{ needs.tests.result }}"
+          test "${{ needs.build.result }}" = success
+          test "${{ needs.tests.result }}" = success
