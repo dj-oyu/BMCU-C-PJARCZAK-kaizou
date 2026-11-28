@@ -15,6 +15,7 @@
       "18": "ping",
       "23": "get_full_status",
       "24": "request_soft_reset",
+      "25": "set_long_reply",
       "114": "pong",
       "115": "full_status_record",
       "127": "ack"

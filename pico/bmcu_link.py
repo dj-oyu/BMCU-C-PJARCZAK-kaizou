@@ -14,6 +14,9 @@ SYNC = b"\xa5\x5a"
 MAX_DECODER_BUFFER = 128
 VERSION_ALPHA3 = 0x83
 MAX_PAYLOAD = 57
+# SET_LONG_REPLY bounds: 5 header bytes + 8 + 32 stays inside MAX_PAYLOAD.
+LONG_REPLY_MAX_MATCH = 8
+LONG_REPLY_MAX_REPLY = 32
 STATUS_PAYLOAD_SIZE = 31
 # 27 is the pre-channel-flags encoding. Both are accepted so the bridge and the
 # BMCU can be updated independently: requiring 31 exactly means two BMCUs and a
@@ -45,6 +48,7 @@ SET_LED_MODE = 0x11
 PING = 0x12
 GET_FULL_STATUS = 0x17
 REQUEST_SOFT_RESET = 0x18
+SET_LONG_REPLY = 0x19
 PONG = 0x72
 FULL_STATUS_RECORD = 0x73
 ACK = 0x7f
@@ -358,6 +362,7 @@ class BMCUMonitor:
         self.ams_service = None
         self.ams_registration = None
         self.soft_reset = None
+        self.long_reply = None
         self._snapshot_parts = None
         self._snapshot_count = 0
         self._snapshot_id = None
@@ -519,6 +524,35 @@ class BMCUMonitor:
         self.soft_reset = {
             "operation_id": operation_id, "reason": reason, "ttl_ms": ttl_ms,
             "sequence": sequence, "state": "requested", "ack_result": None,
+        }
+        return sequence
+
+    def request_long_reply(self, frame_type, match=b"", reply=b"", clear=False,
+                           now_ms=None):
+        """Ask the BMCU to answer a printer long frame from a RAM table.
+
+        SET_LONG_REPLY payload, docs/BMCU_LINK_PROTOCOL_ALPHA3.md section 5.5:
+        type:u16 | flags:u8 (bit 0 = clear) | match_len:u8 | reply_len:u8 |
+        match[match_len] | reply[reply_len]. The Pico only carries the bytes;
+        what to answer is the caller's decision.
+        """
+        if not 0 <= frame_type <= 0xFFFF:
+            raise ValueError("type must be a u16")
+        if len(match) > LONG_REPLY_MAX_MATCH:
+            raise ValueError("match is at most %d bytes" % LONG_REPLY_MAX_MATCH)
+        if len(reply) > LONG_REPLY_MAX_REPLY:
+            raise ValueError("reply is at most %d bytes" % LONG_REPLY_MAX_REPLY)
+        if clear and reply:
+            raise ValueError("clear takes no reply")
+        if not clear and not reply:
+            raise ValueError("reply required")
+        payload = struct.pack("<HBBB", frame_type, 1 if clear else 0,
+                              len(match), len(reply)) + bytes(match) + bytes(reply)
+        sequence = self._send(SET_LONG_REPLY, payload)
+        self.long_reply = {
+            "sequence": sequence, "type": frame_type, "clear": bool(clear),
+            "match_len": len(match), "reply_len": len(reply),
+            "sent_ms": self._clock_ms if now_ms is None else now_ms, "state": "sent", "ack_result": None,
         }
         return sequence
 
@@ -741,6 +775,10 @@ class BMCUMonitor:
             if payload[0] == REQUEST_SOFT_RESET and self.soft_reset is not None:
                 self.soft_reset["ack_result"] = payload[1]
                 self.soft_reset["state"] = "scheduled" if payload[1] == 0 else "rejected"
+            if (payload[0] == SET_LONG_REPLY and self.long_reply is not None and
+                    message.get("sequence") == self.long_reply["sequence"]):
+                self.long_reply["ack_result"] = payload[1]
+                self.long_reply["state"] = "applied" if payload[1] == 0 else "rejected"
         elif kind == FULL_STATUS_RECORD and len(payload) == 26:
             self._handle_snapshot(payload, message, now_ms)
         else:

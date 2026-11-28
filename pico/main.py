@@ -19,6 +19,7 @@ from bmcu_link import BMCUMonitor, drain_monitors
 from bmcu_stream_udp import BMS2UDPClient
 from device_metrics import DeviceMetrics, rp2_temperature_milli_c
 from local_reset import LocalReset
+from long_reply import LongReplyAPI
 from runtime_log import PicoRuntimeLog
 from transport_settings import TransportSettingsAPI, TransportSettingsStore
 from uart_dma_rx import (DEFAULT_RING_BYTES as DMA_DEFAULT_RING_BYTES,
@@ -215,9 +216,19 @@ local_reset = LocalReset(
     on_event=lambda message: runtime_log.info("control", message))
 
 
+long_reply_api = LongReplyAPI(
+    monitors, tuple(item["id"] for item in link_configs),
+    getattr(secrets, "BMCU_CONTROL_TOKEN", None), time.ticks_ms,
+    ticks_diff=time.ticks_diff,
+    on_event=lambda message: runtime_log.info("control", message))
+if long_reply_api.token is None:
+    runtime_log.info("control", "long-reply off: no BMCU_CONTROL_TOKEN")
+
+
 def settings_api(method, path, headers, body):
     return transport_api.handle(method, path, headers, body) or \
-        local_reset.handle(method, path, headers, body)
+        local_reset.handle(method, path, headers, body) or \
+        long_reply_api.handle(method, path, headers, body)
 
 
 def wifi_event(message):
