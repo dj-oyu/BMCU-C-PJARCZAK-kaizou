@@ -17,8 +17,7 @@ enum Kind : uint8_t
     KIND_PRINTER_TRANSACTION = 0x04u, KIND_SENSOR_RECORD = 0x05u,
     KIND_GET_STATUS = 0x10u, KIND_SET_LED_MODE = 0x11u, KIND_PING = 0x12u,
     KIND_GET_FULL_STATUS = 0x17u, KIND_REQUEST_SOFT_RESET = 0x18u,
-    // Reserved for the Pico's long-reply table request. No handler yet: the
-    // firmware answers it ACK_UNSUPPORTED like any unknown kind.
+    // A reply for a printer long frame no handler knows (long_reply_table.h).
     KIND_SET_LONG_REPLY = 0x19u,
     KIND_PONG = 0x72u, KIND_FULL_STATUS_RECORD = 0x73u, KIND_ACK = 0x7Fu,
 };

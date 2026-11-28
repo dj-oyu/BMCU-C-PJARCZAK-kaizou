@@ -74,7 +74,7 @@ renumbered or reused. New values may be appended.
 | `0x12` | `PING` | Pico → BMCU | implemented |
 | `0x17` | `GET_FULL_STATUS` | Pico → BMCU | implemented |
 | `0x18` | `REQUEST_SOFT_RESET` | Pico → BMCU | implemented; hardware validation pending |
-| `0x19` | `SET_LONG_REPLY` | Pico → BMCU | Pico sends; firmware answers `ACK_UNSUPPORTED` (no handler yet) |
+| `0x19` | `SET_LONG_REPLY` | Pico → BMCU | implemented; hardware validation pending |
 | `0x72` | `PONG` | BMCU → Pico | implemented |
 | `0x73` | `FULL_STATUS_RECORD` | BMCU → Pico | implemented |
 | `0x7F` | `ACK` | BMCU → Pico | implemented |
@@ -215,10 +215,25 @@ payload. `flags` bit 0 clears that type's entry, and then `reply_len` is 0;
 other bits are 0. `match_len` is at most 8 and `reply_len` at most 32.
 
 The Pico sends it on request from the token-gated local route of
-BMCU_MONITOR_STREAM_V2.md §7.4 and tracks the `ACK` by sequence. The firmware
-has no handler yet and answers `ACK_UNSUPPORTED` like any unknown kind. A future
-handler must keep the table in RAM only, so a BMCU power cycle always returns it
-to answering nothing.
+BMCU_MONITOR_STREAM_V2.md §7.4 and tracks the `ACK` by sequence.
+
+The BMCU keeps eight entries (`src/long_reply_table.h`), in RAM only, so a
+power cycle always returns it to answering nothing. A set replaces the entry
+with the same `type` and `match`, or takes a free one. A clear without `match`
+drops every entry of that type, with `match` only that one. The answer is
+`ACK_OK`, `ACK_BAD_VALUE` for a malformed payload, or `ACK_DENIED` when all
+eight entries are taken.
+
+Only a long frame addressed to the AMS (`0x0700`) that no handler knows is
+looked up; a type the firmware answers itself is never overridden. When
+several entries match, the longest `match` wins. The reply goes out with the
+frame's type and package number and the addresses swapped, and the
+transaction reads `REPLIED`. Every such reply is reported as a
+`PRINTER_LONG_TRANSACTION` event.
+
+Both BMCUs on the bus see every frame. An entry that matches a frame meant for
+the other unit makes both answer at once, so `match` is how a caller keeps
+each unit to its own frames.
 
 ## 6. Full status synchronization
 

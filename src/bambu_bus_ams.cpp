@@ -1323,6 +1323,29 @@ bambubus_package_type bambubus_run()
                 break;
 
             default:
+                // A long frame addressed to the AMS that no handler knows. The
+                // Pico may have supplied an answer for it (SET_LONG_REPLY);
+                // without one it stays IGNORED/UNSUPPORTED as before.
+                if (stu == bambubus_package_type::ETC && len >= 15 &&
+                    (buf[1] == 0x04u || buf[1] == 0x05u))
+                {
+                    const uint8_t* reply = nullptr;
+                    uint8_t reply_length = 0u;
+                    if (bmcu_link_long_reply(printer_data_long.type, printer_data_long.datas,
+                                             printer_data_long.data_length, &reply,
+                                             &reply_length))
+                    {
+                        handler_dispatched = true;
+                        bambubus_long_packge_data data;
+                        data.datas = const_cast<uint8_t*>(reply);
+                        data.data_length = reply_length;
+                        data.package_number = printer_data_long.package_number;
+                        data.type = printer_data_long.type;
+                        data.source_address = printer_data_long.target_address;
+                        data.target_address = printer_data_long.source_address;
+                        bambubus_long_package_get(&data);
+                    }
+                }
                 break;
             }
 

@@ -2,6 +2,7 @@
 #include "bmcu_link_protocol.h"
 #include "pressure_event_policy.h"
 #include "bmcu_soft_reset_policy.h"
+#include "long_reply_table.h"
 #include "bmcu_ams_service_watch.h"
 #include "printer_motion_watch.h"
 #include "_bus_hardware.h"
@@ -197,6 +198,8 @@ struct LongPayloadCapture
     uint8_t seen_used;
 };
 LongPayloadCapture g_long_capture = {};
+// SET_LONG_REPLY entries. RAM only: a power cycle forgets every reply.
+long_reply_table::Table g_long_reply = {};
 uint32_t g_printer_foreign_count = 0u;
 bmcu_ams_service::Watch g_ams_service = {};
 uint8_t g_status_cache_valid = 0u;
@@ -1144,6 +1147,17 @@ void handle_frame(const uint8_t* raw, uint8_t length)
         }
         break;
 
+    case KIND_SET_LONG_REPLY:
+    {
+        const long_reply_table::Result result =
+            long_reply_table::apply(g_long_reply, payload, payload_length);
+        send_ack(sequence, kind,
+                 result == long_reply_table::Result::ok ? ACK_OK
+                 : result == long_reply_table::Result::full ? ACK_DENIED
+                                                            : ACK_BAD_VALUE);
+        break;
+    }
+
     case KIND_REQUEST_SOFT_RESET:
         if (payload_length != 8u)
         {
@@ -1702,7 +1716,11 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
     if (unsupported || type == 0x040Du || type == 0x040Eu)
         long_capture_offer(type, payload_hash, payload, payload_length);
 
-    const bool notable = type == 0x040Du || type == 0x040Eu || unsupported ||
+    // A frame answered from the SET_LONG_REPLY table is an experiment in
+    // progress: report every one, like the unanswered frames it replaces.
+    const bool table_reply = outcome == OUTCOME_REPLIED &&
+        long_reply_table::find(g_long_reply, type, payload, payload_length) != nullptr;
+    const bool notable = type == 0x040Du || type == 0x040Eu || unsupported || table_reply ||
                          outcome == OUTCOME_REJECTED || outcome == OUTCOME_FAILED;
     if (!notable) return;
 
@@ -1722,6 +1740,17 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
         ? 0xFFu : static_cast<uint8_t>(response_length);
     record.payload.printer_long_transaction.payload_hash = payload_hash;
     push_log_record(record);
+}
+
+bool bmcu_link_long_reply(uint16_t type, const uint8_t* payload, uint16_t payload_length,
+                          const uint8_t** reply, uint8_t* reply_length)
+{
+    const long_reply_table::Entry* e =
+        long_reply_table::find(g_long_reply, type, payload, payload_length);
+    if (e == nullptr) return false;
+    *reply = e->reply;
+    *reply_length = e->reply_len;
+    return true;
 }
 
 void bmcu_link_ams_service_poll(void)

@@ -45,6 +45,7 @@
 #include <stdint.h>
 
 #include "bambu_bus_ams.h"
+#include "long_reply_table.h"
 
 namespace host_bus
 {
@@ -167,6 +168,10 @@ extern int reply_count;
 
 extern bambubus_package_type last_type;
 
+// What bmcu_link_long_reply answers from: the real table code over a fixture
+// table, which a test fills with long_reply_table::apply. reset() empties it.
+extern long_reply_table::Table long_reply;
+
 // Whether run() should renew the printer heartbeat before each poll. True by
 // default; clear it to drive the heartbeat-loss path.
 extern bool heartbeat_alive;
@@ -198,6 +203,10 @@ int poll_motion_short(uint8_t ams_num, uint8_t statu_flag, uint8_t channel,
                       uint8_t motion_flag);
 int poll_motion_long(uint8_t ams_num, uint8_t statu_flag, uint8_t motion_flag,
                      uint8_t channel);
+
+// Build a printer long frame to the AMS (dst 0x0700, src 0x0600), CRC it with
+// the firmware's own package_add_crc and publish it.
+void publish_long(uint16_t type, const uint8_t* payload, int length);
 
 uint8_t merger_stage(void);
 uint8_t merger_owner(void);

@@ -174,6 +174,17 @@ void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t 
     t.payload_hash = payload_hash;
 }
 
+bool bmcu_link_long_reply(uint16_t type, const uint8_t* payload, uint16_t payload_length,
+                          const uint8_t** reply, uint8_t* reply_length)
+{
+    const long_reply_table::Entry* e =
+        long_reply_table::find(host_bus::long_reply, type, payload, payload_length);
+    if (e == nullptr) return false;
+    *reply = e->reply;
+    *reply_length = e->reply_len;
+    return true;
+}
+
 void bmcu_link_ams_service_poll(void) {}
 
 void bmcu_link_printer_motion_cmd(uint8_t kind, uint8_t ams_num, uint8_t channel,
@@ -336,6 +347,7 @@ void reset(void)
     for (uint8_t i = 0u; i < 4u; ++i) g_meters[i] = 1.0f;
 
     bus_port_to_host.init(host_port_send_datas);
+    memset(&long_reply, 0, sizeof(long_reply));
 
     // bambubus_init() is deliberately NOT called, and this is the one blocker
     // that is inside bambu_bus_ams.cpp rather than behind an include.
@@ -444,6 +456,28 @@ void publish_motion_long(uint8_t ams_num, uint8_t statu_flag, uint8_t motion_fla
 }
 
 bool heartbeat_alive = true;
+
+long_reply_table::Table long_reply = {};
+
+void publish_long(uint16_t type, const uint8_t* payload, int length)
+{
+    uint8_t f[64];
+    memset(f, 0, sizeof(f));
+    const int total = 13 + length + 2;
+    f[0] = 0x3Du;
+    f[1] = 0x05u;
+    f[4] = static_cast<uint8_t>(total);
+    f[5] = static_cast<uint8_t>(total >> 8);
+    f[7] = 0x00u;
+    f[8] = 0x07u;   // target 0x0700, the AMS
+    f[9] = 0x00u;
+    f[10] = 0x06u;  // source 0x0600
+    f[11] = static_cast<uint8_t>(type);
+    f[12] = static_cast<uint8_t>(type >> 8);
+    memcpy(f + 13, payload, (size_t)length);
+    package_add_crc(f, total);
+    publish(f, total);
+}
 
 int run(void)
 {

@@ -78,6 +78,15 @@ def schedule(m, world, printer, events, pico=None):
             while k == 0 or (every and t + k * every < ev["until"]):
                 _at(m, t + k * (every or 0), lambda: pico.monitor.get_full_status())
                 k += 1
+        elif do == "long_reply":
+            # The Pico's SET_LONG_REPLY, as the token-gated HTTP route sends it.
+            if pico is None:
+                raise ValueError("long_reply needs the monitor link")
+            args = (int(ev["long_type"]),
+                    bytes.fromhex(ev.get("match", "").replace(" ", "")),
+                    bytes.fromhex(ev.get("reply", "").replace(" ", "")),
+                    bool(ev.get("clear", False)))
+            _at(m, t, lambda a=args: pico.monitor.request_long_reply(*a))
         elif do == "calibration_gesture":
             calibration_gesture(m, world, t, float(ev.get("until", t + 40)))
         else:

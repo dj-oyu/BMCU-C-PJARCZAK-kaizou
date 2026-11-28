@@ -108,6 +108,10 @@ void bmcu_link_printer_transaction(uint8_t rx_class, uint8_t command, uint8_t ou
 void bmcu_link_printer_long_transaction(uint16_t type, uint8_t outcome, uint8_t reason,
                                         const uint8_t* payload, uint16_t payload_length,
                                         uint16_t response_length, uint8_t payload_hash);
+// The SET_LONG_REPLY entry for a printer long frame, if one matches. The reply
+// stays valid until the next link frame is handled; copy it before then.
+bool bmcu_link_long_reply(uint16_t type, const uint8_t* payload, uint16_t payload_length,
+                          const uint8_t** reply, uint8_t* reply_length);
 // Observe-only AMS service/registration instrumentation (issue #3 phase 1).
 // These only feed diagnostic telemetry; nothing they record is ever read back
 // into a printer-bus decision. Main-loop context only.
